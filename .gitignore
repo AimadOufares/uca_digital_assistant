@@ -18,3 +18,7 @@ ENV/
 *.py[cod]
 db.sqlite3
 media/
+
+
+# Dossier de données
+data_storage/
