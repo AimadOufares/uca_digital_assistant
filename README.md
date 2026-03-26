@@ -1,8 +1,3 @@
-Voici le **fichier README.md complet et enrichi**, prêt à copier-coller directement sur GitHub.
-
-Tu peux le copier entièrement et le coller dans ton fichier `README.md` :
-
-```markdown
 # UCA Assistant Project
 
 ![Python](https://img.shields.io/badge/Python-3.10%2B-blue?style=for-the-badge&logo=python)
