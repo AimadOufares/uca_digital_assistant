@@ -13,20 +13,21 @@ from bs4 import BeautifulSoup
 from typing import Dict, List, Optional
 
 # ==============================
-# CONFIGURATION PERFORMANTE
+# CONFIGURATION
 # ==============================
 RAW_DATA_PATH = "data_storage/raw"
 TIMEOUT = 25
-MAX_HTML_WORKERS = 5          # Workers pour pages HTML (Playwright est lourd)
-MAX_DOC_WORKERS = 8           # Workers pour documents (plus légers)
+MAX_HTML_WORKERS = 5
+MAX_DOC_WORKERS = 8
 RETRIES = 3
 PLAYWRIGHT_WAIT = 3500
-
 MAX_DEPTH = 4
-MAX_TOTAL_URLS = 800          # Augmenté pour profiter de la performance
+MAX_TOTAL_URLS = 800
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36"
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                  "AppleWebKit/537.36 (KHTML, like Gecko) "
+                  "Chrome/134.0.0.0 Safari/537.36"
 }
 
 os.makedirs(RAW_DATA_PATH, exist_ok=True)
@@ -72,9 +73,7 @@ def compute_hash(content: bytes) -> str:
 def is_valid_html(content: bytes) -> bool:
     try:
         text = content.decode('utf-8', errors='ignore').lower()
-        return (len(text) >= 800 and 
-                ("<html" in text or "<!doctype" in text) and 
-                "404 not found" not in text[:600])
+        return (len(text) >= 800 and ("<html" in text or "<!doctype" in text) and "404 not found" not in text[:600])
     except:
         return False
 
@@ -89,7 +88,7 @@ def save_file(content: bytes, filename: str) -> str:
     return filepath
 
 # ==============================
-# FILTRAGE MULTIPLE
+# FILTRAGE
 # ==============================
 def should_accept_url(url: str, base: str = None) -> Optional[str]:
     if not url:
@@ -121,30 +120,52 @@ def is_document_url(url: str) -> bool:
 # EXTRACTION DE LIENS
 # ==============================
 def extract_links(content: bytes, base_url: str) -> List[str]:
-    if not content:
-        return []
     try:
         soup = BeautifulSoup(content.decode("utf-8", errors="ignore"), "lxml")
         links = set()
-        for tag in soup.find_all(["a", "link", "iframe", "embed"], href=True):
+        for tag in soup.find_all(["a", "link", "iframe", "embed"]):
             href = tag.get("href") or tag.get("src")
-            if href:
-                full = should_accept_url(href, base_url)
-                if full:
-                    links.add(full)
+            full = should_accept_url(href, base_url)
+            if full:
+                links.add(full)
         return list(links)
     except Exception as e:
         logger.warning(f"Extraction liens échouée : {e}")
         return []
 
 # ==============================
-# DOWNLOAD (multi-thread safe)
+# PLAYWRIGHT MANAGER
 # ==============================
-def download_source(url: str, is_doc: bool = False) -> Dict:
+class PlaywrightManager:
+    def __init__(self):
+        self.playwright = sync_playwright().start()
+        self.browser = self.playwright.chromium.launch(headless=True)
+
+    def fetch_page(self, url: str, wait_ms: int = PLAYWRIGHT_WAIT) -> Optional[bytes]:
+        try:
+            page = self.browser.new_page()
+            page.goto(url, wait_until="domcontentloaded", timeout=60000)
+            page.wait_for_timeout(wait_ms)
+            page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            page.wait_for_timeout(1200)
+            content = page.content().encode("utf-8")
+            page.close()
+            return content
+        except Exception as e:
+            logger.warning(f"Playwright fetch échoué pour {url}: {e}")
+            return None
+
+    def close(self):
+        self.browser.close()
+        self.playwright.stop()
+
+# ==============================
+# DOWNLOAD SOURCE
+# ==============================
+def download_source(url: str, is_doc: bool = False, pw_manager: PlaywrightManager = None) -> Dict:
     for attempt in range(RETRIES):
         try:
             logger.info(f"[{attempt+1}/{RETRIES}] {'📄 Doc' if is_doc else '🌐 HTML'} → {url[:80]}...")
-
             response = requests.get(url, headers=HEADERS, timeout=TIMEOUT, allow_redirects=True)
             if response.status_code != 200:
                 raise Exception(f"HTTP {response.status_code}")
@@ -153,18 +174,17 @@ def download_source(url: str, is_doc: bool = False) -> Dict:
             content_type = response.headers.get("Content-Type", "").lower()
             content = response.content
 
-            # Playwright pour contenu dynamique
-            if not is_doc and ("uca.ma" in final_url or len(response.text) < 1500):
-                with sync_playwright() as p:
-                    browser = p.chromium.launch(headless=True)
-                    page = browser.new_page()
-                    page.goto(final_url, wait_until="domcontentloaded", timeout=60000)
-                    page.wait_for_timeout(PLAYWRIGHT_WAIT)
-                    page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                    page.wait_for_timeout(1200)
-                    content = page.content().encode("utf-8")
-                    browser.close()
-                source = "playwright"
+            if not is_doc and (len(content) < 1500 or "uca.ma" in final_url):
+                # Playwright fallback
+                if pw_manager:
+                    pw_content = pw_manager.fetch_page(final_url)
+                    if pw_content:
+                        content = pw_content
+                        source = "playwright"
+                    else:
+                        source = "requests"
+                else:
+                    source = "requests"
             else:
                 source = "requests"
 
@@ -188,82 +208,80 @@ def download_source(url: str, is_doc: bool = False) -> Dict:
 
         except Exception as e:
             logger.warning(f"Échec tentative {attempt+1} pour {url}: {e}")
-            if attempt == RETRIES - 1 and not is_doc:
-                logger.info("→ Fallback Playwright...")
-                # fallback simplifié (même logique)
+            time.sleep(2 * (attempt + 1))  # backoff
 
     return {"status": "error", "url": url, "error": "Max retries reached"}
 
 # ==============================
-# CRAWLER PRINCIPAL - 100% MULTI-THREADED
+# CRAWLER
 # ==============================
 def crawl_website(seed_urls: List[str], max_depth: int = MAX_DEPTH, max_total: int = MAX_TOTAL_URLS) -> List[Dict]:
-    to_crawl_queue: queue.Queue = queue.Queue()   # (url, depth)
+    to_crawl_queue: queue.Queue = queue.Queue()
     document_queue: List[str] = []
     visited = set()
     downloaded_results = []
     lock = threading.Lock()
 
-    # Initialisation
     for url in seed_urls:
         norm_url = should_accept_url(url)
-        if norm_url and norm_url not in visited:
+        if norm_url:
             visited.add(norm_url)
             to_crawl_queue.put((norm_url, 0))
 
+    pw_manager = PlaywrightManager()
     start_time = time.time()
-    logger.info(f"🚀 CRAWLER ULTRA-PERFORMANT LANCÉ | HTML Workers: {MAX_HTML_WORKERS} | Doc Workers: {MAX_DOC_WORKERS}")
+    logger.info(f"🚀 CRAWLER LANCÉ | HTML Workers: {MAX_HTML_WORKERS} | Doc Workers: {MAX_DOC_WORKERS}")
 
-    while (not to_crawl_queue.empty() or document_queue) and len(downloaded_results) < max_total:
-        # 1. Téléchargement prioritaire des documents (plus rapide)
-        if document_queue:
-            docs_to_process = document_queue[:MAX_DOC_WORKERS]
-            document_queue = document_queue[MAX_DOC_WORKERS:]
+    try:
+        while (not to_crawl_queue.empty() or document_queue) and len(downloaded_results) < max_total:
+            # Documents
+            if document_queue:
+                docs_to_process = document_queue[:MAX_DOC_WORKERS]
+                document_queue = document_queue[MAX_DOC_WORKERS:]
+                with ThreadPoolExecutor(max_workers=MAX_DOC_WORKERS) as executor:
+                    futures = {executor.submit(download_source, url, True, pw_manager): url for url in docs_to_process}
+                    for future in as_completed(futures):
+                        result = future.result()
+                        downloaded_results.append(result)
+                        with lock:
+                            visited.add(result.get("url"))
 
-            with ThreadPoolExecutor(max_workers=MAX_DOC_WORKERS) as executor:
-                future_to_url = {executor.submit(download_source, url, is_doc=True): url for url in docs_to_process}
-                for future in as_completed(future_to_url):
+            # HTML pages
+            if to_crawl_queue.empty():
+                break
+            batch_size = min(MAX_HTML_WORKERS, to_crawl_queue.qsize())
+            batch = [to_crawl_queue.get() for _ in range(batch_size)]
+            with ThreadPoolExecutor(max_workers=MAX_HTML_WORKERS) as executor:
+                futures = {executor.submit(download_source, url, False, pw_manager): (url, depth) for url, depth in batch}
+                for future in as_completed(futures):
                     result = future.result()
                     downloaded_results.append(result)
-                    with lock:
-                        visited.add(result.get("url"))
+                    url, depth = futures[future]
 
-        # 2. Crawl des pages HTML
-        if to_crawl_queue.empty():
-            break
+                    if result.get("status") == "success" and result.get("type") == "html" and depth < max_depth:
+                        new_links = extract_links(result.get("content"), url)
+                        for link in new_links:
+                            if link not in visited:
+                                with lock:
+                                    if len(visited) < max_total * 1.2:
+                                        visited.add(link)
+                                        if is_document_url(link):
+                                            document_queue.append(link)
+                                        else:
+                                            to_crawl_queue.put((link, depth + 1))
 
-        batch_size = min(MAX_HTML_WORKERS, to_crawl_queue.qsize())
-        batch = [to_crawl_queue.get() for _ in range(batch_size)]
+            progress = len(downloaded_results)
+            print(f"📈 Progress: {progress}/{max_total} | Queue HTML: {to_crawl_queue.qsize()} | Docs: {len(document_queue)}")
 
-        with ThreadPoolExecutor(max_workers=MAX_HTML_WORKERS) as executor:
-            future_to_item = {executor.submit(download_source, url): (url, depth) for url, depth in batch}
-            for future in as_completed(future_to_item):
-                result = future.result()
-                downloaded_results.append(result)
-                url, depth = future_to_item[future]
-
-                if result.get("status") == "success" and result.get("type") == "html" and depth < max_depth:
-                    new_links = extract_links(result.get("content"), url)
-                    for link in new_links:
-                        if link not in visited:
-                            with lock:
-                                if link not in visited and len(visited) < max_total * 1.2:
-                                    visited.add(link)
-                                    if is_document_url(link):
-                                        document_queue.append(link)
-                                    else:
-                                        to_crawl_queue.put((link, depth + 1))
-
-        progress = len(downloaded_results)
-        print(f"   📈 Progress: {progress}/{max_total} | Queue HTML: {to_crawl_queue.qsize()} | Docs en attente: {len(document_queue)}")
+    finally:
+        pw_manager.close()
 
     elapsed = time.time() - start_time
     success = sum(1 for r in downloaded_results if r.get("status") == "success")
-    pdf_count = sum(1 for r in downloaded_results if r.get("url", "").lower().endswith('.pdf'))
+    pdf_count = sum(1 for r in downloaded_results if r.get("url", "").lower().endswith(('.pdf', '.docx')))
+    logger.info(f"🏁 CRAWL TERMINÉ en {elapsed:.1f}s | {success} succès sur {len(downloaded_results)}")
 
-    logger.info(f"🏁 CRAWL TERMINÉ en {elapsed:.1f} secondes ! {success} succès sur {len(downloaded_results)} tentatives.")
     print(f"\n🎯 Résumé : {success} fichiers | {pdf_count} PDF/DOCX | Temps total : {elapsed:.1f}s")
-
     return downloaded_results
 
 # ==============================
@@ -271,7 +289,7 @@ def crawl_website(seed_urls: List[str], max_depth: int = MAX_DEPTH, max_total: i
 # ==============================
 if __name__ == "__main__":
     test_urls = [
-        "https://www.uca.ma/", 
+        "https://www.uca.ma/",
         "https://www.uca.ma/fr",
         "https://www.uca.ma/fr/etablissements",
         "https://ecampus-fssm.uca.ma",
@@ -283,6 +301,5 @@ if __name__ == "__main__":
         "https://ensas.uca.ma/",
         "https://pedoc.uca.ma/",
     ]
-
-    print("🔥 Lancement du CRAWLER ULTRA-PERFORMANT (100% multi-threaded)\n")
+    print("🔥 Lancement du CRAWLER ULTRA-PERFORMANT (Playwright optimisé)\n")
     results = crawl_website(test_urls, max_depth=MAX_DEPTH, max_total=MAX_TOTAL_URLS)
