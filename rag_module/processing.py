@@ -3,252 +3,320 @@ import os
 import re
 import json
 import hashlib
+import logging
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import List, Dict
-import logging
 
-from bs4 import BeautifulSoup
 import pdfplumber
 import docx
+from bs4 import BeautifulSoup
 from tiktoken import encoding_for_model
 from html import unescape
-from langdetect import detect
+from langdetect import detect, LangDetectException
+import unicodedata
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ===================== CONFIG =====================
 RAW_PATH = "data_storage/raw"
 PROCESSED_PATH = "data_storage/processed"
-CACHE_FILE = "data_storage/file_cache.json"
+CACHE_FILE = "data_storage/cache/file_cache.json"
 
-CHUNK_TOKENS = 512
+CHUNK_TOKENS = 500
 OVERLAP_TOKENS = 80
+MIN_WORDS = 8
+MIN_QUALITY_SCORE = 25          # Nouveau : seuil de qualité
+
 LLM_MODEL = "gpt-4o-mini"
 
-# Logging
+# ===================== LOGGING =====================
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s | %(levelname)s | %(name)s | %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
+    format='%(asctime)s | %(levelname)s | %(message)s'
 )
 logger = logging.getLogger(__name__)
 
-# ===================== GLOBAL TOKENIZER =====================
+# ===================== TOKENIZER =====================
 ENCODER = encoding_for_model(LLM_MODEL)
 
-# ===================== UTILITAIRES =====================
+# ===================== UTILS =====================
 def clean_text(text: str) -> str:
     if not text:
         return ""
+    text = unicodedata.normalize('NFKC', text)
     text = unescape(text)
+    text = re.sub(r'[\u200b\u200c\u200d\ufeff]+', '', text)
     text = re.sub(r'\s+', ' ', text)
     return text.strip()
+
 
 def hash_text(text: str) -> str:
     return hashlib.sha256(text.encode('utf-8')).hexdigest()
 
+
 def hash_file(file_path: str) -> str:
-    hasher = hashlib.sha256()
-    with open(file_path, 'rb') as f:
-        for chunk in iter(lambda: f.read(4096), b""):
-            hasher.update(chunk)
-    return hasher.hexdigest()
+    h = hashlib.sha256()
+    with open(file_path, "rb") as f:
+        for chunk in iter(lambda: f.read(8192), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def safe_detect_lang(text: str) -> str:
+    if len(text.split()) < 30:
+        return "unknown"
+    try:
+        return detect(text[:1000])
+    except LangDetectException:
+        return "unknown"
+
+
+def quality_score(text: str) -> int:
+    """Score simple pour évaluer la qualité d’un chunk"""
+    if not text:
+        return 0
+    length = len(text.split())
+    punctuation = len(re.findall(r'[.!?]', text))
+    return length + punctuation * 2
+
 
 # ===================== EXTRACTION =====================
-def extract_text_html(file_path: str) -> str:
+def extract_text_html(path: str) -> str:
     try:
-        with open(file_path, 'r', encoding='utf-8') as f:
-            soup = BeautifulSoup(f, 'html.parser')
-        for tag in soup(['script', 'style', 'header', 'footer', 'nav', 'aside', 'form']):
+        with open(path, encoding="utf-8") as f:
+            soup = BeautifulSoup(f, "html.parser")
+        
+        for tag in soup(["script", "style", "nav", "footer", "header", "aside"]):
             tag.decompose()
-        main = soup.find(['main','article']) or soup.body or soup
-        text = ""
-        for tag in main.find_all(['h1','h2','h3','p','li']):
-            text += tag.get_text(separator=' ') + "\n"
-        return text
+        
+        main = soup.find(["main", "article"]) or soup.body or soup
+        texts = [
+            tag.get_text(" ", strip=True)
+            for tag in main.find_all(["h1", "h2", "h3", "h4", "p", "li", "td"])
+            if tag.get_text(strip=True)
+        ]
+        return "\n\n".join(texts)
     except Exception as e:
-        logger.error(f"Erreur extraction HTML {file_path}: {e}")
+        logger.warning(f"HTML extraction error {path}: {e}")
         return ""
 
-def extract_text_pdf(file_path: str) -> str:
-    text = ""
-    try:
-        with pdfplumber.open(file_path) as pdf:
-            for i, page in enumerate(pdf.pages):
-                page_text = page.extract_text(x_tolerance=3, y_tolerance=3)
-                if page_text:
-                    text += f"\n--- Page {i+1} ---\n{page_text}\n"
-    except Exception as e:
-        logger.error(f"Erreur extraction PDF {file_path}: {e}")
-    return text
 
-def extract_text_docx(file_path: str) -> str:
+def extract_text_pdf(path: str) -> str:
+    text_parts = []
     try:
-        doc = docx.Document(file_path)
-        paragraphs = [p.text for p in doc.paragraphs if p.text.strip()]
-        return "\n".join(paragraphs)
+        with pdfplumber.open(path) as pdf:
+            for page_num, page in enumerate(pdf.pages, 1):
+                # Texte principal
+                t = page.extract_text()
+                if t:
+                    text_parts.append(t)
+                
+                # Tables
+                tables = page.extract_tables()
+                for table in tables:
+                    if table and any(any(cell for cell in row) for row in table):
+                        md_table = "\n".join(
+                            [" | ".join(str(cell) if cell is not None else "" for cell in row) 
+                             for row in table]
+                        )
+                        text_parts.append(f"\n[TABLE_PAGE_{page_num}]\n{md_table}\n[/TABLE]\n")
     except Exception as e:
-        logger.error(f"Erreur extraction DOCX {file_path}: {e}")
+        logger.warning(f"PDF extraction error {path}: {e}")
+    return "\n\n".join(text_parts)
+
+
+def extract_text_docx(path: str) -> str:
+    try:
+        doc = docx.Document(path)
+        paragraphs = [p.text.strip() for p in doc.paragraphs if p.text.strip()]
+        return "\n\n".join(paragraphs)
+    except Exception as e:
+        logger.warning(f"DOCX extraction error {path}: {e}")
         return ""
 
-def extract_text_plain(file_path: str) -> str:
+
+def extract_text_plain(path: str) -> str:
     try:
-        with open(file_path, 'r', encoding='utf-8') as f:
-            return f.read()
+        return Path(path).read_text(encoding="utf-8")
     except Exception as e:
-        logger.error(f"Erreur extraction texte brut {file_path}: {e}")
+        logger.warning(f"Plain text extraction error {path}: {e}")
         return ""
 
-# ===================== SEMANTIC CHUNKING =====================
+
+# ===================== CHUNKING =====================
 def split_sentences(text: str) -> List[str]:
     return re.split(r'(?<=[.!?])\s+', text)
 
-def split_into_chunks(text: str, chunk_tokens: int = CHUNK_TOKENS, overlap: int = OVERLAP_TOKENS) -> List[str]:
-    if not text.strip():
-        return []
 
-    sentences = split_sentences(text)
+def recursive_chunk(text: str, chunk_size: int = CHUNK_TOKENS, overlap_tokens: int = OVERLAP_TOKENS) -> List[str]:
+    text = clean_text(text)
+    if len(ENCODER.encode(text)) <= chunk_size:
+        return [text] if len(text.split()) >= MIN_WORDS else []
+
+    paragraphs = [p.strip() for p in re.split(r'\n\s*\n', text) if p.strip()]
+    
     chunks = []
-    current = ""
+    current = []
+    current_tokens = 0
 
-    for s in sentences:
-        candidate = (current + " " + s).strip()
-        if len(ENCODER.encode(candidate)) <= chunk_tokens:
-            current = candidate
-        else:
-            if current:
-                chunks.append(current)
-            current = s
+    for para in paragraphs:
+        sentences = split_sentences(para)
+        for sent in sentences:
+            sent = sent.strip()
+            if not sent:
+                continue
+                
+            sent_tokens = len(ENCODER.encode(sent))
 
+            # Si on dépasse la taille, on sauvegarde le chunk actuel
+            if current_tokens + sent_tokens > chunk_size and current:
+                chunk_text = " ".join(current)
+                if len(chunk_text.split()) >= MIN_WORDS and quality_score(chunk_text) >= MIN_QUALITY_SCORE:
+                    chunks.append(chunk_text)
+                
+                # Overlap intelligent basé sur tokens
+                overlap = []
+                tokens_acc = 0
+                for s in reversed(current):
+                    t_len = len(ENCODER.encode(s))
+                    if tokens_acc + t_len > overlap_tokens:
+                        break
+                    overlap.insert(0, s)
+                    tokens_acc += t_len
+                
+                current = overlap
+                current_tokens = len(ENCODER.encode(" ".join(current)))
+
+            current.append(sent)
+            current_tokens += sent_tokens
+
+    # Dernier chunk
     if current:
-        chunks.append(current)
+        chunk_text = " ".join(current)
+        if len(chunk_text.split()) >= MIN_WORDS and quality_score(chunk_text) >= MIN_QUALITY_SCORE:
+            chunks.append(chunk_text)
 
-    # Ajouter overlap
-    final_chunks = []
-    for i, c in enumerate(chunks):
-        final_chunks.append(c)
-        if i < len(chunks) - 1:
-            overlap_chunk = " ".join(ENCODER.decode(
-                ENCODER.encode(c)[-overlap:] + ENCODER.encode(chunks[i+1])[:overlap]
-            ))
-            final_chunks.append(overlap_chunk)
-    # Filtrer chunks trop petits
-    return [c.strip() for c in final_chunks if len(c.strip().split()) > 5]
+    return chunks
 
-# ===================== PRÉTRAITEMENT FICHIER =====================
+
+# ===================== PROCESS FILE =====================
 def preprocess_file(file_path: str) -> List[Dict]:
-    file_path = str(file_path)
+    """Version simplifiée : on calcule le hash à l'intérieur"""
     ext = Path(file_path).suffix.lower()
-
     extractors = {
         ".html": extract_text_html,
-        ".htm": extract_text_html,
         ".pdf": extract_text_pdf,
         ".docx": extract_text_docx,
         ".txt": extract_text_plain,
         ".md": extract_text_plain,
     }
 
-    extractor = extractors.get(ext)
-    if not extractor:
-        logger.warning(f"Format non supporté : {ext} → {file_path}")
+    if ext not in extractors:
+        logger.warning(f"Format non supporté : {file_path}")
         return []
 
-    text = extractor(file_path)
-    text = clean_text(text)
-    if len(text) < 50:
-        logger.info(f"Fichier ignoré (trop court) : {file_path}")
+    raw_text = extractors[ext](file_path)
+    if not raw_text or len(raw_text.split()) < 50:
         return []
 
-    chunks = split_into_chunks(text)
-    result = []
-    file_hash = hash_file(file_path)
+    cleaned_text = clean_text(raw_text)
+    if len(cleaned_text) < 100:
+        return []
 
-    for idx, chunk in enumerate(chunks):
-        chunk_hash = hash_text(chunk)
-        try:
-            language = detect(chunk)
-        except:
-            language = "unknown"
+    doc_language = safe_detect_lang(cleaned_text)
+    chunks = recursive_chunk(cleaned_text)
+    file_name = Path(file_path).name
+    file_hash = hash_file(file_path)   # Calculé ici une seule fois
 
-        metadata = {
-            "source": file_path,
-            "source_hash": file_hash,
-            "type": ext[1:],
-            "chunk_hash": chunk_hash,
-            "chunk_index": idx,
-            "total_chunks": len(chunks),
-            "date_ingestion": datetime.now(timezone.utc).isoformat(),
-            "chunk_tokens": len(ENCODER.encode(chunk)),
-            "language": language,
-            "length_words": len(chunk.split()),
-        }
+    results = []
+    for i, chunk in enumerate(chunks):
+        results.append({
+            "text": chunk,
+            "text_normalized": chunk.lower(),
+            "quality": quality_score(chunk),
+            "metadata": {
+                "source": str(file_path),
+                "source_hash": file_hash,
+                "chunk_hash": hash_text(chunk),
+                "index": i,
+                "total_chunks": len(chunks),
+                "tokens": len(ENCODER.encode(chunk)),
+                "language": doc_language,
+                "file_name": file_name,
+                "file_type": ext,
+                "is_table": "[TABLE]" in chunk,
+                "date_processed": datetime.now(timezone.utc).isoformat()
+            }
+        })
+    return results
 
-        result.append({"text": chunk, "metadata": metadata})
-
-    logger.info(f"{len(chunks)} chunks générés depuis {file_path}")
-    return result
 
 # ===================== CACHE =====================
-def load_cache() -> Dict[str,str]:
+def load_cache() -> Dict:
     if os.path.exists(CACHE_FILE):
-        with open(CACHE_FILE, 'r', encoding='utf-8') as f:
-            return json.load(f)
+        try:
+            with open(CACHE_FILE, encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {}
     return {}
 
-def save_cache(cache: Dict[str,str]) -> None:
+
+def save_cache(cache: Dict):
     os.makedirs(os.path.dirname(CACHE_FILE), exist_ok=True)
-    with open(CACHE_FILE, 'w', encoding='utf-8') as f:
-        json.dump(cache, f, ensure_ascii=False, indent=2)
+    with open(CACHE_FILE, "w", encoding="utf-8") as f:
+        json.dump(cache, f, indent=2, ensure_ascii=False)
 
-# ===================== PRÉTRAITEMENT GLOBAL =====================
-def preprocess_all(raw_path: str = RAW_PATH, processed_path: str = PROCESSED_PATH, skip_existing: bool = True, max_workers: int = 6) -> None:
-    os.makedirs(processed_path, exist_ok=True)
+
+# ===================== MAIN =====================
+def preprocess_all():
+    os.makedirs(PROCESSED_PATH, exist_ok=True)
     cache = load_cache()
-    seen_chunk_hashes = set()
-    processed_count = 0
+    seen_chunks = {Path(f).stem for f in os.listdir(PROCESSED_PATH) if f.endswith(".json")}
 
-    file_list = []
-    for root, _, files in os.walk(raw_path):
-        for file in files:
-            if file.startswith('.') or file.startswith('~') or file.endswith('.tmp'):
+    files = [
+        os.path.join(root, f)
+        for root, _, fs in os.walk(RAW_PATH)
+        for f in fs if not f.startswith(".")
+    ]
+
+    logger.info(f"{len(files)} fichiers détectés dans {RAW_PATH}")
+
+    with ThreadPoolExecutor(max_workers=6) as executor:
+        future_to_path = {}
+        for f in files:
+            file_hash = hash_file(f)
+            if f in cache and cache[f] == file_hash:
+                logger.info(f"Skip (inchangé) → {Path(f).name}")
                 continue
-            file_list.append(os.path.join(root, file))
+            future_to_path[executor.submit(preprocess_file, f)] = (f, file_hash)
 
-    logger.info(f"Démarrage du prétraitement RAG - {len(file_list)} fichiers détectés")
-
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {executor.submit(preprocess_file, f): f for f in file_list}
-        for future in as_completed(futures):
-            file_path = futures[future]
+        for future in as_completed(future_to_path):
+            path, file_hash = future_to_path[future]
             try:
-                file_chunks = future.result()
-                file_hash = hash_file(file_path)
+                chunks = future.result()
+                cache[path] = file_hash   # Mise à jour du cache
 
-                # Skip si fichier inchangé
-                if skip_existing and file_path in cache and cache[file_path] == file_hash:
-                    continue
-                cache[file_path] = file_hash
-
-                for chunk in file_chunks:
-                    chash = chunk['metadata']['chunk_hash']
-                    if chash in seen_chunk_hashes:
+                saved_count = 0
+                for chunk in chunks:
+                    ch_hash = chunk["metadata"]["chunk_hash"]
+                    if ch_hash in seen_chunks:
                         continue
-                    seen_chunk_hashes.add(chash)
+                    seen_chunks.add(ch_hash)
 
-                    out_path = os.path.join(processed_path, f"{chash}.json")
-                    if skip_existing and os.path.exists(out_path):
-                        continue
-                    with open(out_path, 'w', encoding='utf-8') as f:
+                    out_path = os.path.join(PROCESSED_PATH, f"{ch_hash}.json")
+                    with open(out_path, "w", encoding="utf-8") as f:
                         json.dump(chunk, f, ensure_ascii=False, indent=2)
-                    processed_count += 1
+                    saved_count += 1
+
+                logger.info(f"✅ Traité : {Path(path).name} → {len(chunks)} chunks ({saved_count} sauvegardés)")
 
             except Exception as e:
-                logger.error(f"Erreur critique sur {file_path}: {e}", exc_info=True)
+                logger.error(f"Erreur lors du traitement de {path}: {e}")
 
     save_cache(cache)
-    logger.info(f"Prétraitement terminé ! {processed_count} nouveaux chunks sauvegardés dans {processed_path}")
+    logger.info("🎉 Processing terminé avec succès !")
 
-# ===================== POINT D’ENTRÉE =====================
+
 if __name__ == "__main__":
     preprocess_all()
