@@ -4,9 +4,10 @@
 ![Django](https://img.shields.io/badge/Django-4.x-092E20?style=for-the-badge&logo=django)
 ![Qdrant](https://img.shields.io/badge/Qdrant-Vector_DB-FF4C4C?style=for-the-badge)
 ![LangChain](https://img.shields.io/badge/LangChain-RAG-orange?style=for-the-badge)
+![Status](https://img.shields.io/badge/Status-Active-success)
+![License](https://img.shields.io/badge/License-MIT-green)
 
-**Assistant universitaire intelligent** basé sur **Django** et un système **RAG (Retrieval-Augmented Generation)** avancé.  
-Il permet de répondre de manière précise et contextuelle aux questions des étudiants et du personnel à partir de documents officiels.
+> 💡 Un assistant intelligent basé sur le RAG permettant aux étudiants d’accéder rapidement aux informations universitaires à partir de documents officiels, avec des réponses fiables, contextuelles et pertinentes.
 
 ---
 
@@ -20,6 +21,17 @@ Il permet de répondre de manière précise et contextuelle aux questions des é
 - **Retriever + LLM** pour générer des réponses contextualisées
 - **API REST** avec Django & Django REST Framework
 - **Interface Chat** simple et responsive (HTML + CSS + JavaScript)
+
+---
+
+## 🧠 Pourquoi RAG ?
+
+Ce projet utilise une architecture **RAG (Retrieval-Augmented Generation)** pour :
+
+- 📚 Exploiter des documents réels (PDF, HTML, DOCX)
+- 🎯 Fournir des réponses précises basées sur des sources fiables
+- ❌ Réduire les hallucinations des modèles LLM
+- 🔍 Améliorer la pertinence contextuelle des réponses
 
 ---
 
@@ -55,6 +67,18 @@ Frontend Chat Interface
 
 ---
 
+## 💬 Exemple d’utilisation
+
+**Question :**
+
+> Quelles sont les conditions d'inscription en master à l'UCA ?
+
+**Réponse :**
+
+> Selon les documents officiels de l’université, l’inscription en master nécessite un diplôme de licence ou équivalent, ainsi que la validation du dossier de candidature selon les critères définis par l’établissement.
+
+---
+
 ## 📁 Structure du projet
 
 ```text
@@ -77,7 +101,7 @@ uca_digital_assistant/
 ### 1. Cloner le dépôt
 
 ```bash
-git clone https://github.com/TON_COMPTE/uca_digital_assistant.git
+git clone https://github.com/AimadOufares/uca_digital_assistant.git
 cd uca_digital_assistant
 ```
 
@@ -133,9 +157,18 @@ python rag_module/pipeline.py
 
 ## ⚙️ Configuration
 
-* **Qdrant** : Par défaut en mode local (port 6333), peut utiliser Qdrant Cloud.
-* **LLM** : Configurable dans `rag_module/config.py` (support local ou via API OpenAI/Groq/Ollama).
-* **Embeddings** : Modèle par défaut recommandé : `all-MiniLM-L6-v2`.
+* **Qdrant** : Mode local par défaut (port 6333) ou Qdrant Cloud
+* **LLM** : Configurable dans `rag_module/config.py` (OpenAI, Groq, Ollama, LM Studio)
+* **Embeddings** : Modèle recommandé `all-MiniLM-L6-v2`
+
+---
+
+## 🔐 Sécurité
+
+* Validation et nettoyage des entrées utilisateur
+* Protection contre les injections (prompt injection, XSS)
+* Isolation des données sensibles
+* Possibilité d'intégrer une authentification sécurisée
 
 ---
 
@@ -148,7 +181,7 @@ python rag_module/pipeline.py
   * `data_storage/`
   * `__pycache__/`
 
-* Le module `rag_module` est **modulaire**, facilement amélioré ou remplacé.
+* Le module `rag_module` est **modulaire** et facilement extensible
 
 ---
 
@@ -172,7 +205,17 @@ Les **issues** sont également bienvenues pour signaler bugs ou idées.
 * [ ] Authentification des utilisateurs (étudiants / enseignants)
 * [ ] Historique des conversations
 * [ ] Amélioration du chunking sémantique
+* [ ] Ajout de citations des sources dans les réponses (RAG avancé)
+* [ ] Optimisation des performances (indexation + retrieval)
 * [ ] Déploiement Docker + Docker Compose
+
+---
+
+## 🧪 Tests (à venir)
+
+* Tests unitaires du module RAG
+* Tests API avec Django REST Framework
+* Évaluation des performances du retriever
 
 ---
 
@@ -190,5 +233,5 @@ Les **issues** sont également bienvenues pour signaler bugs ou idées.
 
 **Aimad Oufares**  
 Projet **UCA Digital Assistant**  
-Université Cadi Ayyad (UCA)
-
+Université Cadi Ayyad (UCA)  
+Faculté Des Sciences Semlalia Marrakech
