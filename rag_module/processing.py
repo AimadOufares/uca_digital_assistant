@@ -46,7 +46,9 @@ def clean_text(text: str) -> str:
     text = unicodedata.normalize('NFKC', text)
     text = unescape(text)
     text = re.sub(r'[\u200b\u200c\u200d\ufeff]+', '', text)
-    text = re.sub(r'\s+', ' ', text)
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    text = re.sub(r"[ \t\f\v]+", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
 
 
@@ -244,7 +246,7 @@ def preprocess_file(file_path: str) -> List[Dict]:
                 "language": doc_language,
                 "file_name": file_name,
                 "file_type": ext,
-                "is_table": "[TABLE]" in chunk,
+                "is_table": ("[TABLE" in chunk) or ("TABLE_PAGE_" in chunk),
                 "date_processed": datetime.now(timezone.utc).isoformat()
             }
         })
@@ -256,10 +258,28 @@ def load_cache() -> Dict:
     if os.path.exists(CACHE_FILE):
         try:
             with open(CACHE_FILE, encoding="utf-8") as f:
-                return json.load(f)
+                raw = json.load(f)
+            if isinstance(raw, dict) and "files" in raw and isinstance(raw["files"], dict):
+                files = {}
+                for path, entry in raw["files"].items():
+                    if not isinstance(entry, dict):
+                        continue
+                    files[path] = {
+                        "file_hash": entry.get("file_hash", ""),
+                        "chunk_hashes": list(dict.fromkeys(entry.get("chunk_hashes", []))),
+                    }
+                return {"version": 2, "files": files}
+
+            # Compatibilite ancien format: {path: file_hash}
+            if isinstance(raw, dict):
+                files = {}
+                for path, file_hash in raw.items():
+                    if isinstance(path, str) and isinstance(file_hash, str):
+                        files[path] = {"file_hash": file_hash, "chunk_hashes": []}
+                return {"version": 2, "files": files}
         except Exception:
-            return {}
-    return {}
+            return {"version": 2, "files": {}}
+    return {"version": 2, "files": {}}
 
 
 def save_cache(cache: Dict):
@@ -268,11 +288,39 @@ def save_cache(cache: Dict):
         json.dump(cache, f, indent=2, ensure_ascii=False)
 
 
+def _chunk_refcounts(file_records: Dict[str, Dict]) -> Dict[str, int]:
+    refcounts: Dict[str, int] = {}
+    for record in file_records.values():
+        hashes = set(record.get("chunk_hashes", []))
+        for ch in hashes:
+            refcounts[ch] = refcounts.get(ch, 0) + 1
+    return refcounts
+
+
+def _delete_chunk_file_if_unreferenced(
+    chunk_hash: str,
+    refcounts: Dict[str, int],
+    seen_chunks: set,
+) -> bool:
+    if refcounts.get(chunk_hash, 0) > 0:
+        return False
+    path = os.path.join(PROCESSED_PATH, f"{chunk_hash}.json")
+    if os.path.exists(path):
+        try:
+            os.remove(path)
+        except Exception:
+            return False
+    seen_chunks.discard(chunk_hash)
+    return True
+
+
 # ===================== MAIN =====================
 def preprocess_all():
     os.makedirs(PROCESSED_PATH, exist_ok=True)
     cache = load_cache()
+    file_records: Dict[str, Dict] = cache.get("files", {})
     seen_chunks = {Path(f).stem for f in os.listdir(PROCESSED_PATH) if f.endswith(".json")}
+    refcounts = _chunk_refcounts(file_records)
 
     files = [
         os.path.join(root, f)
@@ -282,11 +330,31 @@ def preprocess_all():
 
     logger.info(f"{len(files)} fichiers détectés dans {RAW_PATH}")
 
+    # Nettoyage des entrées de cache dont le fichier source n'existe plus.
+    deleted_sources = [p for p in list(file_records.keys()) if not os.path.exists(p)]
+    removed_chunks = 0
+    for path in deleted_sources:
+        record = file_records.pop(path, {})
+        for ch in set(record.get("chunk_hashes", [])):
+            if ch in refcounts:
+                refcounts[ch] -= 1
+                if refcounts[ch] <= 0:
+                    refcounts.pop(ch, None)
+            if _delete_chunk_file_if_unreferenced(ch, refcounts, seen_chunks):
+                removed_chunks += 1
+    if deleted_sources:
+        logger.info(f"Nettoyage sources supprimées: {len(deleted_sources)} source(s), {removed_chunks} chunk(s) supprimé(s).")
+
     with ThreadPoolExecutor(max_workers=6) as executor:
         future_to_path = {}
         for f in files:
             file_hash = hash_file(f)
-            if f in cache and cache[f] == file_hash:
+            record = file_records.get(f, {})
+            old_hashes = record.get("chunk_hashes", [])
+            has_all_chunks = all(
+                os.path.exists(os.path.join(PROCESSED_PATH, f"{ch}.json")) for ch in old_hashes
+            )
+            if record.get("file_hash") == file_hash and has_all_chunks:
                 logger.info(f"Skip (inchangé) → {Path(f).name}")
                 continue
             future_to_path[executor.submit(preprocess_file, f)] = (f, file_hash)
@@ -295,9 +363,20 @@ def preprocess_all():
             path, file_hash = future_to_path[future]
             try:
                 chunks = future.result()
-                cache[path] = file_hash   # Mise à jour du cache
+                previous_hashes = set(file_records.get(path, {}).get("chunk_hashes", []))
+                new_hashes = [chunk["metadata"]["chunk_hash"] for chunk in chunks]
+                new_hashes_set = set(new_hashes)
 
                 saved_count = 0
+                # Déréférence les anciens chunks de cette source, puis supprime les orphelins.
+                for old_ch in previous_hashes:
+                    if old_ch in refcounts:
+                        refcounts[old_ch] -= 1
+                        if refcounts[old_ch] <= 0:
+                            refcounts.pop(old_ch, None)
+                    if old_ch not in new_hashes_set:
+                        _delete_chunk_file_if_unreferenced(old_ch, refcounts, seen_chunks)
+
                 for chunk in chunks:
                     ch_hash = chunk["metadata"]["chunk_hash"]
                     if ch_hash in seen_chunks:
@@ -309,12 +388,21 @@ def preprocess_all():
                         json.dump(chunk, f, ensure_ascii=False, indent=2)
                     saved_count += 1
 
+                # Référencement des nouveaux chunks pour cette source.
+                for ch in new_hashes_set:
+                    refcounts[ch] = refcounts.get(ch, 0) + 1
+
+                file_records[path] = {
+                    "file_hash": file_hash,
+                    "chunk_hashes": list(dict.fromkeys(new_hashes)),
+                }
+
                 logger.info(f"✅ Traité : {Path(path).name} → {len(chunks)} chunks ({saved_count} sauvegardés)")
 
             except Exception as e:
                 logger.error(f"Erreur lors du traitement de {path}: {e}")
 
-    save_cache(cache)
+    save_cache({"version": 2, "files": file_records})
     logger.info("🎉 Processing terminé avec succès !")
 
 

@@ -1,0 +1,79 @@
+{% load static %}
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>UCA Assistant - Chat</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="{% static 'api_app/chat.css' %}">
+</head>
+<body>
+    <div class="aurora aurora-a"></div>
+    <div class="aurora aurora-b"></div>
+    <div class="grid-overlay"></div>
+
+    <main class="chat-shell">
+        <aside class="chat-side">
+            <p class="side-kicker">Universite Cadi Ayyad</p>
+            <h1>Assistant Digital Campus</h1>
+            <p class="side-subtitle">Un espace de chat moderne pour les questions d'inscription, admissions et documents administratifs.</p>
+
+            <section class="quick-prompts" aria-label="Questions frequentes">
+                <h2>Questions rapides</h2>
+                <button type="button" class="prompt-chip" data-prompt="Quelles sont les conditions d'inscription en licence a la FSSM ?">
+                    Conditions d'inscription licence
+                </button>
+                <button type="button" class="prompt-chip" data-prompt="Quels documents sont necessaires pour une inscription administrative ?">
+                    Documents requis
+                </button>
+                <button type="button" class="prompt-chip" data-prompt="Comment se deroule la procedure d'inscription en master ?">
+                    Procedure master
+                </button>
+            </section>
+        </aside>
+
+        <section class="chat-panel">
+            <header class="chat-header">
+                <div>
+                    <p class="chat-label">Live Assistant</p>
+                    <p class="chat-status">Pret a vous aider</p>
+                </div>
+                <div class="status-dot" aria-hidden="true"></div>
+            </header>
+
+            <section id="chatMessages" class="chat-messages" aria-live="polite">
+                <article class="message message-assistant">
+                    <div class="message-avatar">UCA</div>
+                    <div class="message-body">
+                        <p>Bonjour, je suis votre assistant UCA. Posez votre question et je repondrai a partir des documents disponibles.</p>
+                    </div>
+                </article>
+            </section>
+
+            <div id="typingIndicator" class="typing-indicator" hidden>
+                <span></span>
+                <span></span>
+                <span></span>
+                <p>Analyse en cours...</p>
+            </div>
+
+            <form id="chatForm" class="chat-input-panel">
+                <label for="messageInput" class="sr-only">Votre question</label>
+                <textarea
+                    id="messageInput"
+                    name="message"
+                    rows="1"
+                    placeholder="Exemple : Quelle est la procedure d'inscription en licence ?"
+                    required
+                ></textarea>
+                <button id="sendButton" type="submit">Envoyer</button>
+            </form>
+        </section>
+    </main>
+
+    <script src="{% static 'api_app/chat.js' %}" defer></script>
+</body>
+</html>

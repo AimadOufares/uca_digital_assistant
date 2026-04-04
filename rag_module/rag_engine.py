@@ -1,162 +1,305 @@
-import os
-import json
 import logging
+import math
+import os
+import re
 from pathlib import Path
-from datetime import datetime
+from typing import Any, Dict, List
 
-import numpy as np
-import faiss
-import torch
-from sentence_transformers import SentenceTransformer
-from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
-from sklearn.metrics.pairwise import cosine_similarity
+from .prompt_builder import build_rag_prompt
 
-# ==============================
-# CONFIG
-# ==============================
-INDEX_PATH = "data_storage/index/index.faiss"
-CHUNKS_PATH = "data_storage/index/chunks.json"
-EMBEDDING_MODEL = "all-MiniLM-L6-v2"
-TOP_K = 10  # Nombre de chunks à récupérer
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+try:
+    from openai import OpenAI
+except Exception:  # pragma: no cover
+    OpenAI = None
 
-# GPT libre
-GPT_MODEL = "tiiuae/falcon-7b-instruct"  # ou "mosaicml/mpt-7b-chat"
-
-# Logging
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ==============================
-# UTILITIES
-# ==============================
-def normalize(text: str):
-    return " ".join(text.strip().split())
 
-# ==============================
-# RAG ENGINE
-# ==============================
-class RAGEngine:
-    def __init__(self, index_path=INDEX_PATH, chunks_path=CHUNKS_PATH):
-        # Embedding
-        self.embedder = SentenceTransformer(EMBEDDING_MODEL)
+class RAGIndexNotReadyError(RuntimeError):
+    """Raised when FAISS index or chunks are not available."""
 
-        # FAISS
-        if not os.path.exists(index_path):
-            raise FileNotFoundError(f"Index FAISS introuvable : {index_path}")
-        self.index = faiss.read_index(index_path)
 
-        # Chunks
-        if not os.path.exists(chunks_path):
-            raise FileNotFoundError(f"Chunks introuvables : {chunks_path}")
-        with open(chunks_path, "r", encoding="utf-8") as f:
-            self.chunks = json.load(f)
+class RAGGenerationError(RuntimeError):
+    """Raised when answer generation fails."""
 
-        # GPT libre
-        self.tokenizer = AutoTokenizer.from_pretrained(GPT_MODEL)
-        self.model = AutoModelForCausalLM.from_pretrained(
-            GPT_MODEL,
-            device_map="auto",
-            torch_dtype=torch.float16
-        )
-        self.generator = pipeline(
-            "text-generation",
-            model=self.model,
-            tokenizer=self.tokenizer,
-            device=0 if DEVICE=="cuda" else -1
-        )
 
-        logger.info(f"[INFO] {len(self.chunks)} chunks chargés, index et GPT prêts.")
+DEFAULT_LM_STUDIO_BASE_URL = "http://127.0.0.1:1234/v1"
+DEFAULT_LM_STUDIO_MODEL = ""
+DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
+DEFAULT_MAX_TOKENS = 280
+DEFAULT_TEMPERATURE = 0.15
+DEFAULT_REQUEST_TIMEOUT = 120.0
+DEFAULT_RETRIEVAL_K = 4
 
-    # ==============================
-    # SEARCH & RERANK
-    # ==============================
-    def search(self, query: str, top_k=TOP_K):
-        query_vec = self.embedder.encode([query])
-        query_vec = np.array(query_vec).astype("float32")
 
-        distances, indices = self.index.search(query_vec, top_k*2)  # plus de candidats pour reranking
-        candidates = []
-        for idx in indices[0]:
-            if idx < len(self.chunks):
-                candidates.append(self.chunks[idx])
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+        return value if value > 0 else default
+    except ValueError:
+        return default
 
-        # Reranking avec cosine similarity
-        embeddings = np.array([self.embedder.encode(c["text"]) for c in candidates])
-        sims = cosine_similarity(query_vec, embeddings)[0]
-        ranked = sorted(
-            zip(candidates, sims),
-            key=lambda x: x[1],
-            reverse=True
-        )
-        top_candidates = ranked[:top_k]
 
-        results = []
-        for c, score in top_candidates:
-            results.append({
-                "text": c["text"],
-                "score": float(score),
-                "source": c["metadata"].get("source", "unknown")
-            })
-        return results
+def _env_float(name: str, default: float) -> float:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+        return value if value >= 0 else default
+    except ValueError:
+        return default
 
-    # ==============================
-    # BUILD PROMPT
-    # ==============================
-    def build_prompt(self, query: str, contexts):
-        context_text = "\n\n".join(
-            [f"[Source: {c['source']}]\n{c['text']}" for c in contexts]
-        )
-        prompt = f"""
-Tu es un assistant universitaire expert.
 
-Règles :
-- Réponds uniquement à partir du contexte fourni
-- Si l'information n'existe pas, dis "Je ne sais pas"
-- Sois clair, structuré et concis
+def _safe_sentences(text: str) -> List[str]:
+    if not text:
+        return []
+    parts = re.split(r"(?<=[.!?])\s+", text.strip())
+    return [p.strip() for p in parts if p.strip()]
 
-CONTEXTE :
-{context_text}
 
-QUESTION :
-{query}
-
-RÉPONSE :
-"""
-        return prompt
-
-    # ==============================
-    # GENERATE
-    # ==============================
-    def generate(self, query: str):
-        contexts = self.search(query)
-        prompt = self.build_prompt(query, contexts)
-
-        outputs = self.generator(
-            prompt,
-            max_new_tokens=400,
-            do_sample=True,
-            temperature=0.2
+def _extractive_fallback_answer(query: str, chunks: List[Dict]) -> str:
+    if not chunks:
+        return (
+            "Information non disponible dans mes sources actuelles. "
+            "Pouvez-vous reformuler votre question ?"
         )
 
-        answer = outputs[0]["generated_text"].strip()
+    lines: List[str] = []
+    for chunk in chunks[:3]:
+        for sentence in _safe_sentences(chunk.get("text", "")):
+            if len(sentence) >= 35:
+                lines.append(sentence)
+            if len(lines) >= 4:
+                break
+        if len(lines) >= 4:
+            break
+
+    if not lines:
+        return (
+            "J'ai trouve des documents lies a votre question, mais je n'ai pas pu "
+            "generer un resume fiable automatiquement."
+        )
+
+    answer = "Voici ce que j'ai trouve dans les documents disponibles :\n"
+    answer += "\n".join(f"- {line}" for line in lines)
+    return answer
+
+
+def _generate_with_openai(prompt: str) -> str:
+    api_key = os.getenv("OPENAI_API_KEY", "").strip()
+    if not api_key or OpenAI is None:
+        return ""
+
+    model = os.getenv("RAG_CHAT_MODEL", DEFAULT_OPENAI_MODEL).strip() or DEFAULT_OPENAI_MODEL
+    max_tokens = _env_int("RAG_MAX_TOKENS", DEFAULT_MAX_TOKENS)
+    temperature = _env_float("RAG_TEMPERATURE", DEFAULT_TEMPERATURE)
+    timeout = _env_float("RAG_REQUEST_TIMEOUT", DEFAULT_REQUEST_TIMEOUT)
+    client = OpenAI(api_key=api_key, timeout=timeout)
+
+    try:
+        response = client.responses.create(
+            model=model,
+            input=prompt,
+            temperature=temperature,
+            max_output_tokens=max_tokens,
+        )
+        return (getattr(response, "output_text", "") or "").strip()
+    except Exception as exc:
+        logger.warning("Generation OpenAI indisponible, fallback local active: %s", exc)
+        return ""
+
+
+def _is_embedding_model(model_id: str) -> bool:
+    value = (model_id or "").lower()
+    return any(token in value for token in ("embed", "embedding", "nomic-embed"))
+
+
+def _resolve_lm_studio_model(client: Any, configured_model: str) -> str:
+    if configured_model:
+        return configured_model
+    try:
+        models = client.models.list()
+        items = getattr(models, "data", []) or []
+        ids = [getattr(item, "id", "") for item in items if getattr(item, "id", "")]
+        for model_id in ids:
+            if not _is_embedding_model(model_id):
+                return model_id
+        return ids[0] if ids else ""
+    except Exception as exc:
+        logger.warning("Impossible de recuperer les modeles LM Studio (%s).", exc)
+        return ""
+
+
+def _generate_with_lm_studio(prompt: str) -> str:
+    if OpenAI is None:
+        return ""
+
+    base_url = os.getenv("LM_STUDIO_BASE_URL", DEFAULT_LM_STUDIO_BASE_URL).strip()
+    configured_model = os.getenv("RAG_LM_STUDIO_MODEL", DEFAULT_LM_STUDIO_MODEL).strip()
+    api_key = os.getenv("LM_STUDIO_API_KEY", "lm-studio").strip() or "lm-studio"
+    max_tokens = _env_int("RAG_MAX_TOKENS", DEFAULT_MAX_TOKENS)
+    temperature = _env_float("RAG_TEMPERATURE", DEFAULT_TEMPERATURE)
+    timeout = _env_float("RAG_REQUEST_TIMEOUT", DEFAULT_REQUEST_TIMEOUT)
+
+    if not base_url:
+        return ""
+
+    client = OpenAI(base_url=base_url, api_key=api_key, timeout=timeout)
+    model = _resolve_lm_studio_model(client, configured_model)
+    if not model:
+        logger.warning("Aucun modele LM Studio texte n'a ete trouve.")
+        return ""
+
+    try:
+        response = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+        choices = getattr(response, "choices", []) or []
+        if not choices:
+            return ""
+        message = getattr(choices[0], "message", None)
+        content = getattr(message, "content", "") if message is not None else ""
+        return (content or "").strip()
+    except Exception as exc:
+        logger.warning("LM Studio indisponible (%s).", exc)
+        return ""
+
+
+def _generation_order() -> List[str]:
+    provider = os.getenv("RAG_LLM_PROVIDER", "lmstudio").strip().lower()
+    if provider in {"lmstudio", "local"}:
+        return ["lmstudio", "openai"]
+    if provider == "openai":
+        return ["openai", "lmstudio"]
+    if provider == "auto":
+        return ["lmstudio", "openai"]
+    return ["lmstudio", "openai"]
+
+
+def _to_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except Exception:
+        return default
+
+
+def _clamp01(value: float) -> float:
+    return max(0.0, min(1.0, value))
+
+
+def _normalize_rerank_score(raw: float) -> float:
+    # Mapping logistique simple pour rendre les scores cross-encoder comparables [0,1].
+    return 1.0 / (1.0 + math.exp(-raw / 4.0))
+
+
+def _chunk_confidence(chunk: Dict) -> Dict[str, Any]:
+    if "rerank_score" in chunk:
+        raw = _to_float(chunk.get("rerank_score"))
         return {
-            "answer": answer,
-            "sources": [c["source"] for c in contexts]
+            "score": _normalize_rerank_score(raw),
+            "score_type": "rerank",
+            "raw_score": raw,
         }
 
+    score = _to_float(chunk.get("score"))
+    score_type = chunk.get("score_type") or "vector"
+    if score_type == "vector":
+        score = _clamp01(score)
+    return {"score": score, "score_type": score_type, "raw_score": score}
 
-# ==============================
-# TEST
-# ==============================
-if __name__ == "__main__":
-    rag = RAGEngine()
-    query = "Comment s'inscrire à l'université ?"
-    result = rag.generate(query)
 
-    print("\n=== RÉPONSE ===\n")
-    print(result["answer"])
+def _normalize_sources(chunks: List[Dict]) -> List[Dict]:
+    by_source: Dict[str, Dict] = {}
+    for chunk in chunks:
+        metadata = chunk.get("metadata", {}) or {}
+        raw_source = metadata.get("source") or metadata.get("file_name") or "Document inconnu"
+        source_path = str(raw_source) if raw_source is not None else ""
+        source_name = Path(source_path).name if source_path else "Document inconnu"
+        source_key = source_path or source_name
 
-    print("\n=== SOURCES ===\n")
-    for s in result["sources"]:
-        print("-", s)
+        confidence = _chunk_confidence(chunk)
+        entry = by_source.get(source_key)
+        if entry is None:
+            by_source[source_key] = {
+                "name": source_name,
+                "path": source_path,
+                "score": round(confidence["score"], 4),
+                "score_type": confidence["score_type"],
+                "hits": 1,
+            }
+            continue
+
+        entry["hits"] += 1
+        if confidence["score"] > entry["score"]:
+            entry["score"] = round(confidence["score"], 4)
+            entry["score_type"] = confidence["score_type"]
+
+    ordered = sorted(by_source.values(), key=lambda x: (x["score"], x["hits"]), reverse=True)
+    return ordered
+
+
+class RAGEngine:
+    def __init__(self, retrieval_k: int = DEFAULT_RETRIEVAL_K, prompt_style: str = "auto"):
+        retrieval_k_from_env = _env_int("RAG_RETRIEVAL_K", retrieval_k)
+        self.retrieval_k = max(1, retrieval_k_from_env)
+        env_prompt_style = os.getenv("RAG_PROMPT_STYLE", prompt_style).strip().lower()
+        self.prompt_style = env_prompt_style if env_prompt_style in {"auto", "standard", "concise"} else "auto"
+
+    def retrieve(self, query: str) -> List[Dict]:
+        try:
+            from . import rag_search
+
+            index_path = Path(rag_search.INDEX_PATH)
+            chunks_path = Path(rag_search.CHUNKS_PATH)
+            if not index_path.exists() or not chunks_path.exists():
+                raise RAGIndexNotReadyError("Index RAG introuvable. Lancez d'abord l'indexation.")
+            return rag_search.get_relevant_chunks(query, top_k=self.retrieval_k)
+        except FileNotFoundError as exc:
+            raise RAGIndexNotReadyError("Index RAG introuvable. Lancez d'abord l'indexation.") from exc
+        except RAGIndexNotReadyError:
+            raise
+        except Exception as exc:
+            raise RAGIndexNotReadyError(
+                "Le moteur de recherche RAG n'est pas pret (index ou modeles indisponibles)."
+            ) from exc
+
+    def generate(self, query: str, chunks: List[Dict]) -> str:
+        backends = _generation_order()
+        prompt_style = self.prompt_style
+        if prompt_style == "auto":
+            prompt_style = "concise" if backends and backends[0] == "lmstudio" else "standard"
+
+        prompt = build_rag_prompt(query=query, chunks=chunks, style=prompt_style)
+        for backend in backends:
+            answer = _generate_with_lm_studio(prompt) if backend == "lmstudio" else _generate_with_openai(prompt)
+            if answer:
+                return answer
+        return _extractive_fallback_answer(query, chunks)
+
+    def answer(self, query: str) -> Dict:
+        cleaned_query = (query or "").strip()
+        if not cleaned_query:
+            raise ValueError("La question ne peut pas etre vide.")
+
+        chunks = self.retrieve(cleaned_query)
+        try:
+            answer = self.generate(cleaned_query, chunks)
+        except Exception as exc:
+            raise RAGGenerationError("Erreur lors de la generation de reponse.") from exc
+
+        return {"answer": answer.strip(), "sources": _normalize_sources(chunks)}
+
+
+_default_engine = RAGEngine()
+
+
+def answer_question(question: str) -> Dict:
+    """Fonction utilitaire conservee pour compatibilite avec pipeline.py."""
+    return _default_engine.answer(question)
