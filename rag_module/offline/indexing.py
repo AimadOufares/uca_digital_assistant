@@ -65,6 +65,7 @@ def load_chunks() -> List[Dict]:
     files = sorted(Path(PROCESSED_PATH).glob("*.json"))
     chunks: List[Dict] = []
     seen_ids = set()
+    seen_text_hashes = set()
 
     for file in files:
         try:
@@ -87,7 +88,11 @@ def load_chunks() -> List[Dict]:
             )
             if chunk_id in seen_ids:
                 continue
+            text_hash = get_hash(text.lower())
+            if text_hash in seen_text_hashes:
+                continue
             seen_ids.add(chunk_id)
+            seen_text_hashes.add(text_hash)
 
             source_path = metadata.get("source", str(file))
             source_name = metadata.get("file_name") or Path(source_path).name

@@ -59,7 +59,15 @@ def get_embedding_model():
     global _embedding_model
     if _embedding_model is None:
         logger.info("Chargement du modele embedding: %s", EMBEDDING_MODEL)
-        _embedding_model = SentenceTransformer(EMBEDDING_MODEL, device="cpu")
+        # Offline-first to avoid runtime failures in restricted environments.
+        try:
+            _embedding_model = SentenceTransformer(
+                EMBEDDING_MODEL,
+                device="cpu",
+                local_files_only=True,
+            )
+        except Exception:
+            _embedding_model = SentenceTransformer(EMBEDDING_MODEL, device="cpu")
         _embedding_model.max_seq_length = 512
     return _embedding_model
 
@@ -68,7 +76,22 @@ def get_reranker():
     global _reranker
     if _reranker is None and USE_RERANK:
         logger.info("Chargement du reranker: %s", RERANK_MODEL)
-        _reranker = CrossEncoder(RERANK_MODEL, device="cpu")
+        try:
+            _reranker = CrossEncoder(
+                RERANK_MODEL,
+                device="cpu",
+                local_files_only=True,
+            )
+        except TypeError:
+            # Compatibility fallback for older sentence-transformers releases.
+            try:
+                _reranker = CrossEncoder(RERANK_MODEL, device="cpu")
+            except Exception as exc:
+                logger.warning("Reranker indisponible, fallback sans rerank: %s", exc)
+                _reranker = None
+        except Exception as exc:
+            logger.warning("Reranker indisponible, fallback sans rerank: %s", exc)
+            _reranker = None
     return _reranker
 
 

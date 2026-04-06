@@ -1,11 +1,11 @@
 import logging
 from typing import Dict, List, Optional
 
-from .ingestion import DEFAULT_SEEDS, crawl
-from .indexing import build_index, load_chunks
-from .processing import preprocess_all
-from .rag_engine import answer_question
-from .rag_search import invalidate_search_cache
+from .generation.rag_engine import answer_question
+from .offline.indexing import build_index, load_chunks
+from .offline.ingestion import DEFAULT_SEEDS, crawl
+from .offline.processing import preprocess_all
+from .retrieval.rag_search import invalidate_search_cache
 
 logger = logging.getLogger(__name__)
 

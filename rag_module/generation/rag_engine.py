@@ -254,7 +254,7 @@ class RAGEngine:
 
     def retrieve(self, query: str) -> List[Dict]:
         try:
-            from . import rag_search
+            from ..retrieval import rag_search
 
             index_path = Path(rag_search.INDEX_PATH)
             chunks_path = Path(rag_search.CHUNKS_PATH)

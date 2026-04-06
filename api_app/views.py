@@ -6,7 +6,7 @@ from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from rag_module.rag_engine import (
+from rag_module.generation.rag_engine import (
     RAGGenerationError,
     RAGIndexNotReadyError,
     answer_question,
@@ -51,7 +51,6 @@ class ChatAPIView(APIView):
             return Response(
                 {
                     "answer": result.get("answer", "").strip(),
-                    "sources": result.get("sources", []),
                 },
                 status=status.HTTP_200_OK,
             )
