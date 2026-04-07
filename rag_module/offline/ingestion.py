@@ -8,7 +8,7 @@ import queue
 import threading
 import time
 from pathlib import Path
-from urllib.parse import urljoin, urlparse
+from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
 
 import requests
 from bs4 import BeautifulSoup
@@ -27,11 +27,22 @@ PLAYWRIGHT_WAIT = 2500
 MAX_DEPTH = 4
 MAX_TOTAL_URLS = 800
 
-ALLOWED_DOMAINS = ["uca.ma", "fstg-marrakech.ac.ma"]
+ALLOWED_DOMAINS = [
+    "uca.ma",
+    "fstg-marrakech.ac.ma",
+    "onousc.ma",
+    "enssup.gov.ma",
+]
 
 DEFAULT_SEEDS = [
     "https://www.uca.ma",
     "https://www.uca.ma/fr",
+    "https://www.uca.ma/fr/etablissements",
+    "https://www.uca.ma/fr/page/plateformes-dapprentissage",
+    "https://ucastudent.uca.ma/",
+    "https://reins.uca.ma/",
+    "https://e-candidature.uca.ma/",
+    "https://biblio-univ.uca.ma/",
     "https://fsjes.uca.ma",
     "https://flsh.uca.ma",
     "https://www.uca.ma/fssm",
@@ -41,9 +52,148 @@ DEFAULT_SEEDS = [
     "https://www.uca.ma/encg",
     "https://www.uca.ma/ens",
     "https://www.uca.ma/flam",
+    "https://fps.uca.ma/",
+    "https://ensas.uca.ma/",
+    "https://www.ests.uca.ma/",
+    "https://www.uca.ma/este",
+    "https://www.estk.uca.ma/",
+    "https://www.uca.ma/cuks",
+    "https://www.onousc.ma/",
+    "https://www.onousc.ma/Bourses",
+    "https://www.onousc.ma/etudiant-marocain",
+    "https://www.onousc.ma/Acces-aux-restaurants-universitaires",
+    "https://www.onousc.ma/Centres-medicaux",
+    "https://www.enssup.gov.ma/en/etudiant",
 ]
 
-KEYWORDS = ["formation", "master", "licence", "cours", "pdf", "recherche"]
+HIGH_PRIORITY_KEYWORDS = {
+    "inscription",
+    "preinscription",
+    "pre-inscription",
+    "reinscription",
+    "candidature",
+    "admission",
+    "avis",
+    "resultat",
+    "resultats",
+    "deliberation",
+    "exam",
+    "examen",
+    "rattrapage",
+    "emploi-du-temps",
+    "emploi_du_temps",
+    "emploi du temps",
+    "calendrier",
+    "scolarite",
+    "attestation",
+    "releve",
+    "notes",
+    "bourse",
+    "frais",
+    "paiement",
+    "reclamation",
+    "guichet",
+    "e-candidature",
+    "ucastudent",
+    "ecampus",
+    "moodle",
+    "e-learning",
+    "bibliotheque",
+    "planning",
+    "restaurant",
+    "logement",
+    "amo",
+    "etudiant",
+    "etudiants",
+}
+
+MEDIUM_PRIORITY_KEYWORDS = {
+    "formation",
+    "master",
+    "licence",
+    "doctorat",
+    "filiere",
+    "concours",
+    "orientation",
+    "reglement",
+    "procedure",
+    "pdf",
+}
+
+DEPRIORITIZED_KEYWORDS = {
+    "recherche",
+    "laboratoire",
+    "laboratoires",
+    "conference",
+    "colloque",
+    "seminaire",
+    "partenariat",
+    "gouvernance",
+    "presidence",
+    "actualite-institutionnelle",
+    "recrutement",
+}
+
+HIGH_PRIORITY_PATH_HINTS = {
+    "/etudiant",
+    "/espace-etudiant",
+    "/inscription",
+    "/preinscription",
+    "/reinscription",
+    "/candidature",
+    "/admission",
+    "/avis",
+    "/resultat",
+    "/resultats",
+    "/exam",
+    "/examen",
+    "/notes",
+    "/planning",
+    "/rattrapage",
+    "/emploi-du-temps",
+    "/calendrier",
+    "/scolarite",
+    "/attestation",
+    "/bourse",
+    "/ecampus",
+    "/moodle",
+    "/bibliotheque",
+}
+
+TRACKING_QUERY_KEYS = {
+    "fbclid",
+    "gclid",
+    "mc_cid",
+    "mc_eid",
+    "ref",
+    "sessionid",
+    "utm_campaign",
+    "utm_content",
+    "utm_medium",
+    "utm_source",
+    "utm_term",
+}
+
+BLOCKED_EXTENSIONS = {
+    ".7z",
+    ".avi",
+    ".css",
+    ".gif",
+    ".jpeg",
+    ".jpg",
+    ".js",
+    ".json",
+    ".mp3",
+    ".mp4",
+    ".png",
+    ".svg",
+    ".webm",
+    ".webp",
+    ".xls",
+    ".xlsx",
+    ".xml",
+    ".zip",
+}
 
 EXCLUDE_PATHS = [
     "/login",
@@ -105,7 +255,17 @@ def fetch_with_playwright(url):
 # UTILITAIRES
 # ==============================
 def clean_url(url):
-    return url.split("?")[0].strip()
+    parsed = urlparse(url.strip())
+    filtered_query = [
+        (key, value)
+        for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+        if key.lower() not in TRACKING_QUERY_KEYS
+    ]
+    cleaned = parsed._replace(
+        query=urlencode(filtered_query, doseq=True),
+        fragment="",
+    )
+    return urlunparse(cleaned)
 
 
 def is_allowed_domain(hostname: str) -> bool:
@@ -154,8 +314,26 @@ def save_file(content, filename):
     return path
 
 
-def is_relevant(url):
-    return any(k in url.lower() for k in KEYWORDS)
+def score_url(url: str, depth: int = 0) -> int:
+    lowered = url.lower()
+    path_ext = Path(urlparse(lowered).path).suffix.lower()
+    score = 100
+
+    if any(keyword in lowered for keyword in HIGH_PRIORITY_KEYWORDS):
+        score -= 35
+    if any(hint in lowered for hint in HIGH_PRIORITY_PATH_HINTS):
+        score -= 20
+    if any(keyword in lowered for keyword in MEDIUM_PRIORITY_KEYWORDS):
+        score -= 10
+    if any(keyword in lowered for keyword in DEPRIORITIZED_KEYWORDS):
+        score += 30
+    if path_ext == ".pdf":
+        score -= 20
+    elif path_ext == ".docx":
+        score -= 8
+
+    score += min(depth * 4, 16)
+    return max(score, 0)
 
 
 # ==============================
@@ -170,11 +348,15 @@ def should_accept_url(url, base=None):
 
     url = clean_url(url)
     parsed = urlparse(url)
+    path_ext = Path(parsed.path).suffix.lower()
 
     if parsed.scheme not in ["http", "https"]:
         return None
 
     if not is_allowed_domain(parsed.netloc):
+        return None
+
+    if path_ext in BLOCKED_EXTENSIONS:
         return None
 
     if any(x in url.lower() for x in EXCLUDE_PATHS):
@@ -201,6 +383,23 @@ def extract_links(content, base):
 
     return list(links)
 
+
+# ==============================
+# LOCKS MULTITHREADING
+# ==============================
+seen_hashes_lock = threading.Lock()
+visited_lock = threading.Lock()
+results_lock = threading.Lock()
+
+def save_metadata_safely(results_list):
+    """Sauvegarde atomique pour éviter la corruption de fichier."""
+    temp_path = META_PATH + ".tmp"
+    try:
+        with open(temp_path, "w", encoding="utf-8") as f:
+            json.dump(results_list, f, indent=2, ensure_ascii=False)
+        os.replace(temp_path, META_PATH)
+    except Exception as exc:
+        logger.error("Erreur lors de la sauvegarde metadata: %s", exc)
 
 # ==============================
 # DOWNLOAD
@@ -235,14 +434,18 @@ def download(url, depth, seen_hashes):
                     content_type = "text/html; charset=utf-8"
 
             file_hash = compute_hash(content)
-            if file_hash in seen_hashes:
-                return None
-
-            seen_hashes.add(file_hash)
+            
+            with seen_hashes_lock:
+                if file_hash in seen_hashes:
+                    return None
+                seen_hashes.add(file_hash)
 
             ext = infer_extension(url, content_type)
             filename = generate_filename(url, ext)
             path = save_file(content, filename)
+            
+            # Politesse : Pause entre les téléchargements
+            time.sleep(0.5)
 
             return {
                 "url": url,
@@ -272,41 +475,82 @@ def crawl(seeds):
     for url in seeds:
         u = should_accept_url(url)
         if u:
-            priority = 0 if is_relevant(u) else 1
+            priority = score_url(u, 0)
             q.put((priority, 0, u))
             visited.add(u)
 
-    while not q.empty() and len(results) < MAX_TOTAL_URLS:
-        _, depth, url = q.get()
+    active_workers = 0
+    condition = threading.Condition()
+    num_threads = 5
 
-        res = download(url, depth, seen_hashes)
-        if not res:
-            continue
+    def worker():
+        nonlocal active_workers
+        while True:
+            with condition:
+                while q.empty() and active_workers > 0 and len(results) < MAX_TOTAL_URLS:
+                    condition.wait()
+                
+                if len(results) >= MAX_TOTAL_URLS:
+                    return
+                if q.empty() and active_workers == 0:
+                    return
+                
+                _, depth, url = q.get()
+                active_workers += 1
 
-        results.append(res)
+            # Téléchargement hors du verrou principal
+            res = download(url, depth, seen_hashes)
+            
+            if res:
+                with results_lock:
+                    if len(results) < MAX_TOTAL_URLS:
+                        results.append(res)
+                        # Sauvegarde périodique (Checkpointing)
+                        if len(results) % 50 == 0:
+                            save_metadata_safely(results)
+                            logger.info("Checkpoint: %s documents sauvegardés.", len(results))
 
-        if depth >= MAX_DEPTH:
-            continue
+                if depth < MAX_DEPTH:
+                    links = []
+                    if res.get("is_html"):
+                        try:
+                            with open(res["file"], "rb") as fp:
+                                links = extract_links(fp.read(), url)
+                        except Exception as exc:
+                            logger.warning("Link extraction failed for %s: %s", res["file"], exc)
 
-        links = []
-        if res.get("is_html"):
-            try:
-                with open(res["file"], "rb") as fp:
-                    links = extract_links(fp.read(), url)
-            except Exception as exc:
-                logger.warning("Link extraction failed for %s: %s", res["file"], exc)
+                    for link in links:
+                        with visited_lock:
+                            if link not in visited:
+                                visited.add(link)
+                                added = True
+                            else:
+                                added = False
+                        
+                        if added:
+                            priority = score_url(link, depth + 1)
+                            q.put((priority, depth + 1, link))
 
-        for link in links:
-            if link not in visited:
-                visited.add(link)
-                priority = 0 if is_relevant(link) else 1
-                q.put((priority, depth + 1, link))
+            with condition:
+                active_workers -= 1
+                q.task_done()
+                condition.notify_all()
+                if res and len(results) <= MAX_TOTAL_URLS:
+                    logger.info("Progress: %s/%s", len(results), MAX_TOTAL_URLS)
 
-        logger.info("Progress: %s/%s", len(results), MAX_TOTAL_URLS)
+    # Démarrage des workers
+    threads = []
+    for _ in range(num_threads):
+        t = threading.Thread(target=worker)
+        t.start()
+        threads.append(t)
 
-    with open(META_PATH, "w", encoding="utf-8") as f:
-        json.dump(results, f, indent=2, ensure_ascii=False)
+    # Attente de la fin de tous les threads
+    for t in threads:
+        t.join()
 
+    # Sauvegarde finale
+    save_metadata_safely(results)
     return results
 
 
