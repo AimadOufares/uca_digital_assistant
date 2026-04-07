@@ -27,12 +27,21 @@ PLAYWRIGHT_WAIT = 2500
 MAX_DEPTH = 4
 MAX_TOTAL_URLS = 800
 
-ALLOWED_DOMAINS = [
+ALLOWED_DOMAIN_SUFFIXES = {
+    # Espace officiel UCA: portail principal, etablissements, preins-*, ecampus-*,
+    # Uc@Student, reins, e-candidature, bibliotheque, etc.
     "uca.ma",
+    # Domaine legacy officiel de la FSTG.
     "fstg-marrakech.ac.ma",
+}
+
+ALLOWED_DOMAINS = {
+    # Services externes officiels utiles aux etudiants UCA.
     "onousc.ma",
+    "www.onousc.ma",
     "enssup.gov.ma",
-]
+    "www.enssup.gov.ma",
+}
 
 DEFAULT_SEEDS = [
     "https://www.uca.ma",
@@ -223,17 +232,40 @@ logger = logging.getLogger(__name__)
 # THREAD SAFE PLAYWRIGHT
 # ==============================
 thread_local = threading.local()
+playwright_resources = []
+playwright_resources_lock = threading.Lock()
 
 
 def get_browser():
     if not hasattr(thread_local, "browser"):
         pw = sync_playwright().start()
-        thread_local.playwright = pw
-        thread_local.browser = pw.chromium.launch(
+        browser = pw.chromium.launch(
             headless=True,
             args=["--no-sandbox", "--disable-dev-shm-usage"],
         )
+        thread_local.playwright = pw
+        thread_local.browser = browser
+
+        with playwright_resources_lock:
+            playwright_resources.append((pw, browser))
     return thread_local.browser
+
+
+def cleanup_playwright_resources():
+    with playwright_resources_lock:
+        resources = list(playwright_resources)
+        playwright_resources.clear()
+
+    for pw, browser in resources:
+        try:
+            browser.close()
+        except Exception as exc:
+            logger.warning("Browser cleanup failed: %s", exc)
+
+        try:
+            pw.stop()
+        except Exception as exc:
+            logger.warning("Playwright cleanup failed: %s", exc)
 
 
 def fetch_with_playwright(url):
@@ -270,7 +302,11 @@ def clean_url(url):
 
 def is_allowed_domain(hostname: str) -> bool:
     host = (hostname or "").lower()
-    for domain in ALLOWED_DOMAINS:
+
+    if host in ALLOWED_DOMAINS:
+        return True
+
+    for domain in ALLOWED_DOMAIN_SUFFIXES:
         d = domain.lower()
         if host == d or host.endswith(f".{d}"):
             return True
@@ -281,18 +317,38 @@ def compute_hash(content):
     return hashlib.md5(content).hexdigest()
 
 
-def infer_extension(url: str, content_type: str) -> str:
+def looks_like_html(content: bytes) -> bool:
+    sample = (content or b"")[:512].lstrip().lower()
+    return sample.startswith(b"<!doctype html") or sample.startswith(b"<html") or b"<body" in sample
+
+
+def infer_extension(url: str, content_type: str, content: bytes = b"", content_disposition: str = "") -> str:
     lowered_type = (content_type or "").lower()
+    lowered_disposition = (content_disposition or "").lower()
     path_ext = Path(urlparse(url).path).suffix.lower()
+    allowed_exts = {".html", ".htm", ".pdf", ".doc", ".docx", ".txt", ".md"}
+
+    if "filename=" in lowered_disposition:
+        disposition_name = lowered_disposition.split("filename=", 1)[1].strip(" \"'")
+        disposition_ext = Path(disposition_name).suffix.lower()
+        if disposition_ext in allowed_exts:
+            return ".docx" if disposition_ext == ".doc" else disposition_ext
+
     if "text/html" in lowered_type:
         return ".html"
     if "application/pdf" in lowered_type:
         return ".pdf"
+    if "application/msword" in lowered_type:
+        return ".docx"
     if "application/vnd.openxmlformats-officedocument.wordprocessingml.document" in lowered_type:
         return ".docx"
     if "text/plain" in lowered_type:
         return ".txt"
-    if path_ext in {".html", ".htm", ".pdf", ".docx", ".txt", ".md"}:
+    if content.startswith(b"%PDF"):
+        return ".pdf"
+    if looks_like_html(content):
+        return ".html"
+    if path_ext in allowed_exts:
         return path_ext
     return ".html"
 
@@ -440,7 +496,12 @@ def download(url, depth, seen_hashes):
                     return None
                 seen_hashes.add(file_hash)
 
-            ext = infer_extension(url, content_type)
+            ext = infer_extension(
+                url,
+                content_type,
+                content=content,
+                content_disposition=r.headers.get("Content-Disposition", ""),
+            )
             filename = generate_filename(url, ext)
             path = save_file(content, filename)
             
@@ -545,13 +606,16 @@ def crawl(seeds):
         t.start()
         threads.append(t)
 
-    # Attente de la fin de tous les threads
-    for t in threads:
-        t.join()
+    try:
+        # Attente de la fin de tous les threads
+        for t in threads:
+            t.join()
 
-    # Sauvegarde finale
-    save_metadata_safely(results)
-    return results
+        # Sauvegarde finale
+        save_metadata_safely(results)
+        return results
+    finally:
+        cleanup_playwright_resources()
 
 
 # ==============================
