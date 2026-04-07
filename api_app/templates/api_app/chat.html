@@ -4,75 +4,92 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>UCA Assistant - Chat</title>
+    <title>UCA Assistant</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="{% static 'api_app/chat.css' %}">
 </head>
 <body>
-    <div class="aurora aurora-a"></div>
-    <div class="aurora aurora-b"></div>
-    <div class="grid-overlay"></div>
-
-    <main class="chat-shell">
-        <aside class="chat-side">
-            <p class="side-kicker">Universite Cadi Ayyad</p>
-            <h1>Assistant Digital Campus</h1>
-            <p class="side-subtitle">Un espace de chat moderne pour les questions d'inscription, admissions et documents administratifs.</p>
-
-            <section class="quick-prompts" aria-label="Questions frequentes">
-                <h2>Questions rapides</h2>
-                <button type="button" class="prompt-chip" data-prompt="Quelles sont les conditions d'inscription en licence a la FSSM ?">
-                    Conditions d'inscription licence
-                </button>
-                <button type="button" class="prompt-chip" data-prompt="Quels documents sont necessaires pour une inscription administrative ?">
-                    Documents requis
-                </button>
-                <button type="button" class="prompt-chip" data-prompt="Comment se deroule la procedure d'inscription en master ?">
-                    Procedure master
-                </button>
-            </section>
-        </aside>
-
-        <section class="chat-panel">
-            <header class="chat-header">
-                <div>
-                    <p class="chat-label">Live Assistant</p>
-                    <p class="chat-status">Pret a vous aider</p>
+    <div class="app-container">
+        <!-- Sidebar -->
+        <aside class="sidebar">
+            <div class="sidebar-header">
+                <div class="logo-circle">UCA</div>
+                <div class="brand">
+                    <h1>Assistant Digital</h1>
+                    <p>Université Cadi Ayyad</p>
                 </div>
-                <div class="status-dot" aria-hidden="true"></div>
-            </header>
-
-            <section id="chatMessages" class="chat-messages" aria-live="polite">
-                <article class="message message-assistant">
-                    <div class="message-avatar">UCA</div>
-                    <div class="message-body">
-                        <p>Bonjour, je suis votre assistant UCA. Posez votre question et je repondrai a partir des documents disponibles.</p>
-                    </div>
-                </article>
-            </section>
-
-            <div id="typingIndicator" class="typing-indicator" hidden>
-                <span></span>
-                <span></span>
-                <span></span>
-                <p>Analyse en cours...</p>
             </div>
 
-            <form id="chatForm" class="chat-input-panel">
-                <label for="messageInput" class="sr-only">Votre question</label>
-                <textarea
-                    id="messageInput"
-                    name="message"
-                    rows="1"
-                    placeholder="Exemple : Quelle est la procedure d'inscription en licence ?"
-                    required
-                ></textarea>
-                <button id="sendButton" type="submit">Envoyer</button>
-            </form>
-        </section>
-    </main>
+            <div class="sidebar-content">
+                <p class="section-title">Aide & Suggestions</p>
+                <div class="quick-prompts">
+                    <button type="button" class="prompt-btn" data-prompt="Quelles sont les conditions d'inscription en licence à la FSSM ?">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg>
+                        <span>Conditions d'inscription licence</span>
+                    </button>
+                    <button type="button" class="prompt-btn" data-prompt="Quels documents sont nécessaires pour une inscription administrative ?">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line><polyline points="10 9 9 9 8 9"></polyline></svg>
+                        <span>Documents requis</span>
+                    </button>
+                    <button type="button" class="prompt-btn" data-prompt="Comment se déroule la procédure d'inscription en master ?">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>
+                        <span>Procédure master</span>
+                    </button>
+                </div>
+            </div>
+        </aside>
+
+        <!-- Main Chat Area -->
+        <main class="chat-main">
+            <header class="mobile-header">
+                <div class="logo-circle-small">UCA</div>
+                <h2>Assistant Digital</h2>
+            </header>
+
+            <div class="chat-scroll-area">
+                <div id="chatMessages" class="chat-container" aria-live="polite">
+                    <!-- Default Greeting -->
+                    <div class="message message-assistant">
+                        <div class="avatar avatar-ai">
+                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"></path></svg>
+                        </div>
+                        <div class="message-content">
+                            <p>Bonjour, je suis votre assistant virtuel de l'Université Cadi Ayyad. Comment puis-je vous aider aujourd'hui ?</p>
+                        </div>
+                    </div>
+                </div>
+
+                <div id="typingIndicator" class="typing-indicator" hidden>
+                    <div class="avatar avatar-ai">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
+                    </div>
+                    <div class="dots-wrapper">
+                        <span></span><span></span><span></span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="input-area">
+                <div class="input-container">
+                    <form id="chatForm" class="chat-form">
+                        <textarea 
+                            id="messageInput" 
+                            name="message" 
+                            rows="1" 
+                            placeholder="Posez une question à l'assistant..." 
+                            required
+                        ></textarea>
+                        <button id="sendButton" type="submit" class="send-btn" aria-label="Envoyer">
+                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
+                        </button>
+                    </form>
+                    <div class="disclaimer">L'assistant peut faire des erreurs. Veuillez vérifier les informations importantes.</div>
+                </div>
+            </div>
+        </main>
+    </div>
 
     <script src="{% static 'api_app/chat.js' %}" defer></script>
 </body>

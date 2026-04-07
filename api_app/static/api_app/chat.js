@@ -17,7 +17,8 @@ function escapeHtml(value) {
 }
 
 function scrollToBottom() {
-    chatMessages.scrollTop = chatMessages.scrollHeight;
+    const scrollArea = document.querySelector(".chat-scroll-area") || chatMessages;
+    scrollArea.scrollTop = scrollArea.scrollHeight;
 }
 
 function autoResizeInput() {
@@ -25,60 +26,25 @@ function autoResizeInput() {
     messageInput.style.height = `${Math.min(messageInput.scrollHeight, 140)}px`;
 }
 
-function sourceLabel(source) {
-    if (typeof source === "string") {
-        return source;
-    }
-    if (!source || typeof source !== "object") {
-        return "Document";
-    }
-
-    const base = source.name || source.path || "Document";
-    const score = typeof source.score === "number" ? `score ${source.score.toFixed(3)}` : "";
-    const scoreType = typeof source.score_type === "string" ? source.score_type : "";
-    const hits = typeof source.hits === "number" && source.hits > 1 ? `${source.hits} extraits` : "";
-
-    const extras = [score, scoreType, hits].filter(Boolean).join(" • ");
-    return extras ? `${base} (${extras})` : base;
-}
-
-function appendMessage(role, text, sources = []) {
-    const wrapper = document.createElement("article");
+function appendMessage(role, text) {
+    const wrapper = document.createElement("div");
     wrapper.className = `message ${role === "user" ? "message-user" : "message-assistant"}`;
 
     if (role !== "user") {
         const avatar = document.createElement("div");
-        avatar.className = "message-avatar";
-        avatar.textContent = "UCA";
+        avatar.className = "avatar avatar-ai";
+        avatar.innerHTML = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"></path></svg>`;
         wrapper.appendChild(avatar);
     }
 
-    const body = document.createElement("div");
-    body.className = "message-body";
+    const content = document.createElement("div");
+    content.className = "message-content";
 
     const paragraph = document.createElement("p");
     paragraph.innerHTML = escapeHtml(text).replaceAll("\n", "<br>");
-    body.appendChild(paragraph);
+    content.appendChild(paragraph);
 
-    if (Array.isArray(sources) && sources.length > 0) {
-        const sourcesBlock = document.createElement("div");
-        sourcesBlock.className = "sources";
-
-        const title = document.createElement("strong");
-        title.textContent = "Sources";
-        sourcesBlock.appendChild(title);
-
-        const list = document.createElement("ul");
-        sources.forEach((source) => {
-            const item = document.createElement("li");
-            item.textContent = sourceLabel(source);
-            list.appendChild(item);
-        });
-        sourcesBlock.appendChild(list);
-        body.appendChild(sourcesBlock);
-    }
-
-    wrapper.appendChild(body);
+    wrapper.appendChild(content);
     chatMessages.appendChild(wrapper);
     scrollToBottom();
 }
@@ -124,8 +90,7 @@ async function submitMessage(message) {
         }
 
         const answer = payload.answer || "Aucune reponse generee.";
-        const sources = Array.isArray(payload.sources) ? payload.sources : [];
-        appendMessage("assistant", answer, sources);
+        appendMessage("assistant", answer);
     } catch (error) {
         appendMessage(
             "assistant",
