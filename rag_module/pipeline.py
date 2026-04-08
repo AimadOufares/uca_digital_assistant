@@ -24,13 +24,13 @@ def run_processing() -> None:
 
 
 def run_indexing() -> int:
-    """Etape 3: creation/mise a jour de l'index FAISS."""
+    """Etape 3: creation/mise a jour de l'index hybride dense + lexical."""
     logger.info("Indexing lance.")
     chunks = load_chunks()
     if not chunks:
         raise RuntimeError("Aucun chunk disponible pour l'indexation.")
     build_index(chunks)
-    invalidate_search_cache(clear_models=False)
+    invalidate_search_cache(clear_models=True)
     return len(chunks)
 
 

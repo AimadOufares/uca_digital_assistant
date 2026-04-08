@@ -1,4 +1,4 @@
-from typing import List, Set, Tuple
+from typing import Dict, List, Set, Tuple
 
 from .metadata_policy import normalize_text
 
@@ -127,3 +127,49 @@ def compute_chunk_relevance(text: str, document_type: str) -> Tuple[int, List[st
 
 def should_keep_chunk(chunk_relevance_score: int) -> bool:
     return chunk_relevance_score >= MIN_CHUNK_RELEVANCE_SCORE
+
+
+def query_keyword_hits(query: str) -> List[str]:
+    return sorted(keyword_hits(query, NORMALIZED_TARGET_KEYWORDS))
+
+
+def compute_metadata_boost(metadata: Dict, query: str) -> float:
+    if not metadata:
+        return 0.0
+
+    normalized_query = normalize_text(query)
+    query_hits = set(query_keyword_hits(query))
+    boost = 0.0
+
+    document_type = normalize_text(str(metadata.get("document_type") or ""))
+    faculty = normalize_text(str(metadata.get("faculty") or ""))
+    year = metadata.get("year")
+
+    if document_type and document_type in normalized_query:
+        boost += 0.08
+    if document_type and query_hits and document_type in HIGH_SIGNAL_DOCUMENT_TYPES:
+        if document_type in {"inscription", "admission", "bourse", "calendrier", "resultats", "formation"}:
+            boost += 0.04
+
+    if faculty and faculty != "unknown" and faculty in normalized_query:
+        boost += 0.05
+
+    if isinstance(year, int) and any(token in normalized_query for token in ("calendrier", "resultat", "resultats", "inscription")):
+        if year >= 2024:
+            boost += 0.03
+
+    return min(boost, 0.15)
+
+
+def boost_results_with_metadata(results: List[Dict], query: str) -> List[Dict]:
+    boosted: List[Dict] = []
+    for result in results:
+        enriched = dict(result)
+        metadata = enriched.get("metadata", {}) or {}
+        boost = compute_metadata_boost(metadata, query)
+        base_score = float(enriched.get("score", 0.0) or 0.0)
+        enriched["metadata_boost"] = round(boost, 4)
+        enriched["score"] = max(0.0, min(1.0, base_score + boost))
+        boosted.append(enriched)
+    boosted.sort(key=lambda item: float(item.get("score", 0.0)), reverse=True)
+    return boosted

@@ -15,7 +15,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from rag_module.generation.rag_engine import RAGGenerationError, RAGIndexNotReadyError, answer_question
-from rag_module.retrieval.rag_search import get_relevant_chunks
+from rag_module.retrieval.rag_search import run_hybrid_search_debug
 
 
 REPORT_DIR = PROJECT_ROOT / "data_storage" / "reports"
@@ -26,106 +26,26 @@ FALLBACK_MARKERS = [
 ]
 
 EVAL_SET: List[Dict] = [
-    {
-        "question": "Quelles sont les conditions d'inscription en licence ?",
-        "keywords": ["inscription", "licence", "dossier"],
-        "expected_doc_types": ["inscription", "formation"],
-    },
-    {
-        "question": "Quels documents sont requis pour une inscription administrative ?",
-        "keywords": ["documents", "inscription", "administrative"],
-        "expected_doc_types": ["inscription"],
-    },
-    {
-        "question": "Comment faire la preinscription en ligne ?",
-        "keywords": ["preinscription", "ligne", "procedure"],
-        "expected_doc_types": ["inscription"],
-    },
-    {
-        "question": "Quels sont les delais d'inscription pour le master ?",
-        "keywords": ["delai", "inscription", "master"],
-        "expected_doc_types": ["inscription", "formation"],
-    },
-    {
-        "question": "Comment verifier les resultats d'admission ?",
-        "keywords": ["resultat", "admission", "liste"],
-        "expected_doc_types": ["admission", "resultats"],
-    },
-    {
-        "question": "Quelles sont les modalites du concours d'acces ?",
-        "keywords": ["concours", "acces", "modalites"],
-        "expected_doc_types": ["admission"],
-    },
-    {
-        "question": "Comment obtenir une bourse universitaire ?",
-        "keywords": ["bourse", "conditions", "demande"],
-        "expected_doc_types": ["bourse"],
-    },
-    {
-        "question": "Ou trouver le calendrier pedagogique ?",
-        "keywords": ["calendrier", "pedagogique", "semestre"],
-        "expected_doc_types": ["calendrier"],
-    },
-    {
-        "question": "Quelles sont les filieres disponibles en master ?",
-        "keywords": ["filiere", "master", "formation"],
-        "expected_doc_types": ["formation"],
-    },
-    {
-        "question": "Comment se passe la reinscription ?",
-        "keywords": ["reinscription", "inscription", "dossier"],
-        "expected_doc_types": ["inscription"],
-    },
-    {
-        "question": "Quels sont les frais d'inscription ?",
-        "keywords": ["frais", "inscription", "paiement"],
-        "expected_doc_types": ["inscription"],
-    },
-    {
-        "question": "Ou consulter l'emploi du temps ?",
-        "keywords": ["emploi du temps", "planning", "cours"],
-        "expected_doc_types": ["calendrier"],
-    },
-    {
-        "question": "Comment contacter le service de scolarite ?",
-        "keywords": ["scolarite", "contact", "service"],
-        "expected_doc_types": ["inscription"],
-    },
-    {
-        "question": "Quels sont les criteres de selection en master ?",
-        "keywords": ["selection", "master", "criteres"],
-        "expected_doc_types": ["admission", "formation"],
-    },
-    {
-        "question": "Comment retirer une attestation d'inscription ?",
-        "keywords": ["attestation", "inscription", "retrait"],
-        "expected_doc_types": ["inscription"],
-    },
-    {
-        "question": "Quelles sont les etapes de candidature doctorale ?",
-        "keywords": ["candidature", "doctorat", "etapes"],
-        "expected_doc_types": ["admission", "formation"],
-    },
-    {
-        "question": "Comment connaitre les dates des rattrapages ?",
-        "keywords": ["dates", "rattrapage", "calendrier"],
-        "expected_doc_types": ["resultats", "calendrier"],
-    },
-    {
-        "question": "Quelles pieces sont demandees pour une equivalence ?",
-        "keywords": ["pieces", "equivalence", "dossier"],
-        "expected_doc_types": ["inscription"],
-    },
-    {
-        "question": "Comment suivre l'etat de ma candidature ?",
-        "keywords": ["candidature", "etat", "suivi"],
-        "expected_doc_types": ["admission"],
-    },
-    {
-        "question": "Ou trouver les annonces officielles d'admission ?",
-        "keywords": ["annonces", "admission", "officielles"],
-        "expected_doc_types": ["admission"],
-    },
+    {"question": "Quelles sont les conditions d'inscription en licence ?", "keywords": ["inscription", "licence", "dossier"], "expected_doc_types": ["inscription", "formation"]},
+    {"question": "Quels documents sont requis pour une inscription administrative ?", "keywords": ["documents", "inscription", "administrative"], "expected_doc_types": ["inscription"]},
+    {"question": "Comment faire la preinscription en ligne ?", "keywords": ["preinscription", "ligne", "procedure"], "expected_doc_types": ["inscription"]},
+    {"question": "Quels sont les delais d'inscription pour le master ?", "keywords": ["delai", "inscription", "master"], "expected_doc_types": ["inscription", "formation"]},
+    {"question": "Comment verifier les resultats d'admission ?", "keywords": ["resultat", "admission", "liste"], "expected_doc_types": ["admission", "resultats"]},
+    {"question": "Quelles sont les modalites du concours d'acces ?", "keywords": ["concours", "acces", "modalites"], "expected_doc_types": ["admission"]},
+    {"question": "Comment obtenir une bourse universitaire ?", "keywords": ["bourse", "conditions", "demande"], "expected_doc_types": ["bourse"]},
+    {"question": "Ou trouver le calendrier pedagogique ?", "keywords": ["calendrier", "pedagogique", "semestre"], "expected_doc_types": ["calendrier"]},
+    {"question": "Quelles sont les filieres disponibles en master ?", "keywords": ["filiere", "master", "formation"], "expected_doc_types": ["formation"]},
+    {"question": "Comment se passe la reinscription ?", "keywords": ["reinscription", "inscription", "dossier"], "expected_doc_types": ["inscription"]},
+    {"question": "Quels sont les frais d'inscription ?", "keywords": ["frais", "inscription", "paiement"], "expected_doc_types": ["inscription"]},
+    {"question": "Ou consulter l'emploi du temps ?", "keywords": ["emploi du temps", "planning", "cours"], "expected_doc_types": ["calendrier"]},
+    {"question": "Comment contacter le service de scolarite ?", "keywords": ["scolarite", "contact", "service"], "expected_doc_types": ["inscription"]},
+    {"question": "Quels sont les criteres de selection en master ?", "keywords": ["selection", "master", "criteres"], "expected_doc_types": ["admission", "formation"]},
+    {"question": "Comment retirer une attestation d'inscription ?", "keywords": ["attestation", "inscription", "retrait"], "expected_doc_types": ["inscription"]},
+    {"question": "Quelles sont les etapes de candidature doctorale ?", "keywords": ["candidature", "doctorat", "etapes"], "expected_doc_types": ["admission", "formation"]},
+    {"question": "Comment connaitre les dates des rattrapages ?", "keywords": ["dates", "rattrapage", "calendrier"], "expected_doc_types": ["resultats", "calendrier"]},
+    {"question": "Quelles pieces sont demandees pour une equivalence ?", "keywords": ["pieces", "equivalence", "dossier"], "expected_doc_types": ["inscription"]},
+    {"question": "Comment suivre l'etat de ma candidature ?", "keywords": ["candidature", "etat", "suivi"], "expected_doc_types": ["admission"]},
+    {"question": "Ou trouver les annonces officielles d'admission ?", "keywords": ["annonces", "admission", "officielles"], "expected_doc_types": ["admission"]},
 ]
 
 
@@ -150,19 +70,15 @@ def _keyword_coverage(text: str, keywords: List[str]) -> Dict[str, object]:
         normalized_keyword = _normalize_text(keyword)
         if not normalized_keyword:
             continue
-        if " " in normalized_keyword:
-            if normalized_keyword in normalized_text:
-                matched.append(keyword)
-                continue
+        if " " in normalized_keyword and normalized_keyword in normalized_text:
+            matched.append(keyword)
+            continue
         keyword_tokens = _tokenize(normalized_keyword)
         if keyword_tokens and keyword_tokens.issubset(text_tokens):
             matched.append(keyword)
 
     coverage = len(matched) / len(keywords) if keywords else 0.0
-    return {
-        "score": round(coverage, 4),
-        "matched_keywords": matched,
-    }
+    return {"score": round(coverage, 4), "matched_keywords": matched}
 
 
 def _doc_type_match(chunk: Dict, expected_doc_types: List[str]) -> bool:
@@ -190,11 +106,10 @@ def _chunk_relevance(chunk: Dict, keywords: List[str], expected_doc_types: List[
     source_coverage = _keyword_coverage(source_hint, keywords)
     score = min(1.0, score + (0.15 if float(source_coverage["score"]) >= 0.34 else 0.0))
 
-    relevant = score >= 0.45
     return {
         "score": round(score, 4),
         "matched_keywords": coverage["matched_keywords"],
-        "relevant": relevant,
+        "relevant": score >= 0.45,
     }
 
 
@@ -211,36 +126,67 @@ def _answer_relevance(answer: str, keywords: List[str], expected_doc_types: List
     }
 
 
+def _stage_metrics(chunks: List[Dict], keywords: List[str], expected_doc_types: List[str], top_k: int) -> Dict[str, float]:
+    selected = chunks[:top_k]
+    if not selected:
+        return {"hit": 0.0, "coverage": 0.0, "best": 0.0}
+
+    scores = [_chunk_relevance(chunk, keywords, expected_doc_types) for chunk in selected]
+    relevant = [item for item in scores if item["relevant"]]
+    return {
+        "hit": float(bool(relevant)),
+        "coverage": round(mean(float(item["score"]) for item in scores), 4),
+        "best": round(max(float(item["score"]) for item in scores), 4),
+    }
+
+
 def _retrieval_metrics(question: str, keywords: List[str], expected_doc_types: List[str], top_k: int) -> Dict:
     start = time.perf_counter()
-    chunks = get_relevant_chunks(question, top_k=top_k)
+    payload = run_hybrid_search_debug(question, top_k=top_k)
     elapsed_ms = (time.perf_counter() - start) * 1000
 
-    if not chunks:
+    final_chunks = list(payload.get("final_results", []))
+    if not final_chunks:
         return {
             "precision_at_k": 0.0,
             "coverage_at_k": 0.0,
             "hit_at_k": 0,
+            "dense_hit_at_k": 0,
+            "bm25_hit_at_k": 0,
+            "fusion_hit_at_k": 0,
             "latency_ms": round(elapsed_ms, 2),
             "retrieved": 0,
             "relevant": 0,
             "best_match_score": 0.0,
+            "metadata_boost_gain": 0.0,
+            "rerank_gain": 0.0,
         }
 
-    chunk_scores = [_chunk_relevance(chunk, keywords, expected_doc_types) for chunk in chunks]
-    relevant = sum(1 for item in chunk_scores if item["relevant"])
-    precision = relevant / len(chunks)
-    avg_coverage = mean(float(item["score"]) for item in chunk_scores)
-    best_match = max(float(item["score"]) for item in chunk_scores)
+    final_scores = [_chunk_relevance(chunk, keywords, expected_doc_types) for chunk in final_chunks]
+    relevant = sum(1 for item in final_scores if item["relevant"])
+    precision = relevant / len(final_chunks)
+    avg_coverage = mean(float(item["score"]) for item in final_scores)
+    best_match = max(float(item["score"]) for item in final_scores)
+
+    dense_stage = _stage_metrics(list(payload.get("dense_results", [])), keywords, expected_doc_types, top_k)
+    bm25_stage = _stage_metrics(list(payload.get("bm25_results", [])), keywords, expected_doc_types, top_k)
+    fusion_stage = _stage_metrics(list(payload.get("merged_results", [])), keywords, expected_doc_types, top_k)
+    boosted_stage = _stage_metrics(list(payload.get("boosted_results", [])), keywords, expected_doc_types, top_k)
+    final_stage = _stage_metrics(final_chunks, keywords, expected_doc_types, top_k)
 
     return {
         "precision_at_k": round(precision, 4),
         "coverage_at_k": round(avg_coverage, 4),
         "hit_at_k": int(relevant > 0),
+        "dense_hit_at_k": int(dense_stage["hit"] > 0),
+        "bm25_hit_at_k": int(bm25_stage["hit"] > 0),
+        "fusion_hit_at_k": int(fusion_stage["hit"] > 0),
         "latency_ms": round(elapsed_ms, 2),
-        "retrieved": len(chunks),
+        "retrieved": len(final_chunks),
         "relevant": relevant,
         "best_match_score": round(best_match, 4),
+        "metadata_boost_gain": round(float(boosted_stage["best"]) - float(fusion_stage["best"]), 4),
+        "rerank_gain": round(float(final_stage["best"]) - float(boosted_stage["best"]), 4),
     }
 
 
@@ -260,9 +206,7 @@ def _generation_metrics(question: str, keywords: List[str], expected_doc_types: 
 
     lower = _normalize_text(answer)
     relevance = _answer_relevance(answer, keywords, expected_doc_types)
-    useful = bool(answer.strip()) and bool(relevance["useful"]) and not any(
-        marker in lower for marker in FALLBACK_MARKERS
-    )
+    useful = bool(answer.strip()) and bool(relevance["useful"]) and not any(marker in lower for marker in FALLBACK_MARKERS)
     return {
         "useful_answer": int(useful),
         "answer_relevance_score": relevance["score"],
@@ -279,11 +223,7 @@ def evaluate(top_k: int, run_generation: bool) -> Dict:
         question = case["question"]
         keywords = case["keywords"]
         expected_doc_types = case.get("expected_doc_types", [])
-        row = {
-            "question": question,
-            "keywords": keywords,
-            "expected_doc_types": expected_doc_types,
-        }
+        row = {"question": question, "keywords": keywords, "expected_doc_types": expected_doc_types}
         try:
             row.update(_retrieval_metrics(question, keywords, expected_doc_types, top_k))
         except Exception as exc:
@@ -292,10 +232,15 @@ def evaluate(top_k: int, run_generation: bool) -> Dict:
                     "precision_at_k": 0.0,
                     "coverage_at_k": 0.0,
                     "hit_at_k": 0,
+                    "dense_hit_at_k": 0,
+                    "bm25_hit_at_k": 0,
+                    "fusion_hit_at_k": 0,
                     "latency_ms": 0.0,
                     "retrieved": 0,
                     "relevant": 0,
                     "best_match_score": 0.0,
+                    "metadata_boost_gain": 0.0,
+                    "rerank_gain": 0.0,
                     "retrieval_error": str(exc),
                 }
             )
@@ -316,7 +261,12 @@ def evaluate(top_k: int, run_generation: bool) -> Dict:
             "precision_at_k_avg": round(mean([r.get("precision_at_k", 0.0) for r in rows]), 4) if rows else 0.0,
             "coverage_at_k_avg": round(mean([r.get("coverage_at_k", 0.0) for r in rows]), 4) if rows else 0.0,
             "hit_at_k_rate": round(mean([r.get("hit_at_k", 0) for r in rows]), 4) if rows else 0.0,
+            "dense_hit_at_k_rate": round(mean([r.get("dense_hit_at_k", 0) for r in rows]), 4) if rows else 0.0,
+            "bm25_hit_at_k_rate": round(mean([r.get("bm25_hit_at_k", 0) for r in rows]), 4) if rows else 0.0,
+            "fusion_hit_at_k_rate": round(mean([r.get("fusion_hit_at_k", 0) for r in rows]), 4) if rows else 0.0,
             "best_match_score_avg": round(mean([r.get("best_match_score", 0.0) for r in rows]), 4) if rows else 0.0,
+            "metadata_boost_gain_avg": round(mean([r.get("metadata_boost_gain", 0.0) for r in rows]), 4) if rows else 0.0,
+            "rerank_gain_avg": round(mean([r.get("rerank_gain", 0.0) for r in rows]), 4) if rows else 0.0,
             "retrieval_latency_ms_avg": round(mean(retrieval_latencies), 2) if retrieval_latencies else 0.0,
         },
         "rows": rows,
@@ -324,15 +274,9 @@ def evaluate(top_k: int, run_generation: bool) -> Dict:
 
     if run_generation:
         answer_latencies = [r.get("answer_latency_ms", 0.0) for r in rows if r.get("answer_latency_ms", 0.0) > 0]
-        report["summary"]["useful_answer_rate"] = (
-            round(mean([r.get("useful_answer", 0) for r in rows]), 4) if rows else 0.0
-        )
-        report["summary"]["answer_relevance_score_avg"] = (
-            round(mean([r.get("answer_relevance_score", 0.0) for r in rows]), 4) if rows else 0.0
-        )
-        report["summary"]["answer_latency_ms_avg"] = (
-            round(mean(answer_latencies), 2) if answer_latencies else 0.0
-        )
+        report["summary"]["useful_answer_rate"] = round(mean([r.get("useful_answer", 0) for r in rows]), 4) if rows else 0.0
+        report["summary"]["answer_relevance_score_avg"] = round(mean([r.get("answer_relevance_score", 0.0) for r in rows]), 4) if rows else 0.0
+        report["summary"]["answer_latency_ms_avg"] = round(mean(answer_latencies), 2) if answer_latencies else 0.0
 
     return report
 
@@ -354,7 +298,12 @@ def write_report(report: Dict) -> Dict[str, Path]:
         "",
         f"Precision@k (avg): {report['summary'].get('precision_at_k_avg', 0.0)}",
         f"Coverage@k (avg): {report['summary'].get('coverage_at_k_avg', 0.0)}",
+        f"Dense hit@k rate: {report['summary'].get('dense_hit_at_k_rate', 0.0)}",
+        f"BM25 hit@k rate: {report['summary'].get('bm25_hit_at_k_rate', 0.0)}",
+        f"Fusion hit@k rate: {report['summary'].get('fusion_hit_at_k_rate', 0.0)}",
         f"Best match score (avg): {report['summary'].get('best_match_score_avg', 0.0)}",
+        f"Metadata boost gain (avg): {report['summary'].get('metadata_boost_gain_avg', 0.0)}",
+        f"Rerank gain (avg): {report['summary'].get('rerank_gain_avg', 0.0)}",
         f"Hit@k rate: {report['summary'].get('hit_at_k_rate', 0.0)}",
         f"Retrieval latency avg (ms): {report['summary'].get('retrieval_latency_ms_avg', 0.0)}",
     ]
@@ -373,15 +322,9 @@ def write_report(report: Dict) -> Dict[str, Path]:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Evaluation heuristique amelioree du RAG (precision, couverture et utilite des reponses)."
-    )
+    parser = argparse.ArgumentParser(description="Evaluation heuristique hybride du RAG (dense, BM25, fusion et generation).")
     parser.add_argument("--top-k", type=int, default=5, help="Nombre de chunks recuperes pour l'evaluation.")
-    parser.add_argument(
-        "--skip-generation",
-        action="store_true",
-        help="N'evalue que la retrieval sans generation de reponse.",
-    )
+    parser.add_argument("--skip-generation", action="store_true", help="N'evalue que la retrieval sans generation de reponse.")
     args = parser.parse_args()
 
     top_k = max(1, args.top_k)
