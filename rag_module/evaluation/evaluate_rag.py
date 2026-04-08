@@ -1,12 +1,13 @@
 import argparse
 import json
+import re
+import sys
 import time
+import unicodedata
 from datetime import datetime
 from pathlib import Path
 from statistics import mean
-from typing import Dict, List
-
-import sys
+from typing import Dict, List, Set
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -25,35 +26,192 @@ FALLBACK_MARKERS = [
 ]
 
 EVAL_SET: List[Dict] = [
-    {"question": "Quelles sont les conditions d'inscription en licence ?", "keywords": ["inscription", "licence", "dossier"]},
-    {"question": "Quels documents sont requis pour une inscription administrative ?", "keywords": ["documents", "inscription", "administrative"]},
-    {"question": "Comment faire la preinscription en ligne ?", "keywords": ["preinscription", "ligne", "procedure"]},
-    {"question": "Quels sont les delais d'inscription pour le master ?", "keywords": ["delai", "inscription", "master"]},
-    {"question": "Comment verifier les resultats d'admission ?", "keywords": ["resultat", "admission", "liste"]},
-    {"question": "Quelles sont les modalites du concours d'acces ?", "keywords": ["concours", "acces", "modalites"]},
-    {"question": "Comment obtenir une bourse universitaire ?", "keywords": ["bourse", "conditions", "demande"]},
-    {"question": "Ou trouver le calendrier pedagogique ?", "keywords": ["calendrier", "pedagogique", "semestre"]},
-    {"question": "Quelles sont les filieres disponibles en master ?", "keywords": ["filiere", "master", "formation"]},
-    {"question": "Comment se passe la reinscription ?", "keywords": ["reinscription", "inscription", "dossier"]},
-    {"question": "Quels sont les frais d'inscription ?", "keywords": ["frais", "inscription", "paiement"]},
-    {"question": "Ou consulter l'emploi du temps ?", "keywords": ["emploi du temps", "planning", "cours"]},
-    {"question": "Comment contacter le service de scolarite ?", "keywords": ["scolarite", "contact", "service"]},
-    {"question": "Quels sont les criteres de selection en master ?", "keywords": ["selection", "master", "criteres"]},
-    {"question": "Comment retirer une attestation d'inscription ?", "keywords": ["attestation", "inscription", "retrait"]},
-    {"question": "Quelles sont les etapes de candidature doctorale ?", "keywords": ["candidature", "doctorat", "etapes"]},
-    {"question": "Comment connaitre les dates des rattrapages ?", "keywords": ["dates", "rattrapage", "calendrier"]},
-    {"question": "Quelles pieces sont demandees pour une equivalence ?", "keywords": ["pieces", "equivalence", "dossier"]},
-    {"question": "Comment suivre l'etat de ma candidature ?", "keywords": ["candidature", "etat", "suivi"]},
-    {"question": "Ou trouver les annonces officielles d'admission ?", "keywords": ["annonces", "admission", "officielles"]},
+    {
+        "question": "Quelles sont les conditions d'inscription en licence ?",
+        "keywords": ["inscription", "licence", "dossier"],
+        "expected_doc_types": ["inscription", "formation"],
+    },
+    {
+        "question": "Quels documents sont requis pour une inscription administrative ?",
+        "keywords": ["documents", "inscription", "administrative"],
+        "expected_doc_types": ["inscription"],
+    },
+    {
+        "question": "Comment faire la preinscription en ligne ?",
+        "keywords": ["preinscription", "ligne", "procedure"],
+        "expected_doc_types": ["inscription"],
+    },
+    {
+        "question": "Quels sont les delais d'inscription pour le master ?",
+        "keywords": ["delai", "inscription", "master"],
+        "expected_doc_types": ["inscription", "formation"],
+    },
+    {
+        "question": "Comment verifier les resultats d'admission ?",
+        "keywords": ["resultat", "admission", "liste"],
+        "expected_doc_types": ["admission", "resultats"],
+    },
+    {
+        "question": "Quelles sont les modalites du concours d'acces ?",
+        "keywords": ["concours", "acces", "modalites"],
+        "expected_doc_types": ["admission"],
+    },
+    {
+        "question": "Comment obtenir une bourse universitaire ?",
+        "keywords": ["bourse", "conditions", "demande"],
+        "expected_doc_types": ["bourse"],
+    },
+    {
+        "question": "Ou trouver le calendrier pedagogique ?",
+        "keywords": ["calendrier", "pedagogique", "semestre"],
+        "expected_doc_types": ["calendrier"],
+    },
+    {
+        "question": "Quelles sont les filieres disponibles en master ?",
+        "keywords": ["filiere", "master", "formation"],
+        "expected_doc_types": ["formation"],
+    },
+    {
+        "question": "Comment se passe la reinscription ?",
+        "keywords": ["reinscription", "inscription", "dossier"],
+        "expected_doc_types": ["inscription"],
+    },
+    {
+        "question": "Quels sont les frais d'inscription ?",
+        "keywords": ["frais", "inscription", "paiement"],
+        "expected_doc_types": ["inscription"],
+    },
+    {
+        "question": "Ou consulter l'emploi du temps ?",
+        "keywords": ["emploi du temps", "planning", "cours"],
+        "expected_doc_types": ["calendrier"],
+    },
+    {
+        "question": "Comment contacter le service de scolarite ?",
+        "keywords": ["scolarite", "contact", "service"],
+        "expected_doc_types": ["inscription"],
+    },
+    {
+        "question": "Quels sont les criteres de selection en master ?",
+        "keywords": ["selection", "master", "criteres"],
+        "expected_doc_types": ["admission", "formation"],
+    },
+    {
+        "question": "Comment retirer une attestation d'inscription ?",
+        "keywords": ["attestation", "inscription", "retrait"],
+        "expected_doc_types": ["inscription"],
+    },
+    {
+        "question": "Quelles sont les etapes de candidature doctorale ?",
+        "keywords": ["candidature", "doctorat", "etapes"],
+        "expected_doc_types": ["admission", "formation"],
+    },
+    {
+        "question": "Comment connaitre les dates des rattrapages ?",
+        "keywords": ["dates", "rattrapage", "calendrier"],
+        "expected_doc_types": ["resultats", "calendrier"],
+    },
+    {
+        "question": "Quelles pieces sont demandees pour une equivalence ?",
+        "keywords": ["pieces", "equivalence", "dossier"],
+        "expected_doc_types": ["inscription"],
+    },
+    {
+        "question": "Comment suivre l'etat de ma candidature ?",
+        "keywords": ["candidature", "etat", "suivi"],
+        "expected_doc_types": ["admission"],
+    },
+    {
+        "question": "Ou trouver les annonces officielles d'admission ?",
+        "keywords": ["annonces", "admission", "officielles"],
+        "expected_doc_types": ["admission"],
+    },
 ]
 
 
-def _contains_any(text: str, keywords: List[str]) -> bool:
-    lower_text = (text or "").lower()
-    return any(keyword.lower() in lower_text for keyword in keywords)
+def _normalize_text(value: str) -> str:
+    text = unicodedata.normalize("NFKD", (value or "").lower())
+    text = "".join(ch for ch in text if not unicodedata.combining(ch))
+    text = re.sub(r"[_/\\\-]+", " ", text)
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
 
 
-def _retrieval_metrics(question: str, keywords: List[str], top_k: int) -> Dict:
+def _tokenize(value: str) -> Set[str]:
+    return set(re.findall(r"\b[\w']+\b", _normalize_text(value)))
+
+
+def _keyword_coverage(text: str, keywords: List[str]) -> Dict[str, object]:
+    normalized_text = _normalize_text(text)
+    text_tokens = _tokenize(normalized_text)
+
+    matched: List[str] = []
+    for keyword in keywords:
+        normalized_keyword = _normalize_text(keyword)
+        if not normalized_keyword:
+            continue
+        if " " in normalized_keyword:
+            if normalized_keyword in normalized_text:
+                matched.append(keyword)
+                continue
+        keyword_tokens = _tokenize(normalized_keyword)
+        if keyword_tokens and keyword_tokens.issubset(text_tokens):
+            matched.append(keyword)
+
+    coverage = len(matched) / len(keywords) if keywords else 0.0
+    return {
+        "score": round(coverage, 4),
+        "matched_keywords": matched,
+    }
+
+
+def _doc_type_match(chunk: Dict, expected_doc_types: List[str]) -> bool:
+    metadata = chunk.get("metadata", {}) or {}
+    doc_type = _normalize_text(str(metadata.get("document_type") or ""))
+    return bool(doc_type) and doc_type in {_normalize_text(item) for item in expected_doc_types}
+
+
+def _chunk_relevance(chunk: Dict, keywords: List[str], expected_doc_types: List[str]) -> Dict[str, object]:
+    text = chunk.get("text", "") or ""
+    coverage = _keyword_coverage(text, keywords)
+    score = float(coverage["score"])
+
+    if expected_doc_types and _doc_type_match(chunk, expected_doc_types):
+        score = min(1.0, score + 0.25)
+
+    metadata = chunk.get("metadata", {}) or {}
+    source_hint = " ".join(
+        [
+            str(metadata.get("file_name") or ""),
+            str(metadata.get("source") or ""),
+            str(metadata.get("document_type") or ""),
+        ]
+    )
+    source_coverage = _keyword_coverage(source_hint, keywords)
+    score = min(1.0, score + (0.15 if float(source_coverage["score"]) >= 0.34 else 0.0))
+
+    relevant = score >= 0.45
+    return {
+        "score": round(score, 4),
+        "matched_keywords": coverage["matched_keywords"],
+        "relevant": relevant,
+    }
+
+
+def _answer_relevance(answer: str, keywords: List[str], expected_doc_types: List[str]) -> Dict[str, object]:
+    coverage = _keyword_coverage(answer, keywords)
+    score = float(coverage["score"])
+    normalized_answer = _normalize_text(answer)
+    if expected_doc_types and any(_normalize_text(doc_type) in normalized_answer for doc_type in expected_doc_types):
+        score = min(1.0, score + 0.15)
+    return {
+        "score": round(score, 4),
+        "matched_keywords": coverage["matched_keywords"],
+        "useful": score >= 0.34,
+    }
+
+
+def _retrieval_metrics(question: str, keywords: List[str], expected_doc_types: List[str], top_k: int) -> Dict:
     start = time.perf_counter()
     chunks = get_relevant_chunks(question, top_k=top_k)
     elapsed_ms = (time.perf_counter() - start) * 1000
@@ -61,29 +219,32 @@ def _retrieval_metrics(question: str, keywords: List[str], top_k: int) -> Dict:
     if not chunks:
         return {
             "precision_at_k": 0.0,
+            "coverage_at_k": 0.0,
             "hit_at_k": 0,
             "latency_ms": round(elapsed_ms, 2),
             "retrieved": 0,
             "relevant": 0,
+            "best_match_score": 0.0,
         }
 
-    relevant = 0
-    for chunk in chunks:
-        text = chunk.get("text", "")
-        if _contains_any(text, keywords):
-            relevant += 1
-
+    chunk_scores = [_chunk_relevance(chunk, keywords, expected_doc_types) for chunk in chunks]
+    relevant = sum(1 for item in chunk_scores if item["relevant"])
     precision = relevant / len(chunks)
+    avg_coverage = mean(float(item["score"]) for item in chunk_scores)
+    best_match = max(float(item["score"]) for item in chunk_scores)
+
     return {
         "precision_at_k": round(precision, 4),
+        "coverage_at_k": round(avg_coverage, 4),
         "hit_at_k": int(relevant > 0),
         "latency_ms": round(elapsed_ms, 2),
         "retrieved": len(chunks),
         "relevant": relevant,
+        "best_match_score": round(best_match, 4),
     }
 
 
-def _generation_metrics(question: str, keywords: List[str]) -> Dict:
+def _generation_metrics(question: str, keywords: List[str], expected_doc_types: List[str]) -> Dict:
     start = time.perf_counter()
     try:
         payload = answer_question(question)
@@ -97,14 +258,17 @@ def _generation_metrics(question: str, keywords: List[str]) -> Dict:
         error = f"unexpected: {exc}"
     elapsed_ms = (time.perf_counter() - start) * 1000
 
-    lower = answer.lower()
-    useful = bool(answer.strip()) and _contains_any(answer, keywords) and not any(
+    lower = _normalize_text(answer)
+    relevance = _answer_relevance(answer, keywords, expected_doc_types)
+    useful = bool(answer.strip()) and bool(relevance["useful"]) and not any(
         marker in lower for marker in FALLBACK_MARKERS
     )
     return {
         "useful_answer": int(useful),
+        "answer_relevance_score": relevance["score"],
         "answer_latency_ms": round(elapsed_ms, 2),
         "answer_preview": answer[:180],
+        "matched_keywords": relevance["matched_keywords"],
         "error": error,
     }
 
@@ -114,20 +278,24 @@ def evaluate(top_k: int, run_generation: bool) -> Dict:
     for case in EVAL_SET:
         question = case["question"]
         keywords = case["keywords"]
+        expected_doc_types = case.get("expected_doc_types", [])
         row = {
             "question": question,
             "keywords": keywords,
+            "expected_doc_types": expected_doc_types,
         }
         try:
-            row.update(_retrieval_metrics(question, keywords, top_k))
+            row.update(_retrieval_metrics(question, keywords, expected_doc_types, top_k))
         except Exception as exc:
             row.update(
                 {
                     "precision_at_k": 0.0,
+                    "coverage_at_k": 0.0,
                     "hit_at_k": 0,
                     "latency_ms": 0.0,
                     "retrieved": 0,
                     "relevant": 0,
+                    "best_match_score": 0.0,
                     "retrieval_error": str(exc),
                 }
             )
@@ -135,7 +303,7 @@ def evaluate(top_k: int, run_generation: bool) -> Dict:
             break
 
         if run_generation:
-            row.update(_generation_metrics(question, keywords))
+            row.update(_generation_metrics(question, keywords, expected_doc_types))
 
         rows.append(row)
 
@@ -146,7 +314,9 @@ def evaluate(top_k: int, run_generation: bool) -> Dict:
         "questions_evaluated": len(rows),
         "summary": {
             "precision_at_k_avg": round(mean([r.get("precision_at_k", 0.0) for r in rows]), 4) if rows else 0.0,
+            "coverage_at_k_avg": round(mean([r.get("coverage_at_k", 0.0) for r in rows]), 4) if rows else 0.0,
             "hit_at_k_rate": round(mean([r.get("hit_at_k", 0) for r in rows]), 4) if rows else 0.0,
+            "best_match_score_avg": round(mean([r.get("best_match_score", 0.0) for r in rows]), 4) if rows else 0.0,
             "retrieval_latency_ms_avg": round(mean(retrieval_latencies), 2) if retrieval_latencies else 0.0,
         },
         "rows": rows,
@@ -156,6 +326,9 @@ def evaluate(top_k: int, run_generation: bool) -> Dict:
         answer_latencies = [r.get("answer_latency_ms", 0.0) for r in rows if r.get("answer_latency_ms", 0.0) > 0]
         report["summary"]["useful_answer_rate"] = (
             round(mean([r.get("useful_answer", 0) for r in rows]), 4) if rows else 0.0
+        )
+        report["summary"]["answer_relevance_score_avg"] = (
+            round(mean([r.get("answer_relevance_score", 0.0) for r in rows]), 4) if rows else 0.0
         )
         report["summary"]["answer_latency_ms_avg"] = (
             round(mean(answer_latencies), 2) if answer_latencies else 0.0
@@ -180,6 +353,8 @@ def write_report(report: Dict) -> Dict[str, Path]:
         f"Questions evaluated: {report['questions_evaluated']}",
         "",
         f"Precision@k (avg): {report['summary'].get('precision_at_k_avg', 0.0)}",
+        f"Coverage@k (avg): {report['summary'].get('coverage_at_k_avg', 0.0)}",
+        f"Best match score (avg): {report['summary'].get('best_match_score_avg', 0.0)}",
         f"Hit@k rate: {report['summary'].get('hit_at_k_rate', 0.0)}",
         f"Retrieval latency avg (ms): {report['summary'].get('retrieval_latency_ms_avg', 0.0)}",
     ]
@@ -187,6 +362,7 @@ def write_report(report: Dict) -> Dict[str, Path]:
         lines.extend(
             [
                 f"Useful answer rate: {report['summary'].get('useful_answer_rate', 0.0)}",
+                f"Answer relevance score avg: {report['summary'].get('answer_relevance_score_avg', 0.0)}",
                 f"Answer latency avg (ms): {report['summary'].get('answer_latency_ms_avg', 0.0)}",
             ]
         )
@@ -197,8 +373,10 @@ def write_report(report: Dict) -> Dict[str, Path]:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Evaluation simple du RAG (Precision@k + reponses utiles).")
-    parser.add_argument("--top-k", type=int, default=5, help="Nombre de chunks recuperes pour Precision@k.")
+    parser = argparse.ArgumentParser(
+        description="Evaluation heuristique amelioree du RAG (precision, couverture et utilite des reponses)."
+    )
+    parser.add_argument("--top-k", type=int, default=5, help="Nombre de chunks recuperes pour l'evaluation.")
     parser.add_argument(
         "--skip-generation",
         action="store_true",

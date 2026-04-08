@@ -707,15 +707,17 @@ def run(audit_only: bool) -> Dict[str, Dict[str, Path]]:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Audit + curation qualite des donnees RAW pour pipeline RAG.")
+    parser = argparse.ArgumentParser(
+        description="Audit qualite des donnees RAW pour pipeline RAG, avec curation explicite en option."
+    )
     parser.add_argument(
-        "--audit-only",
+        "--apply-curation",
         action="store_true",
-        help="Genere uniquement le rapport d'audit sans deplacer de fichiers.",
+        help="Deplace les fichiers problematiques en quarantaine apres l'audit.",
     )
     args = parser.parse_args()
 
-    outputs = run(audit_only=args.audit_only)
+    outputs = run(audit_only=not args.apply_curation)
     print(f"Audit JSON: {outputs['audit']['json']}")
     print(f"Audit TXT : {outputs['audit']['txt']}")
     if "curation" in outputs:

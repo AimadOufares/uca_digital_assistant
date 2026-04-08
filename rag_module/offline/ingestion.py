@@ -332,14 +332,14 @@ def infer_extension(url: str, content_type: str, content: bytes = b"", content_d
         disposition_name = lowered_disposition.split("filename=", 1)[1].strip(" \"'")
         disposition_ext = Path(disposition_name).suffix.lower()
         if disposition_ext in allowed_exts:
-            return ".docx" if disposition_ext == ".doc" else disposition_ext
+            return disposition_ext
 
     if "text/html" in lowered_type:
         return ".html"
     if "application/pdf" in lowered_type:
         return ".pdf"
     if "application/msword" in lowered_type:
-        return ".docx"
+        return ".doc"
     if "application/vnd.openxmlformats-officedocument.wordprocessingml.document" in lowered_type:
         return ".docx"
     if "text/plain" in lowered_type:

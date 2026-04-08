@@ -26,6 +26,8 @@ os.makedirs(os.path.dirname(CACHE_PATH), exist_ok=True)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+_embedding_model = None
+
 
 # ==============================
 # UTILS
@@ -36,6 +38,21 @@ def get_hash(text: str) -> str:
 
 def normalize(text: str) -> str:
     return " ".join(text.strip().split())
+
+
+def get_embedding_model() -> SentenceTransformer:
+    global _embedding_model
+    if _embedding_model is None:
+        logger.info("Chargement du modele embedding: %s", MODEL_NAME)
+        try:
+            _embedding_model = SentenceTransformer(
+                MODEL_NAME,
+                device="cpu",
+                local_files_only=True,
+            )
+        except Exception:
+            _embedding_model = SentenceTransformer(MODEL_NAME, device="cpu")
+    return _embedding_model
 
 
 # ==============================
@@ -125,7 +142,7 @@ def load_chunks() -> List[Dict]:
 # EMBEDDING
 # ==============================
 def embed(texts: List[str], cache: Dict[str, List[float]]) -> List[List[float]]:
-    model = SentenceTransformer(MODEL_NAME)
+    model = get_embedding_model()
 
     embeddings: List[List[float]] = []
     new_cache = False

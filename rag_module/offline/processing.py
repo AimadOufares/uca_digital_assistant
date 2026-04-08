@@ -443,6 +443,11 @@ def preprocess_file(file_path: str) -> List[Dict]:
     }
 
     if ext not in extractors:
+        if ext == ".doc":
+            logger.warning(
+                "Legacy Word format unsupported without conversion: %s",
+                file_path,
+            )
         logger.warning("Unsupported format: %s", file_path)
         return []
 
