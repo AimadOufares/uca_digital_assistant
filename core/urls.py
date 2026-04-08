@@ -16,11 +16,12 @@ Including another URLconf
 """
 from django.contrib import admin
 from django.urls import path, include
-from api_app.views import ChatPageView
+from api_app.views import ChatPageView, AdminDashboardPageView
 
 urlpatterns = [
     path('admin/', admin.site.urls),
     path('api/', include('api_app.urls')),
     path('chat/', ChatPageView.as_view(), name='chat-page'),
+    path('admin-dashboard/', AdminDashboardPageView.as_view(), name='admin-dashboard'),
 ]
 

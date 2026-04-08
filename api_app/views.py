@@ -1,4 +1,6 @@
 import logging
+import json
+from pathlib import Path
 
 from django.views.generic import TemplateView
 from rest_framework import serializers, status
@@ -71,3 +73,34 @@ class ChatAPIView(APIView):
 
 class ChatPageView(TemplateView):
     template_name = "api_app/chat.html"
+
+
+class AdminDashboardPageView(TemplateView):
+    template_name = "api_app/admin_dashboard.html"
+
+
+class AdminDashboardAPIView(APIView):
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        project_root = Path(__file__).resolve().parents[2]
+        reports_dir = project_root / "data_storage" / "reports"
+        
+        def get_latest_json(prefix):
+            if not reports_dir.exists():
+                return {}
+            files = list(reports_dir.glob(f"{prefix}_*.json"))
+            if not files:
+                return {}
+            latest_file = max(files, key=lambda f: f.stat().st_mtime)
+            try:
+                with latest_file.open("r", encoding="utf-8") as h:
+                    return json.load(h)
+            except Exception:
+                return {}
+
+        return Response({
+            "data_audit": get_latest_json("data_audit"),
+            "raw_quality_audit": get_latest_json("raw_quality_audit"),
+            "rag_eval": get_latest_json("rag_eval")
+        }, status=status.HTTP_200_OK)
