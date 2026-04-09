@@ -2,6 +2,8 @@ import logging
 import json
 from pathlib import Path
 
+from django.utils.decorators import method_decorator
+from django.views.decorators.csrf import ensure_csrf_cookie
 from django.views.generic import TemplateView
 from rest_framework import serializers, status
 from rest_framework.permissions import AllowAny
@@ -71,6 +73,7 @@ class ChatAPIView(APIView):
             )
 
 
+@method_decorator(ensure_csrf_cookie, name="dispatch")
 class ChatPageView(TemplateView):
     template_name = "api_app/chat.html"
 

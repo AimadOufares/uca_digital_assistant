@@ -91,6 +91,18 @@ QUERY_STOPWORDS = {
     "votre",
 }
 
+QUERY_CANONICAL_REPLACEMENTS: List[Tuple[str, str]] = [
+    (r"\bs[' ]inscrire\b", "inscription"),
+    (r"\bsinscrire\b", "inscription"),
+    (r"\binscrire\b", "inscription"),
+    (r"\binscription a\b", "inscription"),
+    (r"\bpre inscription\b", "preinscription"),
+    (r"\bbource\b", "bourse"),
+    (r"\bboursse\b", "bourse"),
+    (r"\bbours\b", "bourse"),
+    (r"\bfac\b", "faculte"),
+]
+
 QUERY_TOPIC_RULES: Dict[str, Dict[str, Any]] = {
     "stage": {
         "keywords": {
@@ -115,6 +127,9 @@ QUERY_TOPIC_RULES: Dict[str, Dict[str, Any]] = {
             "pre inscription",
             "reinscription",
             "inscription administrative",
+            "s inscrire",
+            "sinscrire",
+            "inscrire",
             "scolarite",
             "registration",
         },
@@ -416,7 +431,21 @@ def preprocess_query(query: str) -> str:
     query = re.sub(r"\s+", " ", query)
     if USE_ASCII_NORMALIZATION:
         query = unidecode.unidecode(query)
-    return query
+
+    normalized_query = normalize_text(query)
+    for pattern, replacement in QUERY_CANONICAL_REPLACEMENTS:
+        normalized_query = re.sub(pattern, replacement, normalized_query)
+    normalized_query = re.sub(r"\s+", " ", normalized_query).strip()
+
+    # "faculte" est souvent employe generiquement par les utilisateurs
+    # quand ils demandent une inscription universitaire.
+    if "faculte" in normalized_query and "inscription" in normalized_query:
+        normalized_query = normalized_query.replace("faculte", "universite")
+
+    if normalized_query.startswith("la ") and len(normalized_query.split()) <= 3:
+        normalized_query = normalized_query[3:]
+
+    return normalized_query
 
 
 def correct_query(query: str) -> str:
@@ -456,6 +485,10 @@ def generate_multi_queries(query: str) -> List[str]:
         base + " informations importantes",
         "comment " + base if not base.startswith(("comment", "comment faire")) else base,
     ]
+    if "inscription" in base and "universite" not in base:
+        variations.append(base + " universite")
+    if "bourse" in base and "universitaire" not in base:
+        variations.append(base + " universitaire")
     return list(dict.fromkeys(variations))
 
 

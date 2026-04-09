@@ -5,8 +5,11 @@ import json
 import hashlib
 import logging
 import queue
+import string
 import threading
 import time
+import unicodedata
+from html import unescape
 from pathlib import Path
 from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
 
@@ -24,8 +27,31 @@ TIMEOUT = 20
 RETRIES = 3
 PLAYWRIGHT_WAIT = 2500
 
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+        return value if value > 0 else default
+    except ValueError:
+        return default
+
+
 MAX_DEPTH = 4
-MAX_TOTAL_URLS = 800
+MAX_TOTAL_URLS = _env_int("RAG_MAX_TOTAL_URLS", 2000)
+MAX_HTML_PARSE_BYTES = 2_000_000
+
+MIN_TEXT_WORDS = 90
+MIN_TEXT_CHARS = 600
+MIN_ALPHA_RATIO = 0.55
+MAX_SYMBOL_RATIO = 0.30
+MAX_URL_DENSITY = 0.08
+MAX_MOJIBAKE_RATIO = 0.008
+MIN_BINARY_BYTES = 8_000
+MAX_DOWNLOAD_BYTES = 25_000_000
+MIN_DOWNLOAD_QUALITY_SCORE = 52
 
 ALLOWED_DOMAIN_SUFFIXES = {
     # Espace officiel UCA: portail principal, etablissements, preins-*, ecampus-*,
@@ -204,6 +230,12 @@ BLOCKED_EXTENSIONS = {
     ".zip",
 }
 
+SKIPPED_CONTENT_TYPE_PREFIXES = (
+    "audio/",
+    "image/",
+    "video/",
+)
+
 EXCLUDE_PATHS = [
     "/login",
     "/admin",
@@ -220,6 +252,20 @@ EXCLUDE_PATHS = [
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0"
+}
+
+WORD_PATTERN = re.compile(r"\b[\w'-]+\b", flags=re.UNICODE)
+URL_PATTERN = re.compile(r"https?://|www\.", flags=re.IGNORECASE)
+MOJIBAKE_PATTERN = re.compile(r"(Ã.|Â.|â€¦|â€™|â€œ|â€“|ï¿½)")
+NORMALIZED_PRIORITY_KEYWORDS = {
+    token
+    for token in (
+        *HIGH_PRIORITY_KEYWORDS,
+        *MEDIUM_PRIORITY_KEYWORDS,
+        "inscription administrative",
+        "service de scolarite",
+    )
+    if token
 }
 
 os.makedirs(RAW_DATA_PATH, exist_ok=True)
@@ -351,6 +397,192 @@ def infer_extension(url: str, content_type: str, content: bytes = b"", content_d
     if path_ext in allowed_exts:
         return path_ext
     return ".html"
+
+
+def normalize_quality_text(value: str) -> str:
+    text = unicodedata.normalize("NFKD", (value or "").lower())
+    text = "".join(ch for ch in text if not unicodedata.combining(ch))
+    text = re.sub(r"[_/\\\-]+", " ", text)
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
+
+
+def extract_text_preview(content: bytes, ext: str) -> str:
+    if not content:
+        return ""
+
+    if ext in {".html", ".htm"}:
+        try:
+            html = content[:MAX_HTML_PARSE_BYTES].decode("utf-8", errors="replace")
+            soup = BeautifulSoup(html, "lxml")
+            for tag in soup(["script", "style", "noscript", "nav", "footer", "header", "aside", "form"]):
+                tag.decompose()
+            main = soup.find(["main", "article"]) or soup.body or soup
+            parts = [
+                tag.get_text(" ", strip=True)
+                for tag in main.find_all(["h1", "h2", "h3", "h4", "p", "li", "td"])
+                if tag.get_text(strip=True)
+            ]
+            if parts:
+                return "\n".join(parts)
+            return main.get_text(" ", strip=True)
+        except Exception:
+            return ""
+
+    if ext in {".txt", ".md"}:
+        return content.decode("utf-8", errors="replace")
+
+    return ""
+
+
+def score_text_quality(text: str) -> dict:
+    cleaned = unescape(text or "")
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    words = WORD_PATTERN.findall(cleaned.lower())
+    word_count = len(words)
+    char_count = len(cleaned)
+    non_space = sum(1 for ch in cleaned if not ch.isspace())
+    alpha_count = sum(1 for ch in cleaned if ch.isalpha())
+    symbol_count = sum(
+        1 for ch in cleaned
+        if ch in string.punctuation or (not ch.isalnum() and not ch.isspace())
+    )
+    url_count = len(URL_PATTERN.findall(cleaned))
+    alpha_ratio = (alpha_count / non_space) if non_space else 0.0
+    symbol_ratio = (symbol_count / non_space) if non_space else 0.0
+    url_density = (url_count / max(word_count, 1))
+    mojibake_ratio = len(MOJIBAKE_PATTERN.findall(cleaned)) / max(char_count, 1)
+
+    return {
+        "text": cleaned,
+        "words": word_count,
+        "chars": char_count,
+        "alpha_ratio": alpha_ratio,
+        "symbol_ratio": symbol_ratio,
+        "url_density": url_density,
+        "mojibake_ratio": mojibake_ratio,
+    }
+
+
+def compute_download_quality(
+    url: str,
+    depth: int,
+    content: bytes,
+    content_type: str,
+    ext: str,
+) -> dict:
+    content_size = len(content or b"")
+    lowered_type = (content_type or "").lower().strip()
+    normalized_url = normalize_quality_text(url)
+    keyword_hits = sorted(
+        keyword
+        for keyword in NORMALIZED_PRIORITY_KEYWORDS
+        if normalize_quality_text(keyword) and normalize_quality_text(keyword) in normalized_url
+    )
+
+    if content_size <= 0:
+        return {
+            "keep": False,
+            "score": 0,
+            "reason": "empty_content",
+            "keyword_hits": keyword_hits,
+            "metrics": {},
+        }
+
+    if content_size > MAX_DOWNLOAD_BYTES:
+        return {
+            "keep": False,
+            "score": 0,
+            "reason": "file_too_large",
+            "keyword_hits": keyword_hits,
+            "metrics": {"bytes": content_size},
+        }
+
+    if any(lowered_type.startswith(prefix) for prefix in SKIPPED_CONTENT_TYPE_PREFIXES):
+        return {
+            "keep": False,
+            "score": 0,
+            "reason": "unsupported_media_content_type",
+            "keyword_hits": keyword_hits,
+            "metrics": {"content_type": lowered_type},
+        }
+
+    if ext == ".doc":
+        return {
+            "keep": False,
+            "score": 0,
+            "reason": "unsupported_legacy_doc",
+            "keyword_hits": keyword_hits,
+            "metrics": {"bytes": content_size},
+        }
+
+    if ext in {".pdf", ".doc", ".docx"}:
+        score = 55
+        if content_size >= MIN_BINARY_BYTES:
+            score += 20
+        else:
+            score -= 30
+
+        if keyword_hits:
+            score += min(20, len(keyword_hits) * 5)
+        elif depth >= 2:
+            score -= 10
+
+        score = max(0, min(100, int(round(score))))
+        return {
+            "keep": score >= MIN_DOWNLOAD_QUALITY_SCORE,
+            "score": score,
+            "reason": "binary_quality_gate",
+            "keyword_hits": keyword_hits,
+            "metrics": {"bytes": content_size},
+        }
+
+    preview = extract_text_preview(content, ext)
+    metrics = score_text_quality(preview)
+
+    score = 100.0
+    if metrics["words"] < MIN_TEXT_WORDS:
+        score -= min(35.0, (MIN_TEXT_WORDS - metrics["words"]) * 0.5)
+    if metrics["chars"] < MIN_TEXT_CHARS:
+        score -= min(30.0, (MIN_TEXT_CHARS - metrics["chars"]) / 20.0)
+    if metrics["alpha_ratio"] < MIN_ALPHA_RATIO:
+        score -= (MIN_ALPHA_RATIO - metrics["alpha_ratio"]) * 90.0
+    if metrics["symbol_ratio"] > MAX_SYMBOL_RATIO:
+        score -= (metrics["symbol_ratio"] - MAX_SYMBOL_RATIO) * 130.0
+    if metrics["url_density"] > MAX_URL_DENSITY:
+        score -= min(25.0, (metrics["url_density"] - MAX_URL_DENSITY) * 250.0)
+    if metrics["mojibake_ratio"] > MAX_MOJIBAKE_RATIO:
+        score -= min(25.0, (metrics["mojibake_ratio"] - MAX_MOJIBAKE_RATIO) * 1200.0)
+
+    normalized_preview = normalize_quality_text(metrics["text"][:7000])
+    if keyword_hits:
+        score += min(16.0, len(keyword_hits) * 4.0)
+    else:
+        text_hits = sum(1 for keyword in NORMALIZED_PRIORITY_KEYWORDS if normalize_quality_text(keyword) in normalized_preview)
+        if text_hits:
+            score += min(14.0, text_hits * 3.5)
+        elif depth >= 2:
+            score -= 16.0
+
+    if "404" in metrics["text"] and metrics["words"] < 140:
+        score -= 20.0
+
+    score = max(0, min(100, int(round(score))))
+    return {
+        "keep": score >= MIN_DOWNLOAD_QUALITY_SCORE,
+        "score": score,
+        "reason": "text_quality_gate",
+        "keyword_hits": keyword_hits,
+        "metrics": {
+            "bytes": content_size,
+            "words": metrics["words"],
+            "chars": metrics["chars"],
+            "alpha_ratio": round(metrics["alpha_ratio"], 4),
+            "symbol_ratio": round(metrics["symbol_ratio"], 4),
+            "url_density": round(metrics["url_density"], 4),
+            "mojibake_ratio": round(metrics["mojibake_ratio"], 5),
+        },
+    }
 
 
 def generate_filename(url, ext):
@@ -489,19 +721,35 @@ def download(url, depth, seen_hashes):
                     content = pw_content
                     content_type = "text/html; charset=utf-8"
 
-            file_hash = compute_hash(content)
-            
-            with seen_hashes_lock:
-                if file_hash in seen_hashes:
-                    return None
-                seen_hashes.add(file_hash)
-
             ext = infer_extension(
                 url,
                 content_type,
                 content=content,
                 content_disposition=r.headers.get("Content-Disposition", ""),
             )
+            quality = compute_download_quality(
+                url=url,
+                depth=depth,
+                content=content,
+                content_type=content_type,
+                ext=ext,
+            )
+            if not quality["keep"]:
+                logger.info(
+                    "Skipped low-quality doc [%s] score=%s reason=%s url=%s",
+                    ext,
+                    quality.get("score"),
+                    quality.get("reason"),
+                    url,
+                )
+                return None
+
+            file_hash = compute_hash(content)
+            with seen_hashes_lock:
+                if file_hash in seen_hashes:
+                    return None
+                seen_hashes.add(file_hash)
+
             filename = generate_filename(url, ext)
             path = save_file(content, filename)
             
@@ -515,6 +763,10 @@ def download(url, depth, seen_hashes):
                 "hash": file_hash,
                 "content_type": content_type,
                 "is_html": ext in {".html", ".htm"},
+                "download_quality_score": quality.get("score", 0),
+                "download_quality_reason": quality.get("reason", ""),
+                "download_keyword_hits": quality.get("keyword_hits", []),
+                "download_quality_metrics": quality.get("metrics", {}),
             }
 
         except Exception as exc:

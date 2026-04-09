@@ -3,9 +3,22 @@ const chatForm = document.getElementById("chatForm");
 const messageInput = document.getElementById("messageInput");
 const sendButton = document.getElementById("sendButton");
 const typingIndicator = document.getElementById("typingIndicator");
-const promptChips = document.querySelectorAll(".prompt-chip");
+const promptButtons = document.querySelectorAll(".prompt-btn");
 
 const API_URL = "/api/chat/";
+
+function getCookie(name) {
+    const cookieValue = document.cookie
+        .split(";")
+        .map((item) => item.trim())
+        .find((item) => item.startsWith(`${name}=`));
+    return cookieValue ? decodeURIComponent(cookieValue.split("=").slice(1).join("=")) : "";
+}
+
+function getCsrfToken() {
+    const csrfTokenInput = document.querySelector("[name=csrfmiddlewaretoken]");
+    return (csrfTokenInput && csrfTokenInput.value) || getCookie("csrftoken") || "";
+}
 
 function escapeHtml(value) {
     return value
@@ -53,8 +66,8 @@ function setLoadingState(isLoading) {
     sendButton.disabled = isLoading;
     messageInput.disabled = isLoading;
     typingIndicator.hidden = !isLoading;
-    promptChips.forEach((chip) => {
-        chip.disabled = isLoading;
+    promptButtons.forEach((button) => {
+        button.disabled = isLoading;
     });
     if (!isLoading) {
         messageInput.focus();
@@ -68,11 +81,14 @@ async function submitMessage(message) {
     setLoadingState(true);
 
     try {
+        const csrfToken = getCsrfToken();
         const response = await fetch(API_URL, {
             method: "POST",
+            credentials: "same-origin",
             headers: {
                 "Content-Type": "application/json",
                 "X-Requested-With": "XMLHttpRequest",
+                "X-CSRFToken": csrfToken,
             },
             body: JSON.stringify({ message }),
         });
@@ -110,9 +126,9 @@ chatForm.addEventListener("submit", async (event) => {
     await submitMessage(message);
 });
 
-promptChips.forEach((chip) => {
-    chip.addEventListener("click", async () => {
-        const prompt = (chip.dataset.prompt || "").trim();
+promptButtons.forEach((button) => {
+    button.addEventListener("click", async () => {
+        const prompt = (button.dataset.prompt || "").trim();
         if (!prompt || sendButton.disabled) {
             return;
         }

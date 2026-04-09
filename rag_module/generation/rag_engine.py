@@ -30,6 +30,7 @@ DEFAULT_LM_STUDIO_BASE_URL = "http://127.0.0.1:1234/v1"
 DEFAULT_LM_STUDIO_MODEL = ""
 DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
 DEFAULT_MAX_TOKENS = 420
+DEFAULT_LM_STUDIO_MAX_TOKENS = 220
 DEFAULT_TEMPERATURE = 0.15
 DEFAULT_REQUEST_TIMEOUT = 120.0
 DEFAULT_RETRIEVAL_K = 4
@@ -202,7 +203,7 @@ def _generate_with_lm_studio(prompt: str) -> str:
     base_url = os.getenv("LM_STUDIO_BASE_URL", DEFAULT_LM_STUDIO_BASE_URL).strip()
     configured_model = os.getenv("RAG_LM_STUDIO_MODEL", DEFAULT_LM_STUDIO_MODEL).strip()
     api_key = os.getenv("LM_STUDIO_API_KEY", "lm-studio").strip() or "lm-studio"
-    max_tokens = _env_int("RAG_MAX_TOKENS", DEFAULT_MAX_TOKENS)
+    max_tokens = _env_int("RAG_LM_STUDIO_MAX_TOKENS", _env_int("RAG_MAX_TOKENS", DEFAULT_LM_STUDIO_MAX_TOKENS))
     temperature = _env_float("RAG_TEMPERATURE", DEFAULT_TEMPERATURE)
     timeout = _env_float("RAG_REQUEST_TIMEOUT", DEFAULT_REQUEST_TIMEOUT)
 
@@ -236,12 +237,20 @@ def _generate_with_lm_studio(prompt: str) -> str:
 def _generation_order() -> List[str]:
     provider = os.getenv("RAG_LLM_PROVIDER", "lmstudio").strip().lower()
     if provider in {"lmstudio", "local"}:
-        return ["lmstudio", "openai"]
+        return ["lmstudio"]
     if provider == "openai":
-        return ["openai", "lmstudio"]
+        return ["openai"]
     if provider == "auto":
         return ["lmstudio", "openai"]
     return ["lmstudio", "openai"]
+
+
+def _prompt_style_for_backend(configured_style: str, backend: str) -> str:
+    if configured_style != "auto":
+        return configured_style
+    if backend == "lmstudio":
+        return "compact"
+    return "standard"
 
 
 def _to_float(value: Any, default: float = 0.0) -> float:
@@ -311,7 +320,7 @@ class RAGEngine:
         retrieval_k_from_env = _env_int("RAG_RETRIEVAL_K", retrieval_k)
         self.retrieval_k = max(1, retrieval_k_from_env)
         env_prompt_style = os.getenv("RAG_PROMPT_STYLE", prompt_style).strip().lower()
-        self.prompt_style = env_prompt_style if env_prompt_style in {"auto", "standard", "concise"} else "auto"
+        self.prompt_style = env_prompt_style if env_prompt_style in {"auto", "standard", "concise", "compact"} else "auto"
 
     def retrieve(self, query: str) -> List[Dict]:
         try:
@@ -336,12 +345,9 @@ class RAGEngine:
             return _abstention_answer()
 
         backends = _generation_order()
-        prompt_style = self.prompt_style
-        if prompt_style == "auto":
-            prompt_style = "standard"
-
-        prompt = build_rag_prompt(query=query, chunks=chunks, style=prompt_style)
         for backend in backends:
+            prompt_style = _prompt_style_for_backend(self.prompt_style, backend)
+            prompt = build_rag_prompt(query=query, chunks=chunks, style=prompt_style)
             answer = _generate_with_lm_studio(prompt) if backend == "lmstudio" else _generate_with_openai(prompt)
             if answer:
                 return answer
