@@ -6,11 +6,14 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 from .prompt_builder import build_rag_prompt
+from ..shared.env_loader import load_env_file
 
 try:
     from openai import OpenAI
 except Exception:  # pragma: no cover
     OpenAI = None
+
+load_env_file()
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +29,7 @@ class RAGGenerationError(RuntimeError):
 DEFAULT_LM_STUDIO_BASE_URL = "http://127.0.0.1:1234/v1"
 DEFAULT_LM_STUDIO_MODEL = ""
 DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
-DEFAULT_MAX_TOKENS = 280
+DEFAULT_MAX_TOKENS = 420
 DEFAULT_TEMPERATURE = 0.15
 DEFAULT_REQUEST_TIMEOUT = 120.0
 DEFAULT_RETRIEVAL_K = 4
@@ -61,11 +64,46 @@ def _safe_sentences(text: str) -> List[str]:
     return [p.strip() for p in parts if p.strip()]
 
 
+def _confidence_label_from_chunks(chunks: List[Dict]) -> str:
+    if not chunks:
+        return "faible"
+
+    scores: List[float] = []
+    for chunk in chunks[:3]:
+        confidence = _chunk_confidence(chunk)
+        scores.append(float(confidence.get("score", 0.0) or 0.0))
+
+    if not scores:
+        return "faible"
+
+    top_score = max(scores)
+    avg_score = sum(scores) / len(scores)
+    if top_score >= 0.82 and avg_score >= 0.72:
+        return "eleve"
+    if top_score >= 0.62 and avg_score >= 0.5:
+        return "moyen"
+    return "faible"
+
+
+def _fallback_sources_section(chunks: List[Dict]) -> List[str]:
+    names: List[str] = []
+    for source in _normalize_sources(chunks)[:3]:
+        name = str(source.get("name") or "").strip()
+        if name and name not in names:
+            names.append(name)
+    return names
+
+
 def _extractive_fallback_answer(query: str, chunks: List[Dict]) -> str:
     if not chunks:
         return (
-            "Information non disponible dans mes sources actuelles. "
-            "Pouvez-vous reformuler votre question ?"
+            "Reponse\n"
+            "Information non disponible dans mes sources actuelles.\n\n"
+            "Sources utiles\n"
+            "- Aucune source pertinente disponible.\n\n"
+            "Niveau de confiance: faible\n\n"
+            "Points a verifier\n"
+            "- Reformuler la question ou preciser la faculte, l'annee ou la procedure concernee."
         )
 
     lines: List[str] = []
@@ -79,14 +117,33 @@ def _extractive_fallback_answer(query: str, chunks: List[Dict]) -> str:
             break
 
     if not lines:
-        return (
+        response_body = (
             "J'ai trouve des documents lies a votre question, mais je n'ai pas pu "
-            "generer un resume fiable automatiquement."
+            "produire une synthese suffisamment fiable automatiquement."
         )
+    else:
+        response_body = "Voici les informations les plus directement appuyees par les extraits recuperes :\n"
+        response_body += "\n".join(f"- {line}" for line in lines)
 
-    answer = "Voici ce que j'ai trouve dans les documents disponibles :\n"
-    answer += "\n".join(f"- {line}" for line in lines)
-    return answer
+    sources_lines = _fallback_sources_section(chunks)
+    if not sources_lines:
+        sources_block = "- Sources internes non identifiees clairement."
+    else:
+        sources_block = "\n".join(f"- {name}" for name in sources_lines)
+
+    confidence_label = _confidence_label_from_chunks(chunks)
+    points = (
+        "- Verifier les details exacts si vous avez besoin d'une date, d'un delai ou d'une procedure complete."
+        if confidence_label != "eleve"
+        else "- Aucun point critique supplementaire releve a partir des extraits recuperes."
+    )
+
+    return (
+        f"Reponse\n{response_body}\n\n"
+        f"Sources utiles\n{sources_block}\n\n"
+        f"Niveau de confiance: {confidence_label}\n\n"
+        f"Points a verifier\n{points}"
+    )
 
 
 def _generate_with_openai(prompt: str) -> str:
@@ -274,7 +331,7 @@ class RAGEngine:
         backends = _generation_order()
         prompt_style = self.prompt_style
         if prompt_style == "auto":
-            prompt_style = "concise" if backends and backends[0] == "lmstudio" else "standard"
+            prompt_style = "standard"
 
         prompt = build_rag_prompt(query=query, chunks=chunks, style=prompt_style)
         for backend in backends:

@@ -16,13 +16,17 @@ from sentence_transformers.cross_encoder import CrossEncoder
 try:
     from ..offline.indexing import DEFAULT_EMBEDDING_MODEL
     from ..retrieval.bm25_search import build_bm25_index, load_bm25_corpus, search_bm25
+    from ..shared.env_loader import load_env_file
     from ..shared.index_manifest import load_manifest, validate_manifest
     from ..shared.relevance_policy import boost_results_with_metadata
 except ImportError:  # pragma: no cover
     from rag_module.offline.indexing import DEFAULT_EMBEDDING_MODEL
     from rag_module.retrieval.bm25_search import build_bm25_index, load_bm25_corpus, search_bm25
+    from rag_module.shared.env_loader import load_env_file
     from rag_module.shared.index_manifest import load_manifest, validate_manifest
     from rag_module.shared.relevance_policy import boost_results_with_metadata
+
+load_env_file()
 
 
 INDEX_PATH = "data_storage/index/index.faiss"

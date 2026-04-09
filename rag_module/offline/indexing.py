@@ -11,9 +11,13 @@ import numpy as np
 from sentence_transformers import SentenceTransformer
 
 try:
+    from ..shared.env_loader import load_env_file
     from ..shared.index_manifest import build_manifest, load_manifest, save_manifest
 except ImportError:  # pragma: no cover
+    from rag_module.shared.env_loader import load_env_file
     from rag_module.shared.index_manifest import build_manifest, load_manifest, save_manifest
+
+load_env_file()
 
 
 PROCESSED_PATH = "data_storage/processed"

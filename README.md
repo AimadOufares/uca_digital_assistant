@@ -158,8 +158,22 @@ python rag_module/pipeline.py
 ## ⚙️ Configuration
 
 * **Qdrant** : Mode local par défaut (port 6333) ou Qdrant Cloud
-* **LLM** : Configurable dans `rag_module/config.py` (OpenAI, Groq, Ollama, LM Studio)
+* **LLM** : Le module RAG peut utiliser LM Studio via l'API compatible OpenAI (`http://127.0.0.1:1234/v1`)
 * **Embeddings** : Modèle recommandé `all-MiniLM-L6-v2`
+
+### Configuration LM Studio
+
+Ajouter ou vérifier dans `.env` :
+
+```bash
+RAG_LLM_PROVIDER=lmstudio
+LM_STUDIO_BASE_URL=http://127.0.0.1:1234/v1
+LM_STUDIO_API_KEY=lm-studio
+RAG_LM_STUDIO_MODEL=qwen2.5-1.5b-instruct
+RAG_REQUEST_TIMEOUT=180
+```
+
+Le projet charge maintenant automatiquement `.env` au démarrage Django et dans les modules RAG standalone.
 
 ---
 
