@@ -37,6 +37,7 @@ DEFAULT_LM_STUDIO_BASE_URL = "http://127.0.0.1:1234/v1"
 DEFAULT_LM_STUDIO_MODEL = ""
 DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
 DEFAULT_MAX_TOKENS = 420
+DEFAULT_LM_STUDIO_MAX_TOKENS = 220
 DEFAULT_TEMPERATURE = 0.15
 DEFAULT_REQUEST_TIMEOUT = 120.0
 DEFAULT_RETRIEVAL_K = 4
@@ -315,7 +316,7 @@ def _generate_with_lm_studio(prompt: str) -> Dict[str, Any]:
     base_url = os.getenv("LM_STUDIO_BASE_URL", DEFAULT_LM_STUDIO_BASE_URL).strip()
     configured_model = os.getenv("RAG_LM_STUDIO_MODEL", DEFAULT_LM_STUDIO_MODEL).strip()
     api_key = os.getenv("LM_STUDIO_API_KEY", "lm-studio").strip() or "lm-studio"
-    max_tokens = _env_int("RAG_MAX_TOKENS", DEFAULT_MAX_TOKENS)
+    max_tokens = _env_int("RAG_LM_STUDIO_MAX_TOKENS", _env_int("RAG_MAX_TOKENS", DEFAULT_LM_STUDIO_MAX_TOKENS))
     temperature = _env_float("RAG_TEMPERATURE", DEFAULT_TEMPERATURE)
     timeout = _env_float("RAG_REQUEST_TIMEOUT", DEFAULT_REQUEST_TIMEOUT)
 
@@ -370,12 +371,20 @@ def _generate_with_lm_studio(prompt: str) -> Dict[str, Any]:
 def _generation_order() -> List[str]:
     provider = os.getenv("RAG_LLM_PROVIDER", "lmstudio").strip().lower()
     if provider in {"lmstudio", "local"}:
-        return ["lmstudio", "openai"]
+        return ["lmstudio"]
     if provider == "openai":
-        return ["openai", "lmstudio"]
+        return ["openai"]
     if provider == "auto":
         return ["lmstudio", "openai"]
     return ["lmstudio", "openai"]
+
+
+def _prompt_style_for_backend(configured_style: str, backend: str) -> str:
+    if configured_style != "auto":
+        return configured_style
+    if backend == "lmstudio":
+        return "compact"
+    return "standard"
 
 
 def _to_float(value: Any, default: float = 0.0) -> float:
@@ -445,7 +454,7 @@ class RAGEngine:
         retrieval_k_from_env = _env_int("RAG_RETRIEVAL_K", retrieval_k)
         self.retrieval_k = max(1, retrieval_k_from_env)
         env_prompt_style = os.getenv("RAG_PROMPT_STYLE", prompt_style).strip().lower()
-        self.prompt_style = env_prompt_style if env_prompt_style in {"auto", "standard", "concise"} else "auto"
+        self.prompt_style = env_prompt_style if env_prompt_style in {"auto", "standard", "concise", "compact"} else "auto"
 
     def retrieve_debug(self, query: str, resolution_context: Optional[Dict] = None) -> Dict[str, Any]:
         try:
@@ -476,17 +485,23 @@ class RAGEngine:
     def _effective_prompt_style(self) -> str:
         return "standard" if self.prompt_style == "auto" else self.prompt_style
 
-    def _build_generation_prompt(self, query: str, chunks: List[Dict], resolution_context: Optional[Dict] = None) -> Dict[str, Any]:
-        prompt_style = self._effective_prompt_style()
+    def _build_generation_prompt(
+        self,
+        query: str,
+        chunks: List[Dict],
+        resolution_context: Optional[Dict] = None,
+        prompt_style: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        effective_prompt_style = prompt_style or self._effective_prompt_style()
         prompt = build_rag_prompt(
             query=query,
             chunks=chunks,
-            style=prompt_style,
+            style=effective_prompt_style,
             resolution_context=resolution_context,
         )
         return {
             "prompt": prompt,
-            "prompt_style": prompt_style,
+            "prompt_style": effective_prompt_style,
             "prompt_chars": len(prompt),
             "chunk_count": len(chunks),
             "confidence_label": _confidence_label_from_chunks(chunks),
@@ -504,13 +519,26 @@ class RAGEngine:
                 "prompt": {"prompt_style": self._effective_prompt_style(), "prompt_chars": 0, "chunk_count": 0},
             }
 
-        prompt_payload = self._build_generation_prompt(query, chunks, resolution_context=resolution_context)
-        prompt = str(prompt_payload.get("prompt") or "")
         backend_attempts: List[Dict[str, Any]] = []
+        prompt_payload = self._build_generation_prompt(query, chunks, resolution_context=resolution_context)
 
         for backend in _generation_order():
+            prompt_style = _prompt_style_for_backend(self.prompt_style, backend)
+            prompt_payload = self._build_generation_prompt(
+                query,
+                chunks,
+                resolution_context=resolution_context,
+                prompt_style=prompt_style,
+            )
+            prompt = str(prompt_payload.get("prompt") or "")
             result = _generate_with_lm_studio(prompt) if backend == "lmstudio" else _generate_with_openai(prompt)
-            backend_attempts.append(result)
+            backend_attempts.append(
+                {
+                    **result,
+                    "prompt_style": prompt_payload.get("prompt_style", ""),
+                    "prompt_chars": prompt_payload.get("prompt_chars", 0),
+                }
+            )
             raw_candidate_answer = str(result.get("answer") or "")
             candidate_answer = _ensure_structured_answer(raw_candidate_answer, chunks)
             if result.get("success"):

@@ -753,7 +753,7 @@ def _crawl_with_legacy_fetch(seeds):
                     condition.notify_all()
                 continue
 
-            # TÃ©lÃ©chargement hors du verrou principal
+            # Téléchargement hors du verrou principal
             res = download(
                 url=url,
                 depth=depth,
@@ -772,11 +772,11 @@ def _crawl_with_legacy_fetch(seeds):
                     metadata_rows.append(res)
                     if is_downloaded:
                         downloaded_rows.append(res)
-                    # Sauvegarde pÃ©riodique (Checkpointing)
+                    # Sauvegarde périodique (Checkpointing)
                     if len(downloaded_rows) % 100 == 0 and downloaded_rows:
                         save_metadata_safely(metadata_rows)
                         save_ingestion_state(state)
-                        logger.info("Checkpoint: %s documents tÃ©lÃ©chargÃ©s.", len(downloaded_rows))
+                        logger.info("Checkpoint: %s documents téléchargés.", len(downloaded_rows))
 
                 if is_downloaded and depth < MAX_DEPTH and res.get("is_html"):
                     links = []
@@ -804,7 +804,7 @@ def _crawl_with_legacy_fetch(seeds):
                 if int(stats.get("downloaded", 0)) % 100 == 0 and int(stats.get("downloaded", 0)) > 0:
                     logger.info("Progress: %s/%s", stats.get("downloaded", 0), MAX_TOTAL_URLS)
 
-    # DÃ©marrage des workers
+    # Démarrage des workers
     threads = []
     for _ in range(INGESTION_THREADS):
         t = threading.Thread(target=worker)

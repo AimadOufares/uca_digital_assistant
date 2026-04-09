@@ -88,6 +88,7 @@
                         </select>
                     </div>
                     <form id="chatForm" class="chat-form">
+                        {% csrf_token %}
                         <textarea 
                             id="messageInput" 
                             name="message" 
@@ -105,6 +106,6 @@
         </main>
     </div>
 
-    <script src="{% static 'api_app/chat.js' %}" defer></script>
+    <script src="{% static 'api_app/chat.js' %}?v=20260422-3" defer></script>
 </body>
 </html>
