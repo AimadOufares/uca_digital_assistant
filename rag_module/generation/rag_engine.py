@@ -146,6 +146,10 @@ def _extractive_fallback_answer(query: str, chunks: List[Dict]) -> str:
     )
 
 
+def _abstention_answer() -> str:
+    return "Information non disponible dans mes sources actuelles."
+
+
 def _generate_with_openai(prompt: str) -> str:
     api_key = os.getenv("OPENAI_API_KEY", "").strip()
     if not api_key or OpenAI is None:
@@ -328,6 +332,9 @@ class RAGEngine:
             ) from exc
 
     def generate(self, query: str, chunks: List[Dict]) -> str:
+        if not chunks:
+            return _abstention_answer()
+
         backends = _generation_order()
         prompt_style = self.prompt_style
         if prompt_style == "auto":
@@ -346,6 +353,8 @@ class RAGEngine:
             raise ValueError("La question ne peut pas etre vide.")
 
         chunks = self.retrieve(cleaned_query)
+        if not chunks:
+            return {"answer": _abstention_answer(), "sources": []}
         try:
             answer = self.generate(cleaned_query, chunks)
         except Exception as exc:

@@ -27,8 +27,11 @@ DOCUMENT_TYPE_RULES: List[Tuple[str, List[str]]] = [
     ("admission", ["admission", "admis", "selection", "concours", "\u0642\u0628\u0648\u0644", "\u0645\u0628\u0627\u0631\u0627\u0629"]),
     ("inscription", ["inscription", "preinscription", "pre-inscription", "reinscription", "\u0627\u0644\u062a\u0633\u062c\u064a\u0644"]),
     ("bourse", ["bourse", "scholarship", "\u0645\u0646\u062d\u0629"]),
+    ("stage", ["stage", "stages", "pfe", "internship", "memoire", "convention de stage"]),
     ("calendrier", ["calendrier", "planning", "emploi du temps", "schedule"]),
     ("resultats", ["resultat", "resultats", "notes", "deliberation", "rattrapage"]),
+    ("contact", ["contact", "contacts", "email", "mail", "telephone", "service de scolarite"]),
+    ("reglement", ["reglement", "reglements", "reglement pedagogique", "reglements pedagogiques", "lmd", "ects"]),
     ("formation", ["master", "licence", "doctorat", "filiere", "programme", "\u0645\u0627\u0633\u062a\u0631", "\u0625\u062c\u0627\u0632\u0629"]),
 ]
 
