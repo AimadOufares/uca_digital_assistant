@@ -41,7 +41,13 @@ def _load_index_metadata() -> Dict:
         return {"exists": False, "entries": 0, "domains_top10": [], "file_ext": {}}
 
     with INDEX_META_PATH.open("r", encoding="utf-8") as handle:
-        rows = json.load(handle)
+        payload = json.load(handle)
+    if isinstance(payload, dict) and isinstance(payload.get("rows"), list):
+        rows = payload["rows"]
+    elif isinstance(payload, list):
+        rows = payload
+    else:
+        rows = []
 
     domains = Counter()
     ext_counter = Counter()

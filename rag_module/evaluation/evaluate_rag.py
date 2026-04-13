@@ -1,5 +1,6 @@
 import argparse
 import json
+import os
 import re
 import sys
 import time
@@ -16,9 +17,12 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from rag_module.generation.rag_engine import RAGGenerationError, RAGIndexNotReadyError, answer_question
 from rag_module.retrieval.rag_search import run_hybrid_search_debug
+from rag_module.shared.offline_pipeline_report import update_offline_pipeline_report
 
 
 REPORT_DIR = PROJECT_ROOT / "data_storage" / "reports"
+DEFAULT_PRECISION_GATE = float(os.getenv("RAG_KPI_PRECISION_GATE", "0.75") or 0.75)
+DEFAULT_HIT_GATE = float(os.getenv("RAG_KPI_HIT_GATE", "0.90") or 0.90)
 FALLBACK_MARKERS = [
     "information non disponible",
     "pas pu traiter",
@@ -281,6 +285,20 @@ def evaluate(top_k: int, run_generation: bool) -> Dict:
     return report
 
 
+def evaluate_kpi_gates(report: Dict, precision_gate: float, hit_gate: float) -> Dict:
+    summary = report.get("summary", {}) if isinstance(report, dict) else {}
+    precision = float(summary.get("precision_at_k_avg", 0.0) or 0.0)
+    hit_rate = float(summary.get("hit_at_k_rate", 0.0) or 0.0)
+    passed = precision >= float(precision_gate) and hit_rate >= float(hit_gate)
+    return {
+        "passed": passed,
+        "precision_at_k_avg": round(precision, 4),
+        "hit_at_k_rate": round(hit_rate, 4),
+        "precision_gate": round(float(precision_gate), 4),
+        "hit_gate": round(float(hit_gate), 4),
+    }
+
+
 def write_report(report: Dict) -> Dict[str, Path]:
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -325,13 +343,30 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Evaluation heuristique hybride du RAG (dense, BM25, fusion et generation).")
     parser.add_argument("--top-k", type=int, default=5, help="Nombre de chunks recuperes pour l'evaluation.")
     parser.add_argument("--skip-generation", action="store_true", help="N'evalue que la retrieval sans generation de reponse.")
+    parser.add_argument("--precision-gate", type=float, default=DEFAULT_PRECISION_GATE, help="Seuil Precision@k moyen.")
+    parser.add_argument("--hit-gate", type=float, default=DEFAULT_HIT_GATE, help="Seuil Hit@k rate.")
+    parser.add_argument("--enforce-kpi-gates", action="store_true", help="Retourne un code d'erreur si les gates KPI echouent.")
     args = parser.parse_args()
 
     top_k = max(1, args.top_k)
     report = evaluate(top_k=top_k, run_generation=not args.skip_generation)
+    kpi_gates = evaluate_kpi_gates(report, precision_gate=args.precision_gate, hit_gate=args.hit_gate)
+    report["kpi_gates"] = kpi_gates
     output_paths = write_report(report)
+    update_offline_pipeline_report("kpi_gates", {
+        "generated_at": datetime.now().isoformat(),
+        "top_k": top_k,
+        "kpi_gates": kpi_gates,
+    })
     print(f"Evaluation terminee. JSON: {output_paths['json']}")
     print(f"Evaluation terminee. TXT : {output_paths['txt']}")
+    print(
+        f"KPI gates: {'PASS' if kpi_gates['passed'] else 'FAIL'} | "
+        f"precision={kpi_gates['precision_at_k_avg']} (>= {kpi_gates['precision_gate']}), "
+        f"hit={kpi_gates['hit_at_k_rate']} (>= {kpi_gates['hit_gate']})"
+    )
+    if args.enforce_kpi_gates and not kpi_gates["passed"]:
+        raise SystemExit(2)
 
 
 if __name__ == "__main__":

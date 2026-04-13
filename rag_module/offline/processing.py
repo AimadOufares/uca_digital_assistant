@@ -7,7 +7,7 @@ import logging
 import string
 from pathlib import Path
 from datetime import datetime, timezone
-from typing import List, Dict, Tuple
+from typing import Any, Dict, List, Tuple
 
 import pdfplumber
 import docx
@@ -20,14 +20,17 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 try:
     from ..shared.data_quality import create_backup, postprocess_chunks_for_source
+    from ..shared.offline_pipeline_report import update_offline_pipeline_report
 except ImportError:  # pragma: no cover
     from rag_module.shared.data_quality import create_backup, postprocess_chunks_for_source
+    from rag_module.shared.offline_pipeline_report import update_offline_pipeline_report
 
 # ===================== CONFIG =====================
 RAW_PATH = "data_storage/raw"
 PROCESSED_PATH = "data_storage/processed"
 CACHE_FILE = "data_storage/cache/file_cache.json"
 PROCESSING_POLICY_VERSION = "v4_strict_quality_2026_04_05_r3_sourcehash"
+PROCESSING_WORKERS = 6
 
 CHUNK_TOKENS = 500
 OVERLAP_TOKENS = 80
@@ -75,8 +78,41 @@ ENCODER = encoding_for_model(LLM_MODEL)
 
 
 # ===================== UTILS =====================
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
+PROCESSING_WORKERS = _env_int("RAG_PROCESSING_WORKERS", PROCESSING_WORKERS)
+
+
 def _safe_ratio(numerator: int, denominator: int) -> float:
     return float(numerator) / float(denominator) if denominator else 0.0
+
+
+def _write_json_atomic(path: str, payload: Any) -> None:
+    temp_path = path + ".tmp"
+    with open(temp_path, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=False, indent=2)
+    os.replace(temp_path, path)
+
+
+def _read_text_with_fallback(path: str) -> str:
+    encodings = ["utf-8", "latin-1"]
+    for idx, encoding in enumerate(encodings):
+        try:
+            if idx == 0:
+                return Path(path).read_text(encoding=encoding)
+            return Path(path).read_text(encoding=encoding, errors="replace")
+        except Exception:
+            continue
+    return ""
 
 
 def _tokenize_words(text: str) -> List[str]:
@@ -302,8 +338,10 @@ def _deduplicate_chunk_texts(chunks: List[str]) -> List[str]:
 # ===================== EXTRACTION =====================
 def extract_text_html(path: str) -> str:
     try:
-        with open(path, encoding="utf-8") as f:
-            soup = BeautifulSoup(f, "html.parser")
+        raw_html = _read_text_with_fallback(path)
+        if not raw_html:
+            return ""
+        soup = BeautifulSoup(raw_html, "html.parser")
 
         for tag in soup(["script", "style", "nav", "footer", "header", "aside"]):
             tag.decompose()
@@ -353,11 +391,11 @@ def extract_text_docx(path: str) -> str:
 
 
 def extract_text_plain(path: str) -> str:
-    try:
-        return Path(path).read_text(encoding="utf-8")
-    except Exception as e:
-        logger.warning("Plain text extraction error %s: %s", path, e)
-        return ""
+    text = _read_text_with_fallback(path)
+    if text:
+        return text
+    logger.warning("Plain text extraction error %s: unable to decode", path)
+    return ""
 
 
 # ===================== CHUNKING =====================
@@ -371,7 +409,17 @@ def recursive_chunk(text: str, chunk_size: int = CHUNK_TOKENS, overlap_tokens: i
     if not text:
         return []
 
-    if len(ENCODER.encode(text)) <= chunk_size:
+    token_len_cache: Dict[str, int] = {}
+
+    def token_len(value: str) -> int:
+        cached = token_len_cache.get(value)
+        if cached is not None:
+            return cached
+        measured = len(ENCODER.encode(value))
+        token_len_cache[value] = measured
+        return measured
+
+    if token_len(text) <= chunk_size:
         return [text] if is_high_quality_chunk(text) else []
 
     paragraphs = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
@@ -383,7 +431,7 @@ def recursive_chunk(text: str, chunk_size: int = CHUNK_TOKENS, overlap_tokens: i
     for para in paragraphs:
         sentences = split_sentences(para)
         for sent in sentences:
-            sent_tokens = len(ENCODER.encode(sent))
+            sent_tokens = token_len(sent)
 
             # If the sentence itself is huge, split hard by token windows.
             if sent_tokens > chunk_size:
@@ -391,7 +439,7 @@ def recursive_chunk(text: str, chunk_size: int = CHUNK_TOKENS, overlap_tokens: i
                 window = []
                 for word in words:
                     candidate = " ".join(window + [word])
-                    if len(ENCODER.encode(candidate)) <= chunk_size:
+                    if token_len(candidate) <= chunk_size:
                         window.append(word)
                     else:
                         long_chunk = " ".join(window).strip()
@@ -411,14 +459,14 @@ def recursive_chunk(text: str, chunk_size: int = CHUNK_TOKENS, overlap_tokens: i
                 overlap: List[str] = []
                 tokens_acc = 0
                 for s in reversed(current):
-                    t_len = len(ENCODER.encode(s))
+                    t_len = token_len(s)
                     if tokens_acc + t_len > overlap_tokens:
                         break
                     overlap.insert(0, s)
                     tokens_acc += t_len
 
                 current = overlap
-                current_tokens = len(ENCODER.encode(" ".join(current)))
+                current_tokens = token_len(" ".join(current))
 
             current.append(sent)
             current_tokens += sent_tokens
@@ -432,7 +480,12 @@ def recursive_chunk(text: str, chunk_size: int = CHUNK_TOKENS, overlap_tokens: i
 
 
 # ===================== PROCESS FILE =====================
-def preprocess_file(file_path: str) -> List[Dict]:
+def preprocess_file(file_path: str, with_diagnostics: bool = False):
+    def _wrap(chunks: List[Dict], status: str):
+        if with_diagnostics:
+            return {"chunks": chunks, "status": status}
+        return chunks
+
     ext = Path(file_path).suffix.lower()
     extractors = {
         ".html": extract_text_html,
@@ -449,25 +502,25 @@ def preprocess_file(file_path: str) -> List[Dict]:
                 file_path,
             )
         logger.warning("Unsupported format: %s", file_path)
-        return []
+        return _wrap([], "unsupported")
 
     raw_text = extractors[ext](file_path)
     if not raw_text:
-        return []
+        return _wrap([], "extract_empty")
 
     cleaned_text = clean_text(raw_text)
     if not _is_high_quality_document(cleaned_text):
         logger.info("Skip low-quality document: %s", Path(file_path).name)
-        return []
+        return _wrap([], "rejected_quality")
 
     doc_language, lang_confidence = safe_detect_lang(cleaned_text)
     if doc_language == "unknown" or doc_language not in ALLOWED_LANGUAGES:
         logger.info("Skip uncertain language document: %s", Path(file_path).name)
-        return []
+        return _wrap([], "rejected_language")
 
     chunks = recursive_chunk(cleaned_text)
     if not chunks:
-        return []
+        return _wrap([], "rejected_chunking")
 
     file_name = Path(file_path).name
     file_hash = hash_file(file_path)
@@ -495,11 +548,15 @@ def preprocess_file(file_path: str) -> List[Dict]:
                 "quality_score": q_score,
                 "quality_alpha_ratio": round(metrics["alpha_ratio"], 4),
                 "quality_unique_ratio": round(metrics["unique_ratio"], 4),
+                "processing_policy_version": PROCESSING_POLICY_VERSION,
                 "date_processed": datetime.now(timezone.utc).isoformat(),
             }
         })
 
-    return postprocess_chunks_for_source(results, file_path)
+    processed_chunks = postprocess_chunks_for_source(results, file_path)
+    if not processed_chunks:
+        return _wrap([], "rejected_postprocess")
+    return _wrap(processed_chunks, "processed")
 
 
 # ===================== CACHE =====================
@@ -534,8 +591,7 @@ def load_cache() -> Dict:
 
 def save_cache(cache: Dict):
     os.makedirs(os.path.dirname(CACHE_FILE), exist_ok=True)
-    with open(CACHE_FILE, "w", encoding="utf-8") as f:
-        json.dump(cache, f, indent=2, ensure_ascii=False)
+    _write_json_atomic(CACHE_FILE, cache)
 
 
 def _chunk_refcounts(file_records: Dict[str, Dict]) -> Dict[str, int]:
@@ -567,9 +623,6 @@ def _delete_chunk_file_if_unreferenced(
 # ===================== MAIN =====================
 def preprocess_all():
     os.makedirs(PROCESSED_PATH, exist_ok=True)
-    backup_dir = create_backup(PROCESSED_PATH, CACHE_FILE)
-    if backup_dir:
-        logger.info("Backup created before cleanup: %s", backup_dir)
 
     cache = load_cache()
     file_records: Dict[str, Dict] = cache.get("files", {})
@@ -583,6 +636,62 @@ def preprocess_all():
     ]
 
     logger.info("%s files detected in %s", len(files), RAW_PATH)
+
+    stats = {
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "files_scanned": len(files),
+        "files_unchanged": 0,
+        "files_scheduled": 0,
+        "files_processed": 0,
+        "rejected_quality": 0,
+        "rejected_language": 0,
+        "rejected_other": 0,
+        "processing_errors": 0,
+        "removed_chunks": 0,
+        "chunks_saved": 0,
+        "chunks_overwritten": 0,
+    }
+
+    # Pre-hash in parallel to speed up large runs.
+    file_hashes: Dict[str, str] = {}
+    hashing_workers = max(2, min(8, PROCESSING_WORKERS))
+    with ThreadPoolExecutor(max_workers=hashing_workers) as hash_executor:
+        futures = {hash_executor.submit(hash_file, path): path for path in files}
+        for idx, future in enumerate(as_completed(futures), 1):
+            path = futures[future]
+            try:
+                file_hashes[path] = future.result()
+            except Exception as exc:
+                stats["processing_errors"] += 1
+                logger.error("Hashing error for %s: %s", path, exc)
+            if idx % 500 == 0:
+                logger.info("Hash progress: %s/%s", idx, len(files))
+
+    changed_candidates: List[Tuple[str, str]] = []
+    for path in files:
+        file_hash = file_hashes.get(path)
+        if not file_hash:
+            continue
+        record = file_records.get(path, {})
+        old_hashes = record.get("chunk_hashes", [])
+        has_all_chunks = all(
+            os.path.exists(os.path.join(PROCESSED_PATH, f"{ch}.json")) for ch in old_hashes
+        )
+        if (
+            record.get("file_hash") == file_hash
+            and has_all_chunks
+            and record.get("policy_version") == PROCESSING_POLICY_VERSION
+        ):
+            stats["files_unchanged"] += 1
+            continue
+        changed_candidates.append((path, file_hash))
+
+    stats["files_scheduled"] = len(changed_candidates)
+    change_ratio = float(len(changed_candidates)) / float(max(len(files), 1))
+
+    backup_dir = create_backup(PROCESSED_PATH, CACHE_FILE, change_ratio=change_ratio)
+    if backup_dir:
+        logger.info("Backup created before cleanup: %s", backup_dir)
 
     deleted_sources = [p for p in list(file_records.keys()) if not os.path.exists(p)]
     removed_chunks = 0
@@ -601,30 +710,27 @@ def preprocess_all():
             len(deleted_sources),
             removed_chunks,
         )
+    stats["removed_chunks"] = removed_chunks
 
-    with ThreadPoolExecutor(max_workers=6) as executor:
+    with ThreadPoolExecutor(max_workers=PROCESSING_WORKERS) as executor:
         updated_chunk_hashes = set()
         future_to_path = {}
-        for f in files:
-            file_hash = hash_file(f)
-            record = file_records.get(f, {})
-            old_hashes = record.get("chunk_hashes", [])
-            has_all_chunks = all(
-                os.path.exists(os.path.join(PROCESSED_PATH, f"{ch}.json")) for ch in old_hashes
-            )
-            if (
-                record.get("file_hash") == file_hash
-                and has_all_chunks
-                and record.get("policy_version") == PROCESSING_POLICY_VERSION
-            ):
-                logger.info("Skip unchanged -> %s", Path(f).name)
-                continue
-            future_to_path[executor.submit(preprocess_file, f)] = (f, file_hash)
+        for path, file_hash in changed_candidates:
+            future_to_path[executor.submit(preprocess_file, path, True)] = (path, file_hash)
 
         for future in as_completed(future_to_path):
             path, file_hash = future_to_path[future]
             try:
-                chunks = future.result()
+                payload = future.result()
+                chunks = list(payload.get("chunks", []))
+                status = str(payload.get("status", "processed"))
+                if status == "rejected_quality":
+                    stats["rejected_quality"] += 1
+                elif status == "rejected_language":
+                    stats["rejected_language"] += 1
+                elif status != "processed":
+                    stats["rejected_other"] += 1
+
                 previous_hashes = set(file_records.get(path, {}).get("chunk_hashes", []))
                 new_hashes = [chunk["metadata"]["chunk_hash"] for chunk in chunks]
                 new_hashes_set = set(new_hashes)
@@ -645,8 +751,7 @@ def preprocess_all():
                         continue
                     out_path = os.path.join(PROCESSED_PATH, f"{ch_hash}.json")
                     existed = os.path.exists(out_path)
-                    with open(out_path, "w", encoding="utf-8") as f:
-                        json.dump(chunk, f, ensure_ascii=False, indent=2)
+                    _write_json_atomic(out_path, chunk)
                     if existed:
                         overwritten_count += 1
                     else:
@@ -662,6 +767,9 @@ def preprocess_all():
                     "chunk_hashes": list(dict.fromkeys(new_hashes)),
                     "policy_version": PROCESSING_POLICY_VERSION,
                 }
+                stats["files_processed"] += 1
+                stats["chunks_saved"] += saved_count
+                stats["chunks_overwritten"] += overwritten_count
 
                 logger.info(
                     "Processed: %s -> %s chunks (%s saved, %s overwritten)",
@@ -672,9 +780,34 @@ def preprocess_all():
                 )
 
             except Exception as e:
+                stats["processing_errors"] += 1
                 logger.error("Processing error for %s: %s", path, e)
 
     save_cache({"version": 2, "files": file_records})
+    stats["finished_at"] = datetime.now(timezone.utc).isoformat()
+    report_payload = {
+        "started_at": stats["started_at"],
+        "finished_at": stats["finished_at"],
+        "settings": {
+            "processing_workers": PROCESSING_WORKERS,
+            "processing_policy_version": PROCESSING_POLICY_VERSION,
+        },
+        "metrics": {
+            "files_scanned": stats["files_scanned"],
+            "files_unchanged": stats["files_unchanged"],
+            "files_scheduled": stats["files_scheduled"],
+            "files_processed": stats["files_processed"],
+            "rejected_quality": stats["rejected_quality"],
+            "rejected_language": stats["rejected_language"],
+            "rejected_other": stats["rejected_other"],
+            "processing_errors": stats["processing_errors"],
+            "removed_chunks": stats["removed_chunks"],
+            "chunks_saved": stats["chunks_saved"],
+            "chunks_overwritten": stats["chunks_overwritten"],
+        },
+    }
+    report_path = str(update_offline_pipeline_report("processing", report_payload))
+    logger.info("Processing report updated: %s", report_path)
     logger.info("Processing completed successfully.")
 
 
