@@ -10,8 +10,9 @@ def build_manifest(
     chunk_count: int,
     policy_version: str,
     index_type: str,
+    **extra,
 ) -> Dict:
-    return {
+    manifest = {
         "model_name": model_name,
         "embedding_dim": int(dim),
         "chunk_count": int(chunk_count),
@@ -19,6 +20,8 @@ def build_manifest(
         "processing_policy_version": policy_version or "unknown",
         "built_at": datetime.now(timezone.utc).isoformat(),
     }
+    manifest.update(extra)
+    return manifest
 
 
 def load_manifest(path: str) -> Dict:
@@ -37,7 +40,7 @@ def save_manifest(path: str, manifest: Dict) -> None:
         json.dump(manifest, handle, ensure_ascii=False, indent=2)
 
 
-def validate_manifest(manifest: Dict, expected_model: str) -> None:
+def validate_manifest(manifest: Dict, expected_model: str, expected_vector_store: str = "") -> None:
     if not manifest:
         raise ValueError("Manifest d'index introuvable ou vide.")
 
@@ -49,6 +52,13 @@ def validate_manifest(manifest: Dict, expected_model: str) -> None:
         raise ValueError(
             f"Incoherence index/modele: index construit avec '{model_name}', "
             f"mais runtime configure pour '{expected_model}'."
+        )
+
+    vector_store = str(manifest.get("vector_store") or "").strip().lower()
+    if expected_vector_store and vector_store and vector_store != expected_vector_store.strip().lower():
+        raise ValueError(
+            f"Incoherence index/backend: index construit pour '{vector_store}', "
+            f"mais runtime configure pour '{expected_vector_store}'."
         )
 
     dim = manifest.get("embedding_dim")

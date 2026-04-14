@@ -92,14 +92,21 @@ def prepare_chunk_metadata(chunk: Dict, source_path: str) -> Optional[Dict]:
     if language not in LANG_ALLOWLIST:
         return None
 
+    section_title = str(metadata.get("section_title") or "").strip()
+    section_path = " ".join(str(part).strip() for part in metadata.get("section_path", []) if str(part).strip())
+    contextual_text = " ".join(part for part in [section_title, section_path, text] if part).strip()
+
     file_type = canonical_file_type(str(metadata.get("file_type", "")), source_path)
-    faculty = detect_faculty(source_path, text)
-    document_type = detect_document_type(source_path, text)
-    year = detect_year(source_path, text)
+    faculty = detect_faculty(source_path, contextual_text)
+    document_type = detect_document_type(source_path, contextual_text)
+    year = detect_year(source_path, contextual_text)
 
     metadata["file_type"] = file_type
     metadata["faculty"] = faculty
     metadata["document_type"] = document_type
+    metadata["chunk_id"] = str(metadata.get("chunk_id") or metadata.get("chunk_hash") or "")
+    metadata["section_title"] = section_title
+    metadata["section_path"] = [str(part).strip() for part in metadata.get("section_path", []) if str(part).strip()]
     if year is not None:
         metadata["year"] = year
     else:

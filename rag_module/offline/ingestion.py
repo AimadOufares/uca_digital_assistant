@@ -1,4 +1,4 @@
-﻿# rag_module/ingestion.py
+# rag_module/ingestion.py
 import os
 import re
 import json
@@ -22,8 +22,10 @@ from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
 
 try:
+    from ..shared.html_extraction import extract_main_text
     from ..shared.offline_pipeline_report import update_offline_pipeline_report
 except ImportError:  # pragma: no cover
+    from rag_module.shared.html_extraction import extract_main_text
     from rag_module.shared.offline_pipeline_report import update_offline_pipeline_report
 
 # ==============================
@@ -92,6 +94,7 @@ MAX_MOJIBAKE_RATIO = 0.008
 MIN_BINARY_BYTES = 8_000
 MAX_DOWNLOAD_BYTES = 25_000_000
 MIN_DOWNLOAD_QUALITY_SCORE = _env_int("RAG_MIN_DOWNLOAD_QUALITY_SCORE", 60)
+INGESTION_BACKEND = _env_str("RAG_INGESTION_BACKEND", "scrapy").lower()
 
 ALLOWED_DOMAIN_SUFFIXES = {
     # Espace officiel UCA: portail principal, etablissements, preins-*, ecampus-*,
@@ -530,18 +533,9 @@ def extract_text_preview(content: bytes, ext: str) -> str:
     if ext in {".html", ".htm"}:
         try:
             html = content[:MAX_HTML_PARSE_BYTES].decode("utf-8", errors="replace")
-            soup = BeautifulSoup(html, "lxml")
-            for tag in soup(["script", "style", "noscript", "nav", "footer", "header", "aside", "form"]):
-                tag.decompose()
-            main = soup.find(["main", "article"]) or soup.body or soup
-            parts = [
-                tag.get_text(" ", strip=True)
-                for tag in main.find_all(["h1", "h2", "h3", "h4", "p", "li", "td"])
-                if tag.get_text(strip=True)
-            ]
-            if parts:
-                return "\n".join(parts)
-            return main.get_text(" ", strip=True)
+            extracted = extract_main_text(html)
+            if extracted.get("text"):
+                return str(extracted.get("text") or "")
         except Exception:
             return ""
 
@@ -831,6 +825,17 @@ def _update_state_entry(
 ) -> None:
     entry = dict(state.get("urls", {}).get(canonical_url, {}))
     now_value = now_iso()
+    
+    # Initialize all required keys if missing
+    for key in [
+        "url", "canonical_url", "domain", "last_status", "last_http_code",
+        "etag", "last_modified", "content_hash", "file_path",
+        "first_seen_at", "last_seen_at", "last_fetched_at",
+        "quality_score", "quality_reason", "skip_reason", "crawl_depth"
+    ]:
+        if key not in entry:
+            entry[key] = None if key in ["last_http_code", "quality_score", "crawl_depth"] else ""
+
     if not entry.get("first_seen_at"):
         entry["first_seen_at"] = now_value
     entry["last_seen_at"] = now_value
@@ -866,7 +871,9 @@ def _update_state_entry(
     state.setdefault("urls", {})[canonical_url] = entry
 
 
-def _metadata_skip_row(url: str, canonical_url: str, depth: int, reason: str, domain: str) -> Dict:
+def _metadata_skip_row(url: str, canonical_url: str, depth: int, reason: str, domain: str,
+                       quality_score: int = 0, quality_reason: str = "",
+                       content_hash: str = "", etag: str = "", last_modified: str = "") -> Dict:
     return {
         "url": url,
         "canonical_url": canonical_url,
@@ -875,6 +882,11 @@ def _metadata_skip_row(url: str, canonical_url: str, depth: int, reason: str, do
         "status": "skipped",
         "skip_reason": reason,
         "fetched_at": now_iso(),
+        "download_quality_score": quality_score,
+        "download_quality_reason": quality_reason,
+        "content_hash": content_hash,
+        "etag": etag,
+        "last_modified": last_modified,
     }
 
 
@@ -1047,7 +1059,11 @@ def download(
                 crawl_depth=depth,
             )
         if RECORD_SKIPPED_IN_METADATA:
-            return _metadata_skip_row(url, canonical_url, depth, "refresh_window_not_elapsed", domain)
+            return _metadata_skip_row(
+                url, canonical_url, depth, "refresh_window_not_elapsed", domain,
+                etag=str(previous_entry.get("etag") or ""),
+                last_modified=str(previous_entry.get("last_modified") or "")
+            )
         return None
 
     for _ in range(RETRIES):
@@ -1070,7 +1086,11 @@ def download(
                         crawl_depth=depth,
                     )
                 if RECORD_SKIPPED_IN_METADATA:
-                    return _metadata_skip_row(url, canonical_url, depth, "not_modified", domain)
+                    return _metadata_skip_row(
+                        url, canonical_url, depth, "not_modified", domain,
+                        etag=str(previous_entry.get("etag") or ""),
+                        last_modified=str(previous_entry.get("last_modified") or "")
+                    )
                 return None
 
             if response.status_code != 200:
@@ -1146,6 +1166,8 @@ def download(
                         depth,
                         str(quality.get("reason") or "quality_rejected"),
                         domain,
+                        quality_score=int(quality.get("score") or 0),
+                        quality_reason=str(quality.get("reason") or "")
                     )
                 return None
 
@@ -1169,7 +1191,12 @@ def download(
                             crawl_depth=depth,
                         )
                     if RECORD_SKIPPED_IN_METADATA:
-                        return _metadata_skip_row(url, canonical_url, depth, "duplicate_exact", domain)
+                        return _metadata_skip_row(
+                            url, canonical_url, depth, "duplicate_exact", domain,
+                            quality_score=int(quality.get("score") or 0),
+                            quality_reason=str(quality.get("reason") or ""),
+                            content_hash=content_hash
+                        )
                     return None
 
                 if ENABLE_NEAR_DUP_INGESTION and ext in {".html", ".htm", ".txt", ".md"}:
@@ -1195,7 +1222,12 @@ def download(
                                         crawl_depth=depth,
                                     )
                                 if RECORD_SKIPPED_IN_METADATA:
-                                    return _metadata_skip_row(url, canonical_url, depth, "duplicate_near", domain)
+                                    return _metadata_skip_row(
+                                        url, canonical_url, depth, "duplicate_near", domain,
+                                        quality_score=int(quality.get("score") or 0),
+                                        quality_reason=str(quality.get("reason") or ""),
+                                        content_hash=content_hash
+                                    )
                                 return None
                         near_dup_signatures.append(signature)
 
@@ -1278,7 +1310,7 @@ def download(
 # ==============================
 # CRAWLER
 # ==============================
-def crawl(seeds):
+def _crawl_with_legacy_fetch(seeds):
     q = queue.PriorityQueue()
     visited: Set[str] = set()
     metadata_rows: List[Dict] = []
@@ -1526,6 +1558,18 @@ def crawl(seeds):
         return downloaded_rows
     finally:
         cleanup_playwright_resources()
+
+
+def crawl(seeds):
+    backend = (INGESTION_BACKEND or "scrapy").lower()
+    if backend == "scrapy":
+        try:
+            from .scrapy_ingestion import crawl_with_scrapy
+
+            return crawl_with_scrapy(seeds or DEFAULT_SEEDS)
+        except Exception as exc:
+            logger.warning("Backend Scrapy indisponible, fallback legacy requests actif: %s", exc)
+    return _crawl_with_legacy_fetch(seeds or DEFAULT_SEEDS)
 
 
 # ==============================

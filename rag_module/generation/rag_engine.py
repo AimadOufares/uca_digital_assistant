@@ -317,9 +317,7 @@ class RAGEngine:
         try:
             from ..retrieval import rag_search
 
-            index_path = Path(rag_search.INDEX_PATH)
-            chunks_path = Path(rag_search.CHUNKS_PATH)
-            if not index_path.exists() or not chunks_path.exists():
+            if not rag_search.is_search_backend_ready():
                 raise RAGIndexNotReadyError("Index RAG introuvable. Lancez d'abord l'indexation.")
             return rag_search.get_relevant_chunks(query, top_k=self.retrieval_k)
         except FileNotFoundError as exc:

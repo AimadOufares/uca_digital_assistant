@@ -157,9 +157,12 @@ python rag_module/pipeline.py
 
 ## ⚙️ Configuration
 
-* **Qdrant** : Mode local par défaut (port 6333) ou Qdrant Cloud
+* **Qdrant** : Backend vectoriel recommandé (`RAG_VECTOR_BACKEND=qdrant`)
 * **LLM** : Le module RAG peut utiliser LM Studio via l'API compatible OpenAI (`http://127.0.0.1:1234/v1`)
-* **Embeddings** : Modèle recommandé `all-MiniLM-L6-v2`
+* **Embeddings** : Modèle recommandé `BAAI/bge-m3`
+* **Extraction HTML** : `Trafilatura` avec fallback HTML classique
+* **Parsing documentaire** : `Docling` avec fallbacks `pdfplumber` / `python-docx`
+* **Détection de langue** : `fastText` avec fallback `langdetect`
 
 ### Configuration LM Studio
 
@@ -171,6 +174,12 @@ LM_STUDIO_BASE_URL=http://127.0.0.1:1234/v1
 LM_STUDIO_API_KEY=lm-studio
 RAG_LM_STUDIO_MODEL=qwen2.5-1.5b-instruct
 RAG_REQUEST_TIMEOUT=180
+RAG_VECTOR_BACKEND=qdrant
+RAG_QDRANT_COLLECTION=uca_chunks
+RAG_HTML_EXTRACTOR=trafilatura
+RAG_DOCUMENT_PARSER=docling
+RAG_LANGUAGE_DETECTOR=fasttext
+RAG_EMBEDDING_MODEL=BAAI/bge-m3
 ```
 
 Le projet charge maintenant automatiquement `.env` au démarrage Django et dans les modules RAG standalone.

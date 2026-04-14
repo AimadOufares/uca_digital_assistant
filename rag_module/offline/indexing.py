@@ -11,11 +11,15 @@ import numpy as np
 from sentence_transformers import SentenceTransformer
 
 try:
+    from ..offline.qdrant_indexing import build_qdrant_index
     from ..shared.env_loader import load_env_file
     from ..shared.index_manifest import build_manifest, load_manifest, save_manifest
+    from ..shared.runtime_config import configured_vector_backend
 except ImportError:  # pragma: no cover
+    from rag_module.offline.qdrant_indexing import build_qdrant_index
     from rag_module.shared.env_loader import load_env_file
     from rag_module.shared.index_manifest import build_manifest, load_manifest, save_manifest
+    from rag_module.shared.runtime_config import configured_vector_backend
 
 load_env_file()
 
@@ -26,8 +30,9 @@ CACHE_PATH = "data_storage/cache/embeddings_cache.json"
 INDEX_MANIFEST_PATH = os.path.join(INDEX_PATH, "index_manifest.json")
 BM25_CORPUS_PATH = os.path.join(INDEX_PATH, "bm25_corpus.json")
 
-DEFAULT_EMBEDDING_MODEL = "intfloat/multilingual-e5-base"
+DEFAULT_EMBEDDING_MODEL = "BAAI/bge-m3"
 FALLBACK_EMBEDDING_MODELS = [
+    "intfloat/multilingual-e5-base",
     "sentence-transformers/all-MiniLM-L6-v2",
     "all-MiniLM-L6-v2",
 ]
@@ -97,6 +102,12 @@ def load_sentence_transformer_offline(model_names: List[str]) -> tuple[SentenceT
             return model, model_name
         except Exception as exc:
             errors.append(f"{model_name}: {exc}")
+    for model_name in model_names:
+        try:
+            model = SentenceTransformer(model_name, device="cpu")
+            return model, model_name
+        except Exception as exc:
+            errors.append(f"{model_name} (online): {exc}")
     raise RuntimeError(
         "Aucun modele d'embedding local n'est disponible. "
         f"Modeles testes: {', '.join(model_names)}. "
@@ -308,6 +319,28 @@ def build_index(chunks: List[Dict]) -> None:
         raise RuntimeError("Aucun vecteur genere pour construire l'index.")
 
     dim = int(vectors.shape[1])
+    active_backend = configured_vector_backend()
+    dense_embeddings = vectors.tolist()
+
+    if active_backend == "qdrant":
+        manifest = build_qdrant_index(
+            chunks=chunks_to_index,
+            model_name=get_active_model_name(),
+            embedding_dim=dim,
+            dense_vectors=dense_embeddings,
+        )
+        manifest["requested_model_name"] = get_model_name()
+        if get_active_model_name() != get_model_name():
+            manifest["fallback_model_name"] = get_active_model_name()
+        save_index_manifest(manifest)
+        logger.info(
+            "INDEX QDRANT CREE AVEC SUCCES | modele=%s | dim=%s | chunks=%s",
+            get_active_model_name(),
+            dim,
+            len(chunks_to_index),
+        )
+        return
+
     index = faiss.IndexHNSWFlat(dim, HNSW_M)
     index.hnsw.efConstruction = HNSW_EF_CONSTRUCTION
     index.hnsw.efSearch = HNSW_EF_SEARCH
@@ -327,6 +360,7 @@ def build_index(chunks: List[Dict]) -> None:
         chunk_count=len(chunks_to_index),
         policy_version=_extract_processing_policy_version(chunks_to_index),
         index_type="faiss_hnsw_dense_plus_bm25",
+        vector_store="faiss",
     )
     manifest["requested_model_name"] = get_model_name()
     if get_active_model_name() != get_model_name():

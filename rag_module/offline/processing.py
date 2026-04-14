@@ -14,14 +14,18 @@ import docx
 from bs4 import BeautifulSoup
 from tiktoken import encoding_for_model
 from html import unescape
-from langdetect import detect_langs, LangDetectException
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from functools import lru_cache
 
 try:
+    from ..offline.structured_parser import extract_document_structure
+    from ..shared.language_detection import detect_language
     from ..shared.data_quality import create_backup, postprocess_chunks_for_source
     from ..shared.offline_pipeline_report import update_offline_pipeline_report
 except ImportError:  # pragma: no cover
+    from rag_module.offline.structured_parser import extract_document_structure
+    from rag_module.shared.language_detection import detect_language
     from rag_module.shared.data_quality import create_backup, postprocess_chunks_for_source
     from rag_module.shared.offline_pipeline_report import update_offline_pipeline_report
 
@@ -29,11 +33,11 @@ except ImportError:  # pragma: no cover
 RAW_PATH = "data_storage/raw"
 PROCESSED_PATH = "data_storage/processed"
 CACHE_FILE = "data_storage/cache/file_cache.json"
-PROCESSING_POLICY_VERSION = "v4_strict_quality_2026_04_05_r3_sourcehash"
+PROCESSING_POLICY_VERSION = "v5_structured_docling_fasttext_qdrant_ready"
 PROCESSING_WORKERS = 6
 
-CHUNK_TOKENS = 500
-OVERLAP_TOKENS = 80
+CHUNK_TOKENS = 450
+OVERLAP_TOKENS = 70
 MIN_WORDS = 8
 MIN_DOC_WORDS = 120
 MIN_DOC_CHARS = 700
@@ -76,6 +80,9 @@ logger = logging.getLogger(__name__)
 # ===================== TOKENIZER =====================
 ENCODER = encoding_for_model(LLM_MODEL)
 
+@lru_cache(maxsize=20000)
+def _token_len(value: str) -> int:
+    return len(ENCODER.encode(value))
 
 # ===================== UTILS =====================
 def _env_int(name: str, default: int) -> int:
@@ -107,8 +114,6 @@ def _read_text_with_fallback(path: str) -> str:
     encodings = ["utf-8", "latin-1"]
     for idx, encoding in enumerate(encodings):
         try:
-            if idx == 0:
-                return Path(path).read_text(encoding=encoding)
             return Path(path).read_text(encoding=encoding, errors="replace")
         except Exception:
             continue
@@ -243,18 +248,11 @@ def safe_detect_lang(text: str) -> Tuple[str, float]:
     if len(text.split()) < 30:
         return "unknown", 0.0
     try:
-        candidates = detect_langs(text[:1500])
-        if not candidates:
-            return "unknown", 0.0
-
-        top = candidates[0]
-        lang = getattr(top, "lang", "unknown") or "unknown"
-        confidence = float(getattr(top, "prob", 0.0) or 0.0)
-
+        lang, confidence, _ = detect_language(text[:4000], min_confidence=MIN_LANG_CONFIDENCE)
         if confidence < MIN_LANG_CONFIDENCE:
-            return "unknown", confidence
+            return "unknown", float(confidence or 0.0)
         return lang, confidence
-    except LangDetectException:
+    except Exception:
         return "unknown", 0.0
 
 
@@ -335,6 +333,46 @@ def _deduplicate_chunk_texts(chunks: List[str]) -> List[str]:
     return unique_chunks
 
 
+def _split_large_section(text: str, chunk_size: int, overlap_tokens: int) -> List[str]:
+    normalized = clean_text(text)
+    if not normalized:
+        return []
+    if _token_len(normalized) <= chunk_size:
+        return [normalized]
+    return recursive_chunk(normalized, chunk_size=chunk_size, overlap_tokens=overlap_tokens)
+
+
+def structural_chunk_sections(
+    sections: List[Dict],
+    chunk_size: int = CHUNK_TOKENS,
+    overlap_tokens: int = OVERLAP_TOKENS,
+) -> List[Dict]:
+    structured_chunks: List[Dict] = []
+
+    for section in sections:
+        text = clean_text(str(section.get("text", "") or ""))
+        if not text:
+            continue
+
+        section_title = str(section.get("title") or "Section").strip() or "Section"
+        section_path = [str(part).strip() for part in section.get("path", []) if str(part).strip()]
+        is_table = bool(section.get("is_table", False))
+
+        for piece in _split_large_section(text, chunk_size=chunk_size, overlap_tokens=overlap_tokens):
+            if not is_high_quality_chunk(piece):
+                continue
+            structured_chunks.append(
+                {
+                    "text": piece,
+                    "section_title": section_title,
+                    "section_path": section_path,
+                    "is_table": is_table,
+                }
+            )
+
+    return structured_chunks
+
+
 # ===================== EXTRACTION =====================
 def extract_text_html(path: str) -> str:
     try:
@@ -409,17 +447,7 @@ def recursive_chunk(text: str, chunk_size: int = CHUNK_TOKENS, overlap_tokens: i
     if not text:
         return []
 
-    token_len_cache: Dict[str, int] = {}
-
-    def token_len(value: str) -> int:
-        cached = token_len_cache.get(value)
-        if cached is not None:
-            return cached
-        measured = len(ENCODER.encode(value))
-        token_len_cache[value] = measured
-        return measured
-
-    if token_len(text) <= chunk_size:
+    if _token_len(text) <= chunk_size:
         return [text] if is_high_quality_chunk(text) else []
 
     paragraphs = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
@@ -431,7 +459,7 @@ def recursive_chunk(text: str, chunk_size: int = CHUNK_TOKENS, overlap_tokens: i
     for para in paragraphs:
         sentences = split_sentences(para)
         for sent in sentences:
-            sent_tokens = token_len(sent)
+            sent_tokens = _token_len(sent)
 
             # If the sentence itself is huge, split hard by token windows.
             if sent_tokens > chunk_size:
@@ -439,7 +467,7 @@ def recursive_chunk(text: str, chunk_size: int = CHUNK_TOKENS, overlap_tokens: i
                 window = []
                 for word in words:
                     candidate = " ".join(window + [word])
-                    if token_len(candidate) <= chunk_size:
+                    if _token_len(candidate) <= chunk_size:
                         window.append(word)
                     else:
                         long_chunk = " ".join(window).strip()
@@ -459,14 +487,14 @@ def recursive_chunk(text: str, chunk_size: int = CHUNK_TOKENS, overlap_tokens: i
                 overlap: List[str] = []
                 tokens_acc = 0
                 for s in reversed(current):
-                    t_len = token_len(s)
+                    t_len = _token_len(s)
                     if tokens_acc + t_len > overlap_tokens:
                         break
                     overlap.insert(0, s)
                     tokens_acc += t_len
 
                 current = overlap
-                current_tokens = token_len(" ".join(current))
+                current_tokens = _token_len(" ".join(current))
 
             current.append(sent)
             current_tokens += sent_tokens
@@ -487,15 +515,9 @@ def preprocess_file(file_path: str, with_diagnostics: bool = False):
         return chunks
 
     ext = Path(file_path).suffix.lower()
-    extractors = {
-        ".html": extract_text_html,
-        ".pdf": extract_text_pdf,
-        ".docx": extract_text_docx,
-        ".txt": extract_text_plain,
-        ".md": extract_text_plain,
-    }
+    supported_formats = {".html", ".htm", ".pdf", ".docx", ".txt", ".md"}
 
-    if ext not in extractors:
+    if ext not in supported_formats:
         if ext == ".doc":
             logger.warning(
                 "Legacy Word format unsupported without conversion: %s",
@@ -504,7 +526,10 @@ def preprocess_file(file_path: str, with_diagnostics: bool = False):
         logger.warning("Unsupported format: %s", file_path)
         return _wrap([], "unsupported")
 
-    raw_text = extractors[ext](file_path)
+    parsed_document = extract_document_structure(file_path)
+    raw_text = str(parsed_document.get("text", "") or "")
+    raw_sections = list(parsed_document.get("sections", []) or [])
+    parser_name = str(parsed_document.get("parser") or "fallback")
     if not raw_text:
         return _wrap([], "extract_empty")
 
@@ -518,17 +543,30 @@ def preprocess_file(file_path: str, with_diagnostics: bool = False):
         logger.info("Skip uncertain language document: %s", Path(file_path).name)
         return _wrap([], "rejected_language")
 
-    chunks = recursive_chunk(cleaned_text)
-    if not chunks:
+    structured_chunks = structural_chunk_sections(raw_sections)
+    if not structured_chunks:
+        structured_chunks = [
+            {
+                "text": chunk,
+                "section_title": "Document",
+                "section_path": ["Document"],
+                "is_table": ("[TABLE" in chunk) or ("TABLE_PAGE_" in chunk),
+            }
+            for chunk in recursive_chunk(cleaned_text)
+        ]
+    if not structured_chunks:
         return _wrap([], "rejected_chunking")
 
     file_name = Path(file_path).name
     file_hash = hash_file(file_path)
 
     results = []
-    for i, chunk in enumerate(chunks):
+    for i, chunk_payload in enumerate(structured_chunks):
+        chunk = str(chunk_payload.get("text", "") or "").strip()
         q_score = quality_score(chunk)
         metrics = _text_metrics(chunk)
+        section_title = str(chunk_payload.get("section_title") or "Document").strip() or "Document"
+        section_path = [str(part).strip() for part in chunk_payload.get("section_path", []) if str(part).strip()]
         results.append({
             "text": chunk,
             "text_normalized": chunk.lower(),
@@ -537,17 +575,21 @@ def preprocess_file(file_path: str, with_diagnostics: bool = False):
                 "source": str(file_path),
                 "source_hash": file_hash,
                 "chunk_hash": hash_text(f"{file_hash}:{i}:{chunk}"),
+                "chunk_id": f"{file_hash}:{i}",
                 "index": i,
-                "total_chunks": len(chunks),
-                "tokens": len(ENCODER.encode(chunk)),
+                "total_chunks": len(structured_chunks),
+                "tokens": _token_len(chunk),
                 "language": doc_language,
                 "language_confidence": round(lang_confidence, 4),
                 "file_name": file_name,
                 "file_type": ext,
-                "is_table": ("[TABLE" in chunk) or ("TABLE_PAGE_" in chunk),
+                "is_table": bool(chunk_payload.get("is_table", False)),
+                "section_title": section_title,
+                "section_path": section_path,
                 "quality_score": q_score,
                 "quality_alpha_ratio": round(metrics["alpha_ratio"], 4),
                 "quality_unique_ratio": round(metrics["unique_ratio"], 4),
+                "document_parser": parser_name,
                 "processing_policy_version": PROCESSING_POLICY_VERSION,
                 "date_processed": datetime.now(timezone.utc).isoformat(),
             }

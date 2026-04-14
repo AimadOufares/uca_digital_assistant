@@ -21,6 +21,7 @@ try:
     from ..shared.index_manifest import load_manifest, validate_manifest
     from ..shared.metadata_policy import FACULTY_RULES, normalize_text
     from ..shared.relevance_policy import boost_results_with_metadata
+    from ..shared.runtime_config import configured_vector_backend
 except ImportError:  # pragma: no cover
     from rag_module.offline.indexing import DEFAULT_EMBEDDING_MODEL
     from rag_module.retrieval.bm25_search import build_bm25_index, load_bm25_corpus, search_bm25
@@ -28,6 +29,7 @@ except ImportError:  # pragma: no cover
     from rag_module.shared.index_manifest import load_manifest, validate_manifest
     from rag_module.shared.metadata_policy import FACULTY_RULES, normalize_text
     from rag_module.shared.relevance_policy import boost_results_with_metadata
+    from rag_module.shared.runtime_config import configured_vector_backend
 
 load_env_file()
 
@@ -279,6 +281,12 @@ def invalidate_search_cache(clear_models: bool = False) -> None:
     _manifest_mtime = None
     _bm25_mtime = None
     embed_text.cache_clear()
+    try:
+        from .qdrant_search import _embed_query  # type: ignore
+
+        _embed_query.cache_clear()
+    except Exception:
+        pass
     if clear_models:
         _embedding_model = None
         _embedding_model_name = None
@@ -973,7 +981,39 @@ def decide_retrieval_abstention(results: List[Dict], query_profile: Dict[str, An
     return {"abstain": False, "reason": ""}
 
 
+def active_search_backend() -> str:
+    configured = configured_vector_backend()
+    if configured == "qdrant":
+        try:
+            from .qdrant_search import qdrant_index_ready
+
+            if qdrant_index_ready():
+                return "qdrant"
+        except Exception:
+            pass
+        if Path(INDEX_PATH).exists() and Path(CHUNKS_PATH).exists():
+            return "faiss"
+    return configured or "faiss"
+
+
+def is_search_backend_ready() -> bool:
+    backend = active_search_backend()
+    if backend == "qdrant":
+        try:
+            from .qdrant_search import qdrant_index_ready
+
+            return qdrant_index_ready()
+        except Exception:
+            return False
+    return Path(INDEX_PATH).exists() and Path(CHUNKS_PATH).exists()
+
+
 def run_hybrid_search_debug(raw_query: str, top_k: int = TOP_K_FINAL) -> Dict[str, object]:
+    if active_search_backend() == "qdrant":
+        from .qdrant_search import run_qdrant_search_debug
+
+        return run_qdrant_search_debug(raw_query, top_k=top_k)
+
     if not raw_query or not raw_query.strip():
         return {
             "query": "",
@@ -1030,6 +1070,11 @@ def run_hybrid_search_debug(raw_query: str, top_k: int = TOP_K_FINAL) -> Dict[st
 
 
 def get_relevant_chunks(raw_query: str, top_k: int = TOP_K_FINAL) -> List[Dict]:
+    if active_search_backend() == "qdrant":
+        from .qdrant_search import get_relevant_chunks_qdrant
+
+        return get_relevant_chunks_qdrant(raw_query, top_k=top_k)
+
     debug_payload = run_hybrid_search_debug(raw_query, top_k=top_k)
     return list(debug_payload.get("final_results", []))
 
