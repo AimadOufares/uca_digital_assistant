@@ -33,7 +33,7 @@ except ImportError:  # pragma: no cover
 RAW_PATH = "data_storage/raw"
 PROCESSED_PATH = "data_storage/processed"
 CACHE_FILE = "data_storage/cache/file_cache.json"
-PROCESSING_POLICY_VERSION = "v5_structured_docling_fasttext_qdrant_ready"
+PROCESSING_POLICY_VERSION = "v6_structured_docling_context_resolution_ready"
 PROCESSING_WORKERS = 6
 
 CHUNK_TOKENS = 450

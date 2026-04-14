@@ -4,23 +4,16 @@ import unicodedata
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+from .context_resolution import (
+    ESTABLISHMENT_ALIASES,
+    detect_primary_establishment,
+    get_metadata_establishment,
+)
 
 LANG_ALLOWLIST = {
     lang.strip().lower()
     for lang in os.getenv("RAG_LANG_ALLOWLIST", "fr,ar,en").split(",")
     if lang.strip()
-}
-
-FACULTY_RULES = {
-    "fssm": "FSSM",
-    "fstg": "FSTG",
-    "fsjes": "FSJES",
-    "flsh": "FLSH",
-    "ensa": "ENSA",
-    "encg": "ENCG",
-    "ens": "ENS",
-    "fmpm": "FMPM",
-    "uca": "UCA",
 }
 
 DOCUMENT_TYPE_RULES: List[Tuple[str, List[str]]] = [
@@ -44,6 +37,13 @@ def normalize_text(value: str) -> str:
     return text.strip()
 
 
+FACULTY_RULES = {
+    normalize_text(alias): label
+    for label, aliases in ESTABLISHMENT_ALIASES.items()
+    for alias in aliases
+}
+
+
 NORMALIZED_DOCUMENT_TYPE_RULES: List[Tuple[str, List[str]]] = [
     (doc_type, [normalize_text(keyword) for keyword in keywords])
     for doc_type, keywords in DOCUMENT_TYPE_RULES
@@ -59,11 +59,7 @@ def canonical_file_type(raw_file_type: str, source_path: str) -> str:
 
 
 def detect_faculty(source_path: str, text: str) -> str:
-    haystack = normalize_text(f"{source_path} {text}")
-    for token, label in FACULTY_RULES.items():
-        if token in haystack:
-            return label
-    return "unknown"
+    return detect_primary_establishment(source_path, text)
 
 
 def detect_document_type(source_path: str, text: str) -> str:
@@ -102,6 +98,7 @@ def prepare_chunk_metadata(chunk: Dict, source_path: str) -> Optional[Dict]:
     year = detect_year(source_path, contextual_text)
 
     metadata["file_type"] = file_type
+    metadata["etablissement"] = faculty
     metadata["faculty"] = faculty
     metadata["document_type"] = document_type
     metadata["chunk_id"] = str(metadata.get("chunk_id") or metadata.get("chunk_hash") or "")
@@ -111,6 +108,9 @@ def prepare_chunk_metadata(chunk: Dict, source_path: str) -> Optional[Dict]:
         metadata["year"] = year
     else:
         metadata.pop("year", None)
+    if get_metadata_establishment(metadata) == "unknown":
+        metadata["etablissement"] = "unknown"
+        metadata["faculty"] = "unknown"
 
     updated_chunk = dict(chunk)
     updated_chunk["metadata"] = metadata

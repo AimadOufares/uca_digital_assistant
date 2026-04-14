@@ -17,17 +17,31 @@ from sentence_transformers.cross_encoder import CrossEncoder
 try:
     from ..offline.indexing import DEFAULT_EMBEDDING_MODEL
     from ..retrieval.bm25_search import build_bm25_index, load_bm25_corpus, search_bm25
+    from ..shared.context_resolution import (
+        CANONICAL_ESTABLISHMENTS,
+        UCA_GLOBAL,
+        detect_establishments_in_text,
+        get_metadata_establishment,
+        normalize_establishment_label,
+    )
     from ..shared.env_loader import load_env_file
     from ..shared.index_manifest import load_manifest, validate_manifest
-    from ..shared.metadata_policy import FACULTY_RULES, normalize_text
+    from ..shared.metadata_policy import normalize_text
     from ..shared.relevance_policy import boost_results_with_metadata
     from ..shared.runtime_config import configured_vector_backend
 except ImportError:  # pragma: no cover
     from rag_module.offline.indexing import DEFAULT_EMBEDDING_MODEL
     from rag_module.retrieval.bm25_search import build_bm25_index, load_bm25_corpus, search_bm25
+    from rag_module.shared.context_resolution import (
+        CANONICAL_ESTABLISHMENTS,
+        UCA_GLOBAL,
+        detect_establishments_in_text,
+        get_metadata_establishment,
+        normalize_establishment_label,
+    )
     from rag_module.shared.env_loader import load_env_file
     from rag_module.shared.index_manifest import load_manifest, validate_manifest
-    from rag_module.shared.metadata_policy import FACULTY_RULES, normalize_text
+    from rag_module.shared.metadata_policy import normalize_text
     from rag_module.shared.relevance_policy import boost_results_with_metadata
     from rag_module.shared.runtime_config import configured_vector_backend
 
@@ -247,8 +261,6 @@ NORMALIZED_LEVEL_KEYWORDS = {
     level: {normalize_text(keyword) for keyword in keywords if normalize_text(keyword)}
     for level, keywords in LEVEL_KEYWORDS.items()
 }
-NORMALIZED_FACULTY_RULES = {normalize_text(token): label for token, label in FACULTY_RULES.items()}
-
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 logger = logging.getLogger(__name__)
 
@@ -583,6 +595,33 @@ def deduplicate_chunks(chunks_list: List[Dict]) -> List[Dict]:
     return unique
 
 
+def _normalize_allowed_establishments(allowed_establishments: Optional[List[str]]) -> List[str]:
+    normalized: List[str] = []
+    for item in allowed_establishments or []:
+        canonical = normalize_establishment_label(item)
+        if canonical and canonical not in normalized:
+            normalized.append(canonical)
+    return normalized
+
+
+def _filter_results_by_allowed_establishments(
+    results: List[Dict],
+    allowed_establishments: Optional[List[str]],
+) -> List[Dict]:
+    allowed = _normalize_allowed_establishments(allowed_establishments)
+    if not allowed:
+        return list(results)
+
+    allowed_set = set(allowed)
+    filtered: List[Dict] = []
+    for result in results:
+        metadata = result.get("metadata", {}) or {}
+        chunk_establishment = get_metadata_establishment(metadata)
+        if chunk_establishment in allowed_set:
+            filtered.append(result)
+    return filtered
+
+
 def apply_metadata_boost(results: List[Dict], query: str) -> List[Dict]:
     return boost_results_with_metadata(results, query)
 
@@ -659,19 +698,23 @@ def _extract_query_levels(normalized_query: str, query_tokens: Set[str]) -> List
 
 
 def _extract_query_faculties(normalized_query: str) -> List[str]:
-    faculties: List[str] = []
-    for token, label in NORMALIZED_FACULTY_RULES.items():
-        if token and token in normalized_query and label not in faculties:
-            faculties.append(label)
-    return faculties
+    return [item for item in detect_establishments_in_text(normalized_query) if item != UCA_GLOBAL]
 
 
-def build_query_profile(query: str) -> Dict[str, Any]:
+def build_query_profile(query: str, allowed_establishments: Optional[List[str]] = None) -> Dict[str, Any]:
     normalized_query = normalize_text(query)
     query_tokens = _tokenize_normalized(normalized_query)
     topic_hits = _extract_query_topics(normalized_query, query_tokens)
     levels = _extract_query_levels(normalized_query, query_tokens)
     faculties = _extract_query_faculties(normalized_query)
+    allowed_specific = [
+        item
+        for item in _normalize_allowed_establishments(allowed_establishments)
+        if item != UCA_GLOBAL and item in CANONICAL_ESTABLISHMENTS
+    ]
+    for establishment in allowed_specific:
+        if establishment not in faculties:
+            faculties.append(establishment)
     years = sorted({int(year) for year in re.findall(r"\b(?:19|20)\d{2}\b", normalized_query)})
     informative_tokens = sorted(
         token
@@ -702,6 +745,7 @@ def _chunk_haystack(chunk: Dict) -> str:
         metadata.get("source", ""),
         metadata.get("file_name", ""),
         metadata.get("document_type", ""),
+        get_metadata_establishment(metadata),
     ]
     return normalize_text(" ".join(str(field or "") for field in fields))
 
@@ -758,7 +802,7 @@ def score_chunk_thematic_match(chunk: Dict, query_profile: Dict[str, Any]) -> Di
     informative_tokens = set(query_profile.get("informative_tokens", []))
     topic_query_hits = query_profile.get("topic_hits", {}) or {}
     metadata_doc_type = normalize_text(str(metadata.get("document_type") or ""))
-    metadata_faculty = str(metadata.get("faculty") or "").strip().upper()
+    metadata_faculty = get_metadata_establishment(metadata).strip().upper()
     metadata_year = metadata.get("year")
 
     matched_topics = sorted(primary_topics.intersection(chunk_topics.keys()))
@@ -870,8 +914,13 @@ def score_chunk_thematic_match(chunk: Dict, query_profile: Dict[str, Any]) -> Di
     }
 
 
-def apply_retrieval_guardrails(query: str, results: List[Dict], top_k: int) -> Tuple[List[Dict], Dict[str, Any]]:
-    query_profile = build_query_profile(query)
+def apply_retrieval_guardrails(
+    query: str,
+    results: List[Dict],
+    top_k: int,
+    allowed_establishments: Optional[List[str]] = None,
+) -> Tuple[List[Dict], Dict[str, Any]]:
+    query_profile = build_query_profile(query, allowed_establishments=allowed_establishments)
     guarded: List[Dict] = []
     rejected: List[Dict] = []
 
@@ -1008,11 +1057,15 @@ def is_search_backend_ready() -> bool:
     return Path(INDEX_PATH).exists() and Path(CHUNKS_PATH).exists()
 
 
-def run_hybrid_search_debug(raw_query: str, top_k: int = TOP_K_FINAL) -> Dict[str, object]:
+def run_hybrid_search_debug(
+    raw_query: str,
+    top_k: int = TOP_K_FINAL,
+    allowed_establishments: Optional[List[str]] = None,
+) -> Dict[str, object]:
     if active_search_backend() == "qdrant":
         from .qdrant_search import run_qdrant_search_debug
 
-        return run_qdrant_search_debug(raw_query, top_k=top_k)
+        return run_qdrant_search_debug(raw_query, top_k=top_k, allowed_establishments=allowed_establishments)
 
     if not raw_query or not raw_query.strip():
         return {
@@ -1035,23 +1088,39 @@ def run_hybrid_search_debug(raw_query: str, top_k: int = TOP_K_FINAL) -> Dict[st
     queries = generate_multi_queries(query)
     query_vectors = embed_queries(queries)
     retrieve_k = max(TOP_K_RETRIEVE, top_k * 4)
+    if _normalize_allowed_establishments(allowed_establishments):
+        retrieve_k = max(retrieve_k * 4, 80)
 
-    dense_results = search_faiss(query_vectors, top_k=retrieve_k)
+    dense_results = _filter_results_by_allowed_establishments(
+        search_faiss(query_vectors, top_k=retrieve_k),
+        allowed_establishments,
+    )
     _, bm25_index = get_bm25_resources()
-    bm25_results = search_bm25(query, bm25_index, top_k=retrieve_k)
+    bm25_results = _filter_results_by_allowed_establishments(
+        search_bm25(query, bm25_index, top_k=retrieve_k),
+        allowed_establishments,
+    )
 
     retrieved = merge_dense_and_bm25(dense_results, bm25_results, top_k=retrieve_k)
-    retrieved = deduplicate_chunks(retrieved)
+    retrieved = _filter_results_by_allowed_establishments(deduplicate_chunks(retrieved), allowed_establishments)
     boosted = apply_metadata_boost(retrieved, query)
-    guarded, guardrail_diagnostics = apply_retrieval_guardrails(query, boosted, top_k=top_k)
+    guarded, guardrail_diagnostics = apply_retrieval_guardrails(
+        query,
+        boosted,
+        top_k=top_k,
+        allowed_establishments=allowed_establishments,
+    )
     reranked = rerank_chunks(query, guarded, top_k=max(top_k * 2, top_k))
     final_ranked = apply_post_rerank_guardrails(
-        reranked,
+        _filter_results_by_allowed_establishments(reranked, allowed_establishments),
         query_profile=guardrail_diagnostics.get("query_profile", {}),
         top_k=top_k,
     )
     abstention = decide_retrieval_abstention(final_ranked, guardrail_diagnostics.get("query_profile", {}))
-    final_results = [] if abstention["abstain"] else truncate_chunks(final_ranked, MAX_CONTEXT_CHARS)
+    final_results = [] if abstention["abstain"] else truncate_chunks(
+        _filter_results_by_allowed_establishments(final_ranked, allowed_establishments),
+        MAX_CONTEXT_CHARS,
+    )
 
     logger.info("%s chunks pertinents retournes apres fusion et reranking", len(final_results))
     return {
@@ -1069,13 +1138,25 @@ def run_hybrid_search_debug(raw_query: str, top_k: int = TOP_K_FINAL) -> Dict[st
     }
 
 
-def get_relevant_chunks(raw_query: str, top_k: int = TOP_K_FINAL) -> List[Dict]:
+def get_relevant_chunks(
+    raw_query: str,
+    top_k: int = TOP_K_FINAL,
+    allowed_establishments: Optional[List[str]] = None,
+) -> List[Dict]:
     if active_search_backend() == "qdrant":
         from .qdrant_search import get_relevant_chunks_qdrant
 
-        return get_relevant_chunks_qdrant(raw_query, top_k=top_k)
+        return get_relevant_chunks_qdrant(
+            raw_query,
+            top_k=top_k,
+            allowed_establishments=allowed_establishments,
+        )
 
-    debug_payload = run_hybrid_search_debug(raw_query, top_k=top_k)
+    debug_payload = run_hybrid_search_debug(
+        raw_query,
+        top_k=top_k,
+        allowed_establishments=allowed_establishments,
+    )
     return list(debug_payload.get("final_results", []))
 
 

@@ -1,9 +1,10 @@
 const chatMessages = document.getElementById("chatMessages");
 const chatForm = document.getElementById("chatForm");
 const messageInput = document.getElementById("messageInput");
+const userEstablishment = document.getElementById("userEstablishment");
 const sendButton = document.getElementById("sendButton");
 const typingIndicator = document.getElementById("typingIndicator");
-const promptChips = document.querySelectorAll(".prompt-chip");
+const promptChips = document.querySelectorAll(".prompt-btn");
 
 const API_URL = "/api/chat/";
 
@@ -52,6 +53,9 @@ function appendMessage(role, text) {
 function setLoadingState(isLoading) {
     sendButton.disabled = isLoading;
     messageInput.disabled = isLoading;
+    if (userEstablishment) {
+        userEstablishment.disabled = isLoading;
+    }
     typingIndicator.hidden = !isLoading;
     promptChips.forEach((chip) => {
         chip.disabled = isLoading;
@@ -74,7 +78,10 @@ async function submitMessage(message) {
                 "Content-Type": "application/json",
                 "X-Requested-With": "XMLHttpRequest",
             },
-            body: JSON.stringify({ message }),
+            body: JSON.stringify({
+                message,
+                user_establishment: userEstablishment ? userEstablishment.value : "",
+            }),
         });
 
         let payload = {};

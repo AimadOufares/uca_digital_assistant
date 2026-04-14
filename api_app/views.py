@@ -21,6 +21,7 @@ from rag_module.generation.rag_engine import (
     RAGIndexNotReadyError,
     answer_question,
 )
+from rag_module.shared.context_resolution import CANONICAL_ESTABLISHMENTS, normalize_establishment_label
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +76,23 @@ class ChatRequestSerializer(serializers.Serializer):
         trim_whitespace=True,
         max_length=2000,
     )
+    user_establishment = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        trim_whitespace=True,
+        max_length=64,
+    )
+
+    def validate_user_establishment(self, value: str) -> str:
+        cleaned = (value or "").strip()
+        if not cleaned:
+            return ""
+        normalized = normalize_establishment_label(cleaned)
+        if normalized is None or normalized not in CANONICAL_ESTABLISHMENTS:
+            raise serializers.ValidationError(
+                "Etablissement invalide. Valeurs acceptees: " + ", ".join(CANONICAL_ESTABLISHMENTS)
+            )
+        return normalized
 
 
 class TestView(APIView):
@@ -99,14 +117,15 @@ class ChatAPIView(APIView):
             )
 
         message = serializer.validated_data["message"]
+        user_establishment = serializer.validated_data.get("user_establishment") or None
         try:
-            result = answer_question(message)
-            return Response(
-                {
-                    "answer": result.get("answer", "").strip(),
-                },
-                status=status.HTTP_200_OK,
-            )
+            result = answer_question(message, user_establishment=user_establishment)
+            payload = {
+                "answer": result.get("answer", "").strip(),
+            }
+            if result.get("needs_clarification"):
+                payload["needs_clarification"] = True
+            return Response(payload, status=status.HTTP_200_OK)
         except ValueError as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         except RAGIndexNotReadyError as exc:

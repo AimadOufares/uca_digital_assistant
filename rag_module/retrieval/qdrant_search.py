@@ -1,7 +1,7 @@
 import logging
 from functools import lru_cache
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from qdrant_client.http import models
 
@@ -63,27 +63,30 @@ def qdrant_index_ready() -> bool:
         return False
 
 
-def _query_filter(query_profile: Dict) -> models.Filter | None:
-    faculties = list(query_profile.get("faculties", []) or [])
+def _query_filter(query_profile: Dict, allowed_establishments: Optional[List[str]] = None) -> models.Filter | None:
+    faculties = list(allowed_establishments or query_profile.get("faculties", []) or [])
     years = list(query_profile.get("years", []) or [])
-    conditions: List[models.FieldCondition] = []
-    if len(faculties) == 1:
-        conditions.append(
-            models.FieldCondition(
-                key="metadata.faculty",
-                match=models.MatchValue(value=faculties[0]),
+    must_conditions: List[object] = []
+    if faculties:
+        faculty_match = models.MatchAny(any=faculties)
+        must_conditions.append(
+            models.Filter(
+                should=[
+                    models.FieldCondition(key="metadata.etablissement", match=faculty_match),
+                    models.FieldCondition(key="metadata.faculty", match=faculty_match),
+                ]
             )
         )
     if len(years) == 1:
-        conditions.append(
+        must_conditions.append(
             models.FieldCondition(
                 key="metadata.year",
                 match=models.MatchValue(value=int(years[0])),
             )
         )
-    if not conditions:
+    if not must_conditions:
         return None
-    return models.Filter(must=conditions)
+    return models.Filter(must=must_conditions)
 
 
 def _normalize_scored_points(points, score_type: str, score_field: str) -> List[Dict]:
@@ -179,7 +182,11 @@ def _fusion_search(query: str, query_filter: models.Filter | None, limit: int) -
     return _normalize_scored_points(response, score_type="hybrid", score_field="hybrid_raw_score")
 
 
-def run_qdrant_search_debug(raw_query: str, top_k: int = 5) -> Dict[str, object]:
+def run_qdrant_search_debug(
+    raw_query: str,
+    top_k: int = 5,
+    allowed_establishments: Optional[List[str]] = None,
+) -> Dict[str, object]:
     legacy = _legacy_search_module()
     if not raw_query or not raw_query.strip():
         return {
@@ -197,8 +204,9 @@ def run_qdrant_search_debug(raw_query: str, top_k: int = 5) -> Dict[str, object]
 
     top_k = max(1, int(top_k))
     query = legacy.enhance_query(raw_query)
-    query_profile = legacy.build_query_profile(query)
-    query_filter = _query_filter(query_profile)
+    normalized_allowed = legacy._normalize_allowed_establishments(allowed_establishments)
+    query_profile = legacy.build_query_profile(query, allowed_establishments=normalized_allowed)
+    query_filter = _query_filter(query_profile, allowed_establishments=normalized_allowed)
     retrieve_k = max(legacy.TOP_K_RETRIEVE, top_k * 4)
 
     dense_results = _dense_search(query, query_filter=query_filter, limit=retrieve_k)
@@ -219,16 +227,27 @@ def run_qdrant_search_debug(raw_query: str, top_k: int = 5) -> Dict[str, object]
         ]
         enriched_merged.append(item)
 
-    boosted = legacy.apply_metadata_boost(enriched_merged, query)
-    guarded, guardrail_diagnostics = legacy.apply_retrieval_guardrails(query, boosted, top_k=top_k)
+    boosted = legacy._filter_results_by_allowed_establishments(
+        legacy.apply_metadata_boost(enriched_merged, query),
+        normalized_allowed,
+    )
+    guarded, guardrail_diagnostics = legacy.apply_retrieval_guardrails(
+        query,
+        boosted,
+        top_k=top_k,
+        allowed_establishments=normalized_allowed,
+    )
     reranked = legacy.rerank_chunks(query, guarded, top_k=max(top_k * 2, top_k))
     final_ranked = legacy.apply_post_rerank_guardrails(
-        reranked,
+        legacy._filter_results_by_allowed_establishments(reranked, normalized_allowed),
         query_profile=guardrail_diagnostics.get("query_profile", {}),
         top_k=top_k,
     )
     abstention = legacy.decide_retrieval_abstention(final_ranked, guardrail_diagnostics.get("query_profile", {}))
-    final_results = [] if abstention["abstain"] else legacy.truncate_chunks(final_ranked, legacy.MAX_CONTEXT_CHARS)
+    final_results = [] if abstention["abstain"] else legacy.truncate_chunks(
+        legacy._filter_results_by_allowed_establishments(final_ranked, normalized_allowed),
+        legacy.MAX_CONTEXT_CHARS,
+    )
 
     return {
         "query": query,
@@ -245,6 +264,14 @@ def run_qdrant_search_debug(raw_query: str, top_k: int = 5) -> Dict[str, object]
     }
 
 
-def get_relevant_chunks_qdrant(raw_query: str, top_k: int = 5) -> List[Dict]:
-    debug_payload = run_qdrant_search_debug(raw_query, top_k=top_k)
+def get_relevant_chunks_qdrant(
+    raw_query: str,
+    top_k: int = 5,
+    allowed_establishments: Optional[List[str]] = None,
+) -> List[Dict]:
+    debug_payload = run_qdrant_search_debug(
+        raw_query,
+        top_k=top_k,
+        allowed_establishments=allowed_establishments,
+    )
     return list(debug_payload.get("final_results", []))

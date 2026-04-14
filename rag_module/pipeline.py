@@ -46,14 +46,14 @@ def build_knowledge_base(seeds: Optional[List[str]] = None) -> int:
     return total_chunks
 
 
-def ask_question(question: str) -> Dict:
+def ask_question(question: str, user_establishment: Optional[str] = None) -> Dict:
     """
     Flux online de chat:
     - recuperation de contexte
     - generation de reponse
     Ne lance jamais ingestion/processing/indexing.
     """
-    return answer_question(question)
+    return answer_question(question, user_establishment=user_establishment)
 
 
 def run_pipeline(

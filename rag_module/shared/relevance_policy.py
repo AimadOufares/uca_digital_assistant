@@ -1,5 +1,6 @@
 from typing import Dict, List, Set, Tuple
 
+from .context_resolution import get_metadata_establishment
 from .metadata_policy import normalize_text
 
 
@@ -142,7 +143,7 @@ def compute_metadata_boost(metadata: Dict, query: str) -> float:
     boost = 0.0
 
     document_type = normalize_text(str(metadata.get("document_type") or ""))
-    faculty = normalize_text(str(metadata.get("faculty") or ""))
+    establishment = normalize_text(get_metadata_establishment(metadata))
     year = metadata.get("year")
 
     if document_type and document_type in normalized_query:
@@ -151,7 +152,7 @@ def compute_metadata_boost(metadata: Dict, query: str) -> float:
         if document_type in {"inscription", "admission", "bourse", "calendrier", "resultats", "formation"}:
             boost += 0.04
 
-    if faculty and faculty != "unknown" and faculty in normalized_query:
+    if establishment and establishment != "unknown" and establishment in normalized_query:
         boost += 0.05
 
     if isinstance(year, int) and any(token in normalized_query for token in ("calendrier", "resultat", "resultats", "inscription")):

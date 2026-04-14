@@ -3,9 +3,15 @@ import math
 import os
 import re
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from .prompt_builder import build_rag_prompt
+from ..shared.context_resolution import (
+    allowed_establishments_for_resolution,
+    build_clarification_message,
+    build_out_of_scope_message,
+    resolve_context,
+)
 from ..shared.env_loader import load_env_file
 
 try:
@@ -313,13 +319,18 @@ class RAGEngine:
         env_prompt_style = os.getenv("RAG_PROMPT_STYLE", prompt_style).strip().lower()
         self.prompt_style = env_prompt_style if env_prompt_style in {"auto", "standard", "concise"} else "auto"
 
-    def retrieve(self, query: str) -> List[Dict]:
+    def retrieve(self, query: str, resolution_context: Optional[Dict] = None) -> List[Dict]:
         try:
             from ..retrieval import rag_search
 
             if not rag_search.is_search_backend_ready():
                 raise RAGIndexNotReadyError("Index RAG introuvable. Lancez d'abord l'indexation.")
-            return rag_search.get_relevant_chunks(query, top_k=self.retrieval_k)
+            allowed_establishments = allowed_establishments_for_resolution(resolution_context or {})
+            return rag_search.get_relevant_chunks(
+                query,
+                top_k=self.retrieval_k,
+                allowed_establishments=allowed_establishments,
+            )
         except FileNotFoundError as exc:
             raise RAGIndexNotReadyError("Index RAG introuvable. Lancez d'abord l'indexation.") from exc
         except RAGIndexNotReadyError:
@@ -329,7 +340,7 @@ class RAGEngine:
                 "Le moteur de recherche RAG n'est pas pret (index ou modeles indisponibles)."
             ) from exc
 
-    def generate(self, query: str, chunks: List[Dict]) -> str:
+    def generate(self, query: str, chunks: List[Dict], resolution_context: Optional[Dict] = None) -> str:
         if not chunks:
             return _abstention_answer()
 
@@ -338,32 +349,59 @@ class RAGEngine:
         if prompt_style == "auto":
             prompt_style = "standard"
 
-        prompt = build_rag_prompt(query=query, chunks=chunks, style=prompt_style)
+        prompt = build_rag_prompt(
+            query=query,
+            chunks=chunks,
+            style=prompt_style,
+            resolution_context=resolution_context,
+        )
         for backend in backends:
             answer = _generate_with_lm_studio(prompt) if backend == "lmstudio" else _generate_with_openai(prompt)
             if answer:
                 return answer
         return _extractive_fallback_answer(query, chunks)
 
-    def answer(self, query: str) -> Dict:
+    def answer(self, query: str, user_establishment: Optional[str] = None) -> Dict:
         cleaned_query = (query or "").strip()
         if not cleaned_query:
             raise ValueError("La question ne peut pas etre vide.")
 
-        chunks = self.retrieve(cleaned_query)
+        resolution_context = resolve_context(cleaned_query, user_establishment=user_establishment)
+        resolution_context["allowed_establishments"] = allowed_establishments_for_resolution(resolution_context)
+
+        if resolution_context.get("mode") == "clarification":
+            return {
+                "answer": build_clarification_message(resolution_context),
+                "sources": [],
+                "needs_clarification": True,
+                "resolution": resolution_context,
+            }
+
+        if resolution_context.get("mode") == "out_of_scope":
+            return {
+                "answer": build_out_of_scope_message(),
+                "sources": [],
+                "resolution": resolution_context,
+            }
+
+        chunks = self.retrieve(cleaned_query, resolution_context=resolution_context)
         if not chunks:
-            return {"answer": _abstention_answer(), "sources": []}
+            return {"answer": _abstention_answer(), "sources": [], "resolution": resolution_context}
         try:
-            answer = self.generate(cleaned_query, chunks)
+            answer = self.generate(cleaned_query, chunks, resolution_context=resolution_context)
         except Exception as exc:
             raise RAGGenerationError("Erreur lors de la generation de reponse.") from exc
 
-        return {"answer": answer.strip(), "sources": _normalize_sources(chunks)}
+        return {
+            "answer": answer.strip(),
+            "sources": _normalize_sources(chunks),
+            "resolution": resolution_context,
+        }
 
 
 _default_engine = RAGEngine()
 
 
-def answer_question(question: str) -> Dict:
+def answer_question(question: str, user_establishment: Optional[str] = None) -> Dict:
     """Fonction utilitaire conservee pour compatibilite avec pipeline.py."""
-    return _default_engine.answer(question)
+    return _default_engine.answer(question, user_establishment=user_establishment)
