@@ -11,11 +11,13 @@ import numpy as np
 from sentence_transformers import SentenceTransformer
 
 try:
+    from ..offline.preparation import verify_indexing_prerequisites
     from ..offline.qdrant_indexing import build_qdrant_index
     from ..shared.env_loader import load_env_file
     from ..shared.index_manifest import build_manifest, load_manifest, save_manifest
     from ..shared.runtime_config import configured_vector_backend
 except ImportError:  # pragma: no cover
+    from rag_module.offline.preparation import verify_indexing_prerequisites
     from rag_module.offline.qdrant_indexing import build_qdrant_index
     from rag_module.shared.env_loader import load_env_file
     from rag_module.shared.index_manifest import build_manifest, load_manifest, save_manifest
@@ -307,6 +309,7 @@ def embed(texts: List[str], cache: Dict[str, Dict[str, List[float]]]) -> List[Li
 
 
 def build_index(chunks: List[Dict]) -> None:
+    verify_indexing_prerequisites()
     chunks_to_index = filter_chunks_for_reindex(chunks, load_index_manifest())
     texts = [c["text"] for c in chunks_to_index]
     if not texts:

@@ -72,6 +72,8 @@ MIN_SUPPORT_SCORE = 0.28
 MIN_FINAL_SUPPORT_SCORE = 0.42
 MIN_TOP_RERANK_NORMALIZED = 0.44
 TOPICAL_MISMATCH_DROP_THRESHOLD = 0.45
+RERANK_FALLBACK_SUPPORT_SCORE = 0.62
+RERANK_FALLBACK_THEMATIC_SCORE = 0.20
 
 QUERY_STOPWORDS = {
     "a",
@@ -1007,6 +1009,32 @@ def apply_post_rerank_guardrails(results: List[Dict], query_profile: Dict[str, A
     return filtered[:top_k]
 
 
+def select_support_fallback_results(results: List[Dict], query_profile: Dict[str, Any], top_k: int) -> List[Dict]:
+    fallback_candidates: List[Dict] = []
+    for result in results:
+        enriched = dict(result)
+        support_score = float(enriched.get("support_score", enriched.get("score", 0.0)) or 0.0)
+        thematic_score = float(enriched.get("thematic_score", 0.0) or 0.0)
+        if support_score < RERANK_FALLBACK_SUPPORT_SCORE:
+            continue
+        if query_profile.get("has_strong_topic") and thematic_score < RERANK_FALLBACK_THEMATIC_SCORE:
+            continue
+        if enriched.get("conflicting_topics"):
+            continue
+        enriched["final_support_score"] = round(max(float(enriched.get("final_support_score", 0.0) or 0.0), support_score), 4)
+        fallback_candidates.append(enriched)
+
+    fallback_candidates.sort(
+        key=lambda item: (
+            float(item.get("final_support_score", 0.0)),
+            float(item.get("support_score", 0.0)),
+            float(item.get("score", 0.0)),
+        ),
+        reverse=True,
+    )
+    return fallback_candidates[:top_k]
+
+
 def decide_retrieval_abstention(results: List[Dict], query_profile: Dict[str, Any]) -> Dict[str, Any]:
     if not results:
         return {"abstain": True, "reason": "no_supported_chunks"}
@@ -1117,10 +1145,19 @@ def run_hybrid_search_debug(
         top_k=top_k,
     )
     abstention = decide_retrieval_abstention(final_ranked, guardrail_diagnostics.get("query_profile", {}))
-    final_results = [] if abstention["abstain"] else truncate_chunks(
-        _filter_results_by_allowed_establishments(final_ranked, allowed_establishments),
-        MAX_CONTEXT_CHARS,
+    fallback_results = select_support_fallback_results(
+        _filter_results_by_allowed_establishments(guarded, allowed_establishments),
+        query_profile=guardrail_diagnostics.get("query_profile", {}),
+        top_k=top_k,
     )
+    if abstention["abstain"] and abstention["reason"] == "top_rerank_too_low" and fallback_results:
+        final_results = truncate_chunks(fallback_results, MAX_CONTEXT_CHARS)
+        abstention = {"abstain": False, "reason": "support_fallback"}
+    else:
+        final_results = [] if abstention["abstain"] else truncate_chunks(
+            _filter_results_by_allowed_establishments(final_ranked, allowed_establishments),
+            MAX_CONTEXT_CHARS,
+        )
 
     logger.info("%s chunks pertinents retournes apres fusion et reranking", len(final_results))
     return {

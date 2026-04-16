@@ -1,4 +1,5 @@
 import logging
+import os
 from collections import defaultdict
 from typing import Dict, List, Set
 from urllib.parse import urlparse
@@ -36,8 +37,11 @@ class _ScrapyCollector:
             if not isinstance(entry, dict):
                 continue
             content_hash = str(entry.get("content_hash") or "").strip()
+            text_content_hash = str(entry.get("text_content_hash") or "").strip()
             if content_hash:
                 self.seen_hashes.add(content_hash)
+            if text_content_hash:
+                self.seen_hashes.add(text_content_hash)
 
     def can_fetch(self, url: str) -> tuple[bool, str]:
         host = legacy.normalize_host(urlparse(url).netloc)
@@ -66,6 +70,7 @@ def crawl_with_scrapy(seeds: List[str]) -> List[Dict]:
         discovered_urls = discovered_urls[: legacy.MAX_SITEMAP_URLS]
 
     queued_per_domain: Dict[str, int] = defaultdict(int)
+    scrapy_job_dir = os.getenv("RAG_SCRAPY_JOBDIR", "data_storage/cache/scrapy_job")
 
     class UCASpider(scrapy.Spider):
         name = "uca_hybrid"
@@ -73,10 +78,64 @@ def crawl_with_scrapy(seeds: List[str]) -> List[Dict]:
             "DOWNLOAD_TIMEOUT": legacy.TIMEOUT,
             "CONCURRENT_REQUESTS": legacy.INGESTION_THREADS,
             "RETRY_TIMES": max(0, legacy.RETRIES - 1),
+            "AUTOTHROTTLE_ENABLED": True,
+            "AUTOTHROTTLE_START_DELAY": float(os.getenv("RAG_SCRAPY_AUTOTHROTTLE_START_DELAY", "0.25") or 0.25),
+            "AUTOTHROTTLE_MAX_DELAY": float(os.getenv("RAG_SCRAPY_AUTOTHROTTLE_MAX_DELAY", "8.0") or 8.0),
+            "DOWNLOAD_DELAY": float(os.getenv("RAG_SCRAPY_DOWNLOAD_DELAY", "0.15") or 0.15),
+            "CLOSESPIDER_PAGECOUNT": legacy.MAX_TOTAL_URLS,
+            "JOBDIR": scrapy_job_dir,
             "TELNETCONSOLE_ENABLED": False,
             "LOG_LEVEL": "ERROR",
             "ROBOTSTXT_OBEY": False,
         }
+
+        def _build_request(self, url: str, depth_value: int, priority: int):
+            canonical_url = legacy.clean_url(url)
+            previous_entry = dict(collector.state.get("urls", {}).get(canonical_url, {}))
+            if not legacy._should_refresh_weekly(previous_entry):
+                collector.stats["refresh_skipped"] += 1
+                domain = legacy.domain_bucket(urlparse(canonical_url).netloc)
+                legacy._update_state_entry(
+                    collector.state,
+                    canonical_url,
+                    url=url,
+                    domain=domain,
+                    last_status="refresh_skipped",
+                    last_http_code=int(previous_entry.get("last_http_code") or 0),
+                    skip_reason="refresh_window_not_elapsed",
+                    crawl_depth=depth_value,
+                )
+                collector.metadata_rows.append(
+                    legacy._metadata_skip_row(
+                        url,
+                        canonical_url,
+                        depth_value,
+                        "refresh_window_not_elapsed",
+                        domain,
+                        etag=str(previous_entry.get("etag") or ""),
+                        last_modified=str(previous_entry.get("last_modified") or ""),
+                    )
+                )
+                return None
+
+            legacy._update_state_entry(
+                collector.state,
+                canonical_url,
+                url=url,
+                domain=legacy.domain_bucket(urlparse(canonical_url).netloc),
+                crawl_depth=depth_value,
+                last_status="queued",
+                skip_reason="",
+            )
+            return scrapy.Request(
+                url=url,
+                callback=self.parse_page,
+                errback=self.handle_error,
+                dont_filter=True,
+                priority=priority,
+                meta={"depth_value": depth_value, "canonical_url": canonical_url},
+                headers=legacy._conditional_headers(previous_entry),
+            )
 
         def start_requests(self):
             for url in list(dict.fromkeys([*accepted_seeds, *discovered_urls])):
@@ -87,20 +146,14 @@ def crawl_with_scrapy(seeds: List[str]) -> List[Dict]:
                 domain = legacy.domain_bucket(host)
                 queued_per_domain[domain] += 1
                 priority = -(legacy.score_url(url, 0) + (queued_per_domain[domain] * legacy.DOMAIN_PRIORITY_STEP))
-                yield scrapy.Request(
-                    url=url,
-                    callback=self.parse_page,
-                    errback=self.handle_error,
-                    dont_filter=True,
-                    priority=priority,
-                    meta={"depth_value": 0},
-                    headers=legacy.HEADERS,
-                )
+                request = self._build_request(url, 0, priority)
+                if request is not None:
+                    yield request
 
         def handle_error(self, failure):
             request = failure.request
             url = str(getattr(request, "url", "") or "")
-            canonical_url = legacy.clean_url(url)
+            canonical_url = str(request.meta.get("canonical_url") or legacy.clean_url(url))
             domain = legacy.domain_bucket(urlparse(canonical_url).netloc)
             legacy._update_state_entry(
                 collector.state,
@@ -142,6 +195,49 @@ def crawl_with_scrapy(seeds: List[str]) -> List[Dict]:
 
             content = bytes(response.body or b"")
             content_type = response.headers.get("Content-Type", b"").decode("latin-1", errors="replace")
+            previous_entry = dict(collector.state.get("urls", {}).get(canonical_url, {}))
+            if int(response.status) == 304:
+                collector.stats["not_modified"] += 1
+                legacy._update_state_entry(
+                    collector.state,
+                    canonical_url,
+                    url=url,
+                    domain=domain,
+                    last_status="not_modified",
+                    last_http_code=304,
+                    skip_reason="not_modified",
+                    crawl_depth=depth,
+                )
+                collector.metadata_rows.append(
+                    legacy._metadata_skip_row(
+                        url,
+                        canonical_url,
+                        depth,
+                        "not_modified",
+                        domain,
+                        etag=str(previous_entry.get("etag") or ""),
+                        last_modified=str(previous_entry.get("last_modified") or ""),
+                    )
+                )
+                return
+
+            if int(response.status) != 200:
+                collector.stats["http_errors"] += 1
+                legacy._update_state_entry(
+                    collector.state,
+                    canonical_url,
+                    url=url,
+                    domain=domain,
+                    last_status="http_error",
+                    last_http_code=int(response.status),
+                    skip_reason=f"http_{int(response.status)}",
+                    crawl_depth=depth,
+                )
+                collector.metadata_rows.append(
+                    legacy._metadata_skip_row(url, canonical_url, depth, f"http_{int(response.status)}", domain)
+                )
+                return
+
             if b"<script" in content[:5000] and len(content) < 2000:
                 pw_content = legacy.fetch_with_playwright(url)
                 if pw_content:
@@ -183,8 +279,24 @@ def crawl_with_scrapy(seeds: List[str]) -> List[Dict]:
                 return
 
             content_hash = legacy.compute_hash(content)
-            if content_hash in collector.seen_hashes:
+            text_content_hash = str(quality.get("text_content_hash") or "").strip()
+            dedup_hash = text_content_hash or content_hash
+            if dedup_hash in collector.seen_hashes:
                 collector.stats["skipped_dup_exact"] += 1
+                legacy._update_state_entry(
+                    collector.state,
+                    canonical_url,
+                    url=url,
+                    domain=domain,
+                    last_status="skipped_dup_exact",
+                    last_http_code=int(response.status),
+                    content_hash=content_hash,
+                    text_content_hash=text_content_hash,
+                    quality_score=int(quality.get("score") or 0),
+                    quality_reason=str(quality.get("reason") or ""),
+                    skip_reason="duplicate_exact",
+                    crawl_depth=depth,
+                )
                 collector.metadata_rows.append(
                     legacy._metadata_skip_row(
                         url,
@@ -195,6 +307,8 @@ def crawl_with_scrapy(seeds: List[str]) -> List[Dict]:
                         quality_score=int(quality.get("score") or 0),
                         quality_reason=str(quality.get("reason") or ""),
                         content_hash=content_hash,
+                        text_content_hash=text_content_hash,
+                        content_type=content_type,
                     )
                 )
                 return
@@ -205,6 +319,20 @@ def crawl_with_scrapy(seeds: List[str]) -> List[Dict]:
                 if signature:
                     if any(legacy._hamming_distance(signature, existing) <= legacy.NEAR_DUP_SIMHASH_DISTANCE for existing in collector.near_dup_signatures):
                         collector.stats["skipped_dup_near"] += 1
+                        legacy._update_state_entry(
+                            collector.state,
+                            canonical_url,
+                            url=url,
+                            domain=domain,
+                            last_status="skipped_dup_near",
+                            last_http_code=int(response.status),
+                            content_hash=content_hash,
+                            text_content_hash=text_content_hash,
+                            quality_score=int(quality.get("score") or 0),
+                            quality_reason=str(quality.get("reason") or ""),
+                            skip_reason="duplicate_near",
+                            crawl_depth=depth,
+                        )
                         collector.metadata_rows.append(
                             legacy._metadata_skip_row(
                                 url,
@@ -215,12 +343,14 @@ def crawl_with_scrapy(seeds: List[str]) -> List[Dict]:
                                 quality_score=int(quality.get("score") or 0),
                                 quality_reason=str(quality.get("reason") or ""),
                                 content_hash=content_hash,
+                                text_content_hash=text_content_hash,
+                                content_type=content_type,
                             )
                         )
                         return
                     collector.near_dup_signatures.append(signature)
 
-            collector.seen_hashes.add(content_hash)
+            collector.seen_hashes.add(dedup_hash)
             filename = legacy.generate_filename(url, ext)
             path = legacy.save_file(content, filename)
             fetched_at = legacy.now_iso()
@@ -240,6 +370,7 @@ def crawl_with_scrapy(seeds: List[str]) -> List[Dict]:
                 etag=etag,
                 last_modified=last_modified,
                 content_hash=content_hash,
+                text_content_hash=text_content_hash,
                 file_path=path,
                 last_fetched_at=fetched_at,
                 quality_score=int(quality.get("score") or 0),
@@ -247,27 +378,28 @@ def crawl_with_scrapy(seeds: List[str]) -> List[Dict]:
                 skip_reason="",
                 crawl_depth=depth,
             )
-            row = {
-                "url": url,
-                "canonical_url": canonical_url,
-                "domain": domain,
-                "subdomain": subdomain,
-                "file": path,
-                "depth": depth,
-                "hash": content_hash,
-                "content_hash": content_hash,
-                "content_type": content_type,
-                "is_html": ext in {".html", ".htm"},
-                "download_quality_score": int(quality.get("score", 0)),
-                "download_quality_reason": str(quality.get("reason", "")),
-                "download_keyword_hits": quality.get("keyword_hits", []),
-                "download_quality_metrics": quality.get("metrics", {}),
-                "etag": etag,
-                "last_modified": last_modified,
-                "fetched_at": fetched_at,
-                "skip_reason": "",
-                "status": "downloaded",
-            }
+            row = legacy._build_ingestion_metadata_row(
+                url=url,
+                canonical_url=canonical_url,
+                domain=domain,
+                subdomain=subdomain,
+                depth=depth,
+                status="downloaded",
+                skip_reason="",
+                file_path=path,
+                content_type=content_type,
+                content_hash=content_hash,
+                text_content_hash=text_content_hash,
+                etag=etag,
+                last_modified=last_modified,
+                fetched_at=fetched_at,
+                quality_score=int(quality.get("score", 0)),
+                quality_reason=str(quality.get("reason", "")),
+                quality_metrics=quality.get("metrics", {}),
+                keyword_hits=quality.get("keyword_hits", []),
+            )
+            row["hash"] = dedup_hash
+            row["is_html"] = ext in {".html", ".htm"}
             collector.metadata_rows.append(row)
             collector.downloaded_rows.append(row)
 
@@ -282,14 +414,9 @@ def crawl_with_scrapy(seeds: List[str]) -> List[Dict]:
                 next_domain = legacy.domain_bucket(host)
                 queued_per_domain[next_domain] += 1
                 priority = -(legacy.score_url(link, next_depth) + (queued_per_domain[next_domain] * legacy.DOMAIN_PRIORITY_STEP))
-                yield scrapy.Request(
-                    url=link,
-                    callback=self.parse_page,
-                    errback=self.handle_error,
-                    priority=priority,
-                    meta={"depth_value": next_depth},
-                    headers=legacy.HEADERS,
-                )
+                request = self._build_request(link, next_depth, priority)
+                if request is not None:
+                    yield request
 
     process = CrawlerProcess()
     try:

@@ -16,7 +16,8 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from rag_module.generation.rag_engine import RAGGenerationError, RAGIndexNotReadyError, answer_question
-from rag_module.retrieval.rag_search import run_hybrid_search_debug
+from rag_module.retrieval.rag_search import invalidate_search_cache, run_hybrid_search_debug
+from rag_module.retrieval.qdrant_search import qdrant_index_ready
 from rag_module.shared.offline_pipeline_report import update_offline_pipeline_report
 
 
@@ -299,6 +300,80 @@ def evaluate_kpi_gates(report: Dict, precision_gate: float, hit_gate: float) -> 
     }
 
 
+def _with_backend(backend: str, callback):
+    previous = os.environ.get("RAG_VECTOR_BACKEND")
+    try:
+        os.environ["RAG_VECTOR_BACKEND"] = backend
+        invalidate_search_cache(clear_models=True)
+        return callback()
+    finally:
+        if previous is None:
+            os.environ.pop("RAG_VECTOR_BACKEND", None)
+        else:
+            os.environ["RAG_VECTOR_BACKEND"] = previous
+        invalidate_search_cache(clear_models=True)
+
+
+def compare_backends(top_k: int, run_generation: bool, backends: List[str]) -> Dict:
+    requested = [backend.strip().lower() for backend in backends if backend.strip()]
+    unique_backends: List[str] = []
+    for backend in requested:
+        if backend not in unique_backends:
+            unique_backends.append(backend)
+
+    reports: Dict[str, Dict] = {}
+    readiness: Dict[str, Dict[str, object]] = {}
+    for backend in unique_backends:
+        if backend == "qdrant":
+            readiness[backend] = {"ready": bool(qdrant_index_ready())}
+        else:
+            readiness[backend] = {
+                "ready": (PROJECT_ROOT / "data_storage" / "index" / "index.faiss").exists()
+                and (PROJECT_ROOT / "data_storage" / "index" / "chunks.json").exists()
+            }
+        if not readiness[backend]["ready"]:
+            reports[backend] = {
+                "generated_at": datetime.now().isoformat(),
+                "top_k": top_k,
+                "questions_evaluated": 0,
+                "summary": {},
+                "error": f"backend_not_ready:{backend}",
+            }
+            continue
+        reports[backend] = _with_backend(backend, lambda: evaluate(top_k=top_k, run_generation=run_generation))
+
+    diff: Dict[str, object] = {}
+    if len(unique_backends) >= 2:
+        base_backend = unique_backends[0]
+        compare_backend = unique_backends[1]
+        base_summary = reports.get(base_backend, {}).get("summary", {}) if isinstance(reports.get(base_backend), dict) else {}
+        compare_summary = reports.get(compare_backend, {}).get("summary", {}) if isinstance(reports.get(compare_backend), dict) else {}
+        for key in (
+            "precision_at_k_avg",
+            "coverage_at_k_avg",
+            "hit_at_k_rate",
+            "best_match_score_avg",
+            "metadata_boost_gain_avg",
+            "rerank_gain_avg",
+            "retrieval_latency_ms_avg",
+        ):
+            if key in base_summary and key in compare_summary:
+                diff[key] = round(float(compare_summary.get(key, 0.0)) - float(base_summary.get(key, 0.0)), 4)
+        diff["from"] = base_backend
+        diff["to"] = compare_backend
+
+    comparison = {
+        "generated_at": datetime.now().isoformat(),
+        "top_k": top_k,
+        "backends": unique_backends,
+        "readiness": readiness,
+        "reports": reports,
+        "diff": diff,
+    }
+    update_offline_pipeline_report("backend_comparison", comparison)
+    return comparison
+
+
 def write_report(report: Dict) -> Dict[str, Path]:
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -339,6 +414,48 @@ def write_report(report: Dict) -> Dict[str, Path]:
     return {"json": json_path, "txt": txt_path}
 
 
+def write_backend_comparison_report(report: Dict) -> Dict[str, Path]:
+    REPORT_DIR.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    json_path = REPORT_DIR / f"rag_backend_compare_{timestamp}.json"
+    txt_path = REPORT_DIR / f"rag_backend_compare_{timestamp}.txt"
+
+    with json_path.open("w", encoding="utf-8") as handle:
+        json.dump(report, handle, indent=2, ensure_ascii=False)
+
+    lines = [
+        "RAG BACKEND COMPARISON",
+        f"Generated at: {report.get('generated_at')}",
+        f"Top-k: {report.get('top_k')}",
+        f"Backends: {', '.join(report.get('backends', []))}",
+        "",
+    ]
+    readiness = report.get("readiness", {}) or {}
+    for backend in report.get("backends", []):
+        ready = readiness.get(backend, {}).get("ready")
+        lines.append(f"{backend} ready: {ready}")
+        summary = ((report.get("reports", {}) or {}).get(backend, {}) or {}).get("summary", {})
+        if summary:
+            lines.append(f"{backend} Precision@k: {summary.get('precision_at_k_avg', 0.0)}")
+            lines.append(f"{backend} Hit@k: {summary.get('hit_at_k_rate', 0.0)}")
+            lines.append(f"{backend} Rerank gain: {summary.get('rerank_gain_avg', 0.0)}")
+            lines.append(f"{backend} Retrieval latency avg (ms): {summary.get('retrieval_latency_ms_avg', 0.0)}")
+        lines.append("")
+
+    diff = report.get("diff", {}) or {}
+    if diff:
+        lines.append(f"Delta {diff.get('from')} -> {diff.get('to')}")
+        for key, value in diff.items():
+            if key in {"from", "to"}:
+                continue
+            lines.append(f"{key}: {value}")
+
+    with txt_path.open("w", encoding="utf-8") as handle:
+        handle.write("\n".join(lines))
+
+    return {"json": json_path, "txt": txt_path}
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Evaluation heuristique hybride du RAG (dense, BM25, fusion et generation).")
     parser.add_argument("--top-k", type=int, default=5, help="Nombre de chunks recuperes pour l'evaluation.")
@@ -346,9 +463,19 @@ def main() -> None:
     parser.add_argument("--precision-gate", type=float, default=DEFAULT_PRECISION_GATE, help="Seuil Precision@k moyen.")
     parser.add_argument("--hit-gate", type=float, default=DEFAULT_HIT_GATE, help="Seuil Hit@k rate.")
     parser.add_argument("--enforce-kpi-gates", action="store_true", help="Retourne un code d'erreur si les gates KPI echouent.")
+    parser.add_argument("--compare-backends", action="store_true", help="Compare les backends FAISS et Qdrant sur le meme set d'evaluation.")
+    parser.add_argument("--backends", default="faiss,qdrant", help="Liste comma-separated des backends a comparer.")
     args = parser.parse_args()
 
     top_k = max(1, args.top_k)
+    if args.compare_backends:
+        backends = [item.strip() for item in str(args.backends or "").split(",") if item.strip()]
+        comparison = compare_backends(top_k=top_k, run_generation=not args.skip_generation, backends=backends)
+        output_paths = write_backend_comparison_report(comparison)
+        print(f"Comparaison terminee. JSON: {output_paths['json']}")
+        print(f"Comparaison terminee. TXT : {output_paths['txt']}")
+        return
+
     report = evaluate(top_k=top_k, run_generation=not args.skip_generation)
     kpi_gates = evaluate_kpi_gates(report, precision_gate=args.precision_gate, hit_gate=args.hit_gate)
     report["kpi_gates"] = kpi_gates

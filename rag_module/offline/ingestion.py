@@ -459,6 +459,13 @@ def compute_hash(content):
     return hashlib.md5(content).hexdigest()
 
 
+def compute_text_hash(text: str) -> str:
+    normalized = normalize_quality_text(text)
+    if not normalized:
+        return ""
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
 def looks_like_html(content: bytes) -> bool:
     sample = (content or b"")[:512].lstrip().lower()
     return sample.startswith(b"<!doctype html") or sample.startswith(b"<html") or b"<body" in sample
@@ -598,6 +605,7 @@ def compute_download_quality(
             "keyword_hits": keyword_hits,
             "metrics": {},
             "preview_text": "",
+            "text_content_hash": "",
         }
 
     if content_size > MAX_DOWNLOAD_BYTES:
@@ -608,6 +616,7 @@ def compute_download_quality(
             "keyword_hits": keyword_hits,
             "metrics": {"bytes": content_size},
             "preview_text": "",
+            "text_content_hash": "",
         }
 
     if any(lowered_type.startswith(prefix) for prefix in SKIPPED_CONTENT_TYPE_PREFIXES):
@@ -618,6 +627,7 @@ def compute_download_quality(
             "keyword_hits": keyword_hits,
             "metrics": {"content_type": lowered_type},
             "preview_text": "",
+            "text_content_hash": "",
         }
 
     if ext == ".doc":
@@ -628,6 +638,7 @@ def compute_download_quality(
             "keyword_hits": keyword_hits,
             "metrics": {"bytes": content_size},
             "preview_text": "",
+            "text_content_hash": "",
         }
 
     if ext in {".pdf", ".doc", ".docx"}:
@@ -650,6 +661,7 @@ def compute_download_quality(
             "keyword_hits": keyword_hits,
             "metrics": {"bytes": content_size},
             "preview_text": "",
+            "text_content_hash": "",
         }
 
     preview = extract_text_preview(content, ext)
@@ -698,6 +710,7 @@ def compute_download_quality(
             "mojibake_ratio": round(metrics["mojibake_ratio"], 5),
         },
         "preview_text": metrics["text"][:12000],
+        "text_content_hash": compute_text_hash(metrics["text"][:12000]),
     }
 
 
@@ -816,6 +829,7 @@ def _update_state_entry(
     etag: Optional[str] = None,
     last_modified: Optional[str] = None,
     content_hash: Optional[str] = None,
+    text_content_hash: Optional[str] = None,
     file_path: Optional[str] = None,
     last_fetched_at: Optional[str] = None,
     quality_score: Optional[int] = None,
@@ -829,7 +843,7 @@ def _update_state_entry(
     # Initialize all required keys if missing
     for key in [
         "url", "canonical_url", "domain", "last_status", "last_http_code",
-        "etag", "last_modified", "content_hash", "file_path",
+        "etag", "last_modified", "content_hash", "text_content_hash", "file_path",
         "first_seen_at", "last_seen_at", "last_fetched_at",
         "quality_score", "quality_reason", "skip_reason", "crawl_depth"
     ]:
@@ -855,6 +869,8 @@ def _update_state_entry(
         entry["last_modified"] = last_modified
     if content_hash is not None:
         entry["content_hash"] = content_hash
+    if text_content_hash is not None:
+        entry["text_content_hash"] = text_content_hash
     if file_path is not None:
         entry["file_path"] = file_path
     if last_fetched_at is not None:
@@ -871,22 +887,69 @@ def _update_state_entry(
     state.setdefault("urls", {})[canonical_url] = entry
 
 
-def _metadata_skip_row(url: str, canonical_url: str, depth: int, reason: str, domain: str,
-                       quality_score: int = 0, quality_reason: str = "",
-                       content_hash: str = "", etag: str = "", last_modified: str = "") -> Dict:
+def _build_ingestion_metadata_row(
+    *,
+    url: str,
+    canonical_url: str,
+    domain: str,
+    subdomain: str = "",
+    depth: int,
+    status: str,
+    skip_reason: str = "",
+    file_path: str = "",
+    content_type: str = "",
+    content_hash: str = "",
+    text_content_hash: str = "",
+    etag: str = "",
+    last_modified: str = "",
+    fetched_at: str = "",
+    quality_score: int = 0,
+    quality_reason: str = "",
+    quality_metrics: Optional[Dict] = None,
+    keyword_hits: Optional[List[str]] = None,
+) -> Dict:
     return {
         "url": url,
         "canonical_url": canonical_url,
         "domain": domain,
-        "depth": depth,
-        "status": "skipped",
-        "skip_reason": reason,
-        "fetched_at": now_iso(),
-        "download_quality_score": quality_score,
-        "download_quality_reason": quality_reason,
+        "subdomain": subdomain,
+        "depth": int(depth),
+        "file": file_path,
+        "content_type": content_type,
         "content_hash": content_hash,
+        "text_content_hash": text_content_hash,
         "etag": etag,
         "last_modified": last_modified,
+        "fetched_at": fetched_at or now_iso(),
+        "download_quality_score": int(quality_score or 0),
+        "download_quality_reason": str(quality_reason or ""),
+        "download_quality_metrics": quality_metrics or {},
+        "download_keyword_hits": list(keyword_hits or []),
+        "skip_reason": skip_reason,
+        "status": status,
+    }
+
+
+def _metadata_skip_row(url: str, canonical_url: str, depth: int, reason: str, domain: str,
+                       quality_score: int = 0, quality_reason: str = "",
+                       content_hash: str = "", text_content_hash: str = "",
+                       etag: str = "", last_modified: str = "", content_type: str = "") -> Dict:
+    return {
+        **_build_ingestion_metadata_row(
+            url=url,
+            canonical_url=canonical_url,
+            domain=domain,
+            depth=depth,
+            status="skipped",
+            skip_reason=reason,
+            content_type=content_type,
+            content_hash=content_hash,
+            text_content_hash=text_content_hash,
+            etag=etag,
+            last_modified=last_modified,
+            quality_score=quality_score,
+            quality_reason=quality_reason,
+        ),
     }
 
 
@@ -1172,8 +1235,10 @@ def download(
                 return None
 
             content_hash = compute_hash(content)
+            text_content_hash = str(quality.get("text_content_hash") or "").strip()
+            dedup_hash = text_content_hash or content_hash
             with dedup_lock:
-                if content_hash in seen_hashes:
+                if dedup_hash in seen_hashes:
                     with stats_lock:
                         _increment_counter(stats, "skipped_dup_exact")
                     with state_lock:
@@ -1185,6 +1250,7 @@ def download(
                             last_status="skipped_dup_exact",
                             last_http_code=response.status_code,
                             content_hash=content_hash,
+                            text_content_hash=text_content_hash,
                             quality_score=int(quality.get("score") or 0),
                             quality_reason=str(quality.get("reason") or ""),
                             skip_reason="duplicate_exact",
@@ -1195,7 +1261,9 @@ def download(
                             url, canonical_url, depth, "duplicate_exact", domain,
                             quality_score=int(quality.get("score") or 0),
                             quality_reason=str(quality.get("reason") or ""),
-                            content_hash=content_hash
+                            content_hash=content_hash,
+                            text_content_hash=text_content_hash,
+                            content_type=content_type,
                         )
                     return None
 
@@ -1216,6 +1284,7 @@ def download(
                                         last_status="skipped_dup_near",
                                         last_http_code=response.status_code,
                                         content_hash=content_hash,
+                                        text_content_hash=text_content_hash,
                                         quality_score=int(quality.get("score") or 0),
                                         quality_reason=str(quality.get("reason") or ""),
                                         skip_reason="duplicate_near",
@@ -1226,12 +1295,14 @@ def download(
                                         url, canonical_url, depth, "duplicate_near", domain,
                                         quality_score=int(quality.get("score") or 0),
                                         quality_reason=str(quality.get("reason") or ""),
-                                        content_hash=content_hash
+                                        content_hash=content_hash,
+                                        text_content_hash=text_content_hash,
+                                        content_type=content_type,
                                     )
                                 return None
                         near_dup_signatures.append(signature)
 
-                seen_hashes.add(content_hash)
+                seen_hashes.add(dedup_hash)
 
             filename = generate_filename(url, ext)
             path = save_file(content, filename)
@@ -1255,6 +1326,7 @@ def download(
                     etag=etag,
                     last_modified=last_modified,
                     content_hash=content_hash,
+                    text_content_hash=text_content_hash,
                     file_path=path,
                     last_fetched_at=fetched_at,
                     quality_score=int(quality.get("score") or 0),
@@ -1264,27 +1336,29 @@ def download(
                 )
 
             time.sleep(0.25)
-            return {
-                "url": url,
-                "canonical_url": canonical_url,
-                "domain": domain,
-                "subdomain": subdomain,
-                "file": path,
-                "depth": depth,
-                "hash": content_hash,
-                "content_hash": content_hash,
-                "content_type": content_type,
-                "is_html": ext in {".html", ".htm"},
-                "download_quality_score": int(quality.get("score", 0)),
-                "download_quality_reason": str(quality.get("reason", "")),
-                "download_keyword_hits": quality.get("keyword_hits", []),
-                "download_quality_metrics": quality.get("metrics", {}),
-                "etag": etag,
-                "last_modified": last_modified,
-                "fetched_at": fetched_at,
-                "skip_reason": "",
-                "status": "downloaded",
-            }
+            row = _build_ingestion_metadata_row(
+                url=url,
+                canonical_url=canonical_url,
+                domain=domain,
+                subdomain=subdomain,
+                depth=depth,
+                status="downloaded",
+                skip_reason="",
+                file_path=path,
+                content_type=content_type,
+                content_hash=content_hash,
+                text_content_hash=text_content_hash,
+                etag=etag,
+                last_modified=last_modified,
+                fetched_at=fetched_at,
+                quality_score=int(quality.get("score", 0)),
+                quality_reason=str(quality.get("reason", "")),
+                quality_metrics=quality.get("metrics", {}),
+                keyword_hits=quality.get("keyword_hits", []),
+            )
+            row["hash"] = dedup_hash
+            row["is_html"] = ext in {".html", ".htm"}
+            return row
 
         except Exception as exc:
             logger.warning("Download failed for %s: %s", url, exc)
@@ -1329,8 +1403,11 @@ def _crawl_with_legacy_fetch(seeds):
         if not isinstance(entry, dict):
             continue
         content_hash = str(entry.get("content_hash") or "").strip()
+        text_content_hash = str(entry.get("text_content_hash") or "").strip()
         if content_hash:
             seen_hashes.add(content_hash)
+        if text_content_hash:
+            seen_hashes.add(text_content_hash)
 
     stats: Dict = {
         "started_at": now_iso(),

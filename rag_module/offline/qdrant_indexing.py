@@ -145,6 +145,8 @@ def build_qdrant_index(chunks: List[Dict], model_name: str, embedding_dim: int, 
         dense_vector_name=DENSE_VECTOR_NAME,
         sparse_vector_name=SPARSE_VECTOR_NAME,
         sparse_encoder_path=str(QDRANT_SPARSE_ENCODER_PATH),
+        sparse_encoder_type="tfidf_lexical",
+        hybrid_fusion="rrf",
         indexed_at=datetime.now(timezone.utc).isoformat(),
     )
     save_manifest(str(QDRANT_MANIFEST_PATH), manifest)

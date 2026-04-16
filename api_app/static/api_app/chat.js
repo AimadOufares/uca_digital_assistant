@@ -8,6 +8,17 @@ const promptChips = document.querySelectorAll(".prompt-btn");
 
 const API_URL = "/api/chat/";
 
+function getCookie(name) {
+    const cookies = document.cookie ? document.cookie.split(";") : [];
+    for (const cookie of cookies) {
+        const trimmed = cookie.trim();
+        if (trimmed.startsWith(`${name}=`)) {
+            return decodeURIComponent(trimmed.slice(name.length + 1));
+        }
+    }
+    return "";
+}
+
 function escapeHtml(value) {
     return value
         .replaceAll("&", "&amp;")
@@ -72,11 +83,14 @@ async function submitMessage(message) {
     setLoadingState(true);
 
     try {
+        const csrfToken = getCookie("csrftoken");
         const response = await fetch(API_URL, {
             method: "POST",
+            credentials: "same-origin",
             headers: {
                 "Content-Type": "application/json",
                 "X-Requested-With": "XMLHttpRequest",
+                "X-CSRFToken": csrfToken,
             },
             body: JSON.stringify({
                 message,

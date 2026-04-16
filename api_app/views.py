@@ -141,6 +141,7 @@ class ChatAPIView(APIView):
             )
 
 
+@method_decorator(ensure_csrf_cookie, name="dispatch")
 class ChatPageView(TemplateView):
     template_name = "api_app/chat.html"
 
