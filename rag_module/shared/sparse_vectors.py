@@ -10,10 +10,26 @@ from .metadata_policy import normalize_text
 
 WORD_PATTERN = re.compile(r"\b[\w']+\b", flags=re.UNICODE)
 
+STOPWORDS = {
+    "le", "la", "les", "un", "une", "des", "du", "de", "et", "ou", "a", "au", "aux",
+    "dans", "par", "pour", "sur", "avec", "en", "the", "an", "and", "in", "on", "at",
+    "to", "for", "with", "is", "are", "of", "qui", "que", "quoi", "dont", "ce", "cet",
+    "cette", "ces", "son", "sa", "ses", "leur", "leurs", "pas", "ne", "ni", "se",
+    "il", "elle", "ils", "elles", "nous", "vous", "je", "tu", "me", "te"
+}
+
+def is_noise_token(token: str) -> bool:
+    if len(token) < 2:
+        return True
+    if token in STOPWORDS:
+        return True
+    if re.fullmatch(r"\d+([hmds]?[a-zA-Z]*)?", token):
+        return True
+    return False
 
 def tokenize_sparse_text(text: str) -> List[str]:
     normalized = normalize_text(text)
-    return [token for token in WORD_PATTERN.findall(normalized) if token]
+    return [token for token in WORD_PATTERN.findall(normalized) if token and not is_noise_token(token)]
 
 
 def build_sparse_encoder(

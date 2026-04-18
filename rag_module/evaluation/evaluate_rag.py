@@ -159,6 +159,7 @@ def _retrieval_metrics(question: str, keywords: List[str], expected_doc_types: L
             "dense_hit_at_k": 0,
             "bm25_hit_at_k": 0,
             "fusion_hit_at_k": 0,
+            "native_fusion_hit_at_k": 0,
             "latency_ms": round(elapsed_ms, 2),
             "retrieved": 0,
             "relevant": 0,
@@ -176,6 +177,12 @@ def _retrieval_metrics(question: str, keywords: List[str], expected_doc_types: L
     dense_stage = _stage_metrics(list(payload.get("dense_results", [])), keywords, expected_doc_types, top_k)
     bm25_stage = _stage_metrics(list(payload.get("bm25_results", [])), keywords, expected_doc_types, top_k)
     fusion_stage = _stage_metrics(list(payload.get("merged_results", [])), keywords, expected_doc_types, top_k)
+    native_fusion_stage = _stage_metrics(
+        list(payload.get("fusion_results", payload.get("merged_results", []))),
+        keywords,
+        expected_doc_types,
+        top_k,
+    )
     boosted_stage = _stage_metrics(list(payload.get("boosted_results", [])), keywords, expected_doc_types, top_k)
     final_stage = _stage_metrics(final_chunks, keywords, expected_doc_types, top_k)
 
@@ -186,6 +193,7 @@ def _retrieval_metrics(question: str, keywords: List[str], expected_doc_types: L
         "dense_hit_at_k": int(dense_stage["hit"] > 0),
         "bm25_hit_at_k": int(bm25_stage["hit"] > 0),
         "fusion_hit_at_k": int(fusion_stage["hit"] > 0),
+        "native_fusion_hit_at_k": int(native_fusion_stage["hit"] > 0),
         "latency_ms": round(elapsed_ms, 2),
         "retrieved": len(final_chunks),
         "relevant": relevant,
@@ -240,6 +248,7 @@ def evaluate(top_k: int, run_generation: bool) -> Dict:
                     "dense_hit_at_k": 0,
                     "bm25_hit_at_k": 0,
                     "fusion_hit_at_k": 0,
+                    "native_fusion_hit_at_k": 0,
                     "latency_ms": 0.0,
                     "retrieved": 0,
                     "relevant": 0,
@@ -269,6 +278,7 @@ def evaluate(top_k: int, run_generation: bool) -> Dict:
             "dense_hit_at_k_rate": round(mean([r.get("dense_hit_at_k", 0) for r in rows]), 4) if rows else 0.0,
             "bm25_hit_at_k_rate": round(mean([r.get("bm25_hit_at_k", 0) for r in rows]), 4) if rows else 0.0,
             "fusion_hit_at_k_rate": round(mean([r.get("fusion_hit_at_k", 0) for r in rows]), 4) if rows else 0.0,
+            "native_fusion_hit_at_k_rate": round(mean([r.get("native_fusion_hit_at_k", 0) for r in rows]), 4) if rows else 0.0,
             "best_match_score_avg": round(mean([r.get("best_match_score", 0.0) for r in rows]), 4) if rows else 0.0,
             "metadata_boost_gain_avg": round(mean([r.get("metadata_boost_gain", 0.0) for r in rows]), 4) if rows else 0.0,
             "rerank_gain_avg": round(mean([r.get("rerank_gain", 0.0) for r in rows]), 4) if rows else 0.0,
@@ -394,6 +404,7 @@ def write_report(report: Dict) -> Dict[str, Path]:
         f"Dense hit@k rate: {report['summary'].get('dense_hit_at_k_rate', 0.0)}",
         f"BM25 hit@k rate: {report['summary'].get('bm25_hit_at_k_rate', 0.0)}",
         f"Fusion hit@k rate: {report['summary'].get('fusion_hit_at_k_rate', 0.0)}",
+        f"Native fusion hit@k rate: {report['summary'].get('native_fusion_hit_at_k_rate', 0.0)}",
         f"Best match score (avg): {report['summary'].get('best_match_score_avg', 0.0)}",
         f"Metadata boost gain (avg): {report['summary'].get('metadata_boost_gain_avg', 0.0)}",
         f"Rerank gain (avg): {report['summary'].get('rerank_gain_avg', 0.0)}",

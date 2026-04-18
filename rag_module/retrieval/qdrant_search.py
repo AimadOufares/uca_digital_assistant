@@ -223,6 +223,11 @@ def _multi_query_sparse_search(queries: List[str], query_filter: models.Filter |
     return _merge_query_variant_results(batches, limit=limit)
 
 
+def _multi_query_fusion_search(queries: List[str], query_filter: models.Filter | None, limit: int) -> List[Dict]:
+    batches = [_fusion_search(query, query_filter=query_filter, limit=limit) for query in queries]
+    return _merge_query_variant_results(batches, limit=limit)
+
+
 def run_qdrant_search_debug(
     raw_query: str,
     top_k: int = 5,
@@ -255,15 +260,23 @@ def run_qdrant_search_debug(
 
     dense_results = _multi_query_dense_search(queries, query_filter=query_filter, limit=retrieve_k)
     sparse_results = _multi_query_sparse_search(queries, query_filter=query_filter, limit=retrieve_k)
+    fusion_results = _multi_query_fusion_search(queries, query_filter=query_filter, limit=retrieve_k)
     merged_results = legacy.merge_dense_and_bm25(dense_results, sparse_results, top_k=retrieve_k)
 
     dense_by_id = {result.get("id"): result for result in dense_results}
     sparse_by_id = {result.get("id"): result for result in sparse_results}
+    manual_merged_by_id = {result.get("id"): result for result in merged_results}
+    ranking_seed = fusion_results or merged_results
     enriched_merged: List[Dict] = []
-    for result in merged_results:
+    for result in ranking_seed:
         item = dict(result)
+        fallback_scores = manual_merged_by_id.get(item.get("id"), {})
         item["dense_score"] = float(dense_by_id.get(item.get("id"), {}).get("score", 0.0) or 0.0)
         item["bm25_score"] = float(sparse_by_id.get(item.get("id"), {}).get("score", 0.0) or 0.0)
+        if "hybrid_raw_score" not in item and "hybrid_raw_score" in fallback_scores:
+            item["hybrid_raw_score"] = float(fallback_scores.get("hybrid_raw_score", 0.0) or 0.0)
+        if item.get("score_type") != "hybrid":
+            item["score_type"] = str(fallback_scores.get("score_type") or item.get("score_type") or "hybrid")
         item["retrieval_sources"] = [
             source
             for source, lookup in (("dense", dense_by_id), ("sparse", sparse_by_id))
@@ -306,6 +319,7 @@ def run_qdrant_search_debug(
         "query": query,
         "dense_results": dense_results,
         "bm25_results": sparse_results,
+        "fusion_results": fusion_results,
         "merged_results": enriched_merged,
         "boosted_results": boosted,
         "guarded_results": guarded,

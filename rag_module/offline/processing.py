@@ -356,17 +356,26 @@ def structural_chunk_sections(
 
         section_title = str(section.get("title") or "Section").strip() or "Section"
         section_path = [str(part).strip() for part in section.get("path", []) if str(part).strip()]
-        is_table = bool(section.get("is_table", False))
+        is_table_structural = bool(section.get("is_table", False))
 
         for piece in _split_large_section(text, chunk_size=chunk_size, overlap_tokens=overlap_tokens):
             if not is_high_quality_chunk(piece):
                 continue
+            
+            piece_is_table = (
+                is_table_structural 
+                or ("[TABLE" in piece) 
+                or ("TABLE_PAGE_" in piece) 
+                or ("<table" in piece.lower()) 
+                or bool(re.search(r"\|.*\|.*\n\|[- :]+\|[- :]+\|", piece))
+            )
+
             structured_chunks.append(
                 {
                     "text": piece,
                     "section_title": section_title,
                     "section_path": section_path,
-                    "is_table": is_table,
+                    "is_table": piece_is_table,
                 }
             )
 
@@ -550,7 +559,12 @@ def preprocess_file(file_path: str, with_diagnostics: bool = False):
                 "text": chunk,
                 "section_title": "Document",
                 "section_path": ["Document"],
-                "is_table": ("[TABLE" in chunk) or ("TABLE_PAGE_" in chunk),
+                "is_table": (
+                    ("[TABLE" in chunk) 
+                    or ("TABLE_PAGE_" in chunk) 
+                    or ("<table" in chunk.lower()) 
+                    or bool(re.search(r"\|.*\|.*\n\|[- :]+\|[- :]+\|", chunk))
+                ),
             }
             for chunk in recursive_chunk(cleaned_text)
         ]

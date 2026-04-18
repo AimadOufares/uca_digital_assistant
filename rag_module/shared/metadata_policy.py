@@ -71,10 +71,19 @@ def detect_document_type(source_path: str, text: str) -> str:
 
 
 def detect_year(source_path: str, text: str) -> Optional[int]:
-    years = re.findall(r"\b(?:19|20)\d{2}\b", f"{source_path} {text}")
+    haystack = f"{source_path} {text}"
+    
+    academic_years = re.findall(r"\b((?:19|20)\d{2})\s*[-/]\s*((?:19|20)\d{2})\b", haystack)
+    if academic_years:
+        return max(max(int(y1), int(y2)) for y1, y2 in academic_years)
+        
+    years = re.findall(r"\b(?:19|20)\d{2}\b", haystack)
     if not years:
         return None
-    year_values = sorted({int(year) for year in years})
+        
+    year_values = sorted({int(year) for year in years if 1990 <= int(year) <= 2030})
+    if not year_values:
+        return None
     return year_values[-1]
 
 

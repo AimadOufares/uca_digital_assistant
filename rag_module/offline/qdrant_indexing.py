@@ -23,7 +23,7 @@ QDRANT_CHUNKS_PATH = INDEX_DIR / "chunks.json"
 DENSE_VECTOR_NAME = "dense"
 SPARSE_VECTOR_NAME = "lexical"
 UPSERT_BATCH_SIZE = 64
-SPARSE_MIN_DF = 1
+SPARSE_MIN_DF = 3
 SPARSE_MAX_FEATURES = 60000
 
 
@@ -95,6 +95,10 @@ def build_qdrant_index(chunks: List[Dict], model_name: str, embedding_dim: int, 
             DENSE_VECTOR_NAME: models.VectorParams(
                 size=int(embedding_dim),
                 distance=models.Distance.COSINE,
+                hnsw_config=models.HnswConfigDiff(
+                    m=_env_int("RAG_QDRANT_HNSW_M", 32),
+                    ef_construct=_env_int("RAG_QDRANT_EF_CONSTRUCT", 200),
+                )
             )
         },
         sparse_vectors_config={
@@ -106,6 +110,11 @@ def build_qdrant_index(chunks: List[Dict], model_name: str, embedding_dim: int, 
         ),
         on_disk_payload=True,
     )
+
+    client.create_payload_index(collection_name, "metadata.faculty", field_schema=models.PayloadSchemaType.KEYWORD)
+    client.create_payload_index(collection_name, "metadata.etablissement", field_schema=models.PayloadSchemaType.KEYWORD)
+    client.create_payload_index(collection_name, "metadata.year", field_schema=models.PayloadSchemaType.INTEGER)
+    client.create_payload_index(collection_name, "metadata.document_type", field_schema=models.PayloadSchemaType.KEYWORD)
 
     points: List[models.PointStruct] = []
     for index, (chunk, dense_vector) in enumerate(zip(chunks, dense_vectors)):
