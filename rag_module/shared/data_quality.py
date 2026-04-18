@@ -1,7 +1,7 @@
 import os
 from typing import Dict, List
 
-from .backup_utils import create_backup
+from ..offline.backup_utils import create_backup
 from .metadata_policy import detect_document_type, prepare_chunk_metadata
 from .relevance_policy import compute_chunk_relevance, compute_source_relevance, should_keep_chunk
 

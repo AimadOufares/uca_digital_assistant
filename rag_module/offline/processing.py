@@ -22,12 +22,12 @@ try:
     from ..offline.structured_parser import extract_document_structure
     from ..shared.language_detection import detect_language
     from ..shared.data_quality import create_backup, postprocess_chunks_for_source
-    from ..shared.offline_pipeline_report import update_offline_pipeline_report
+    from ..audit.offline_pipeline_report import update_offline_pipeline_report
 except ImportError:  # pragma: no cover
     from rag_module.offline.structured_parser import extract_document_structure
     from rag_module.shared.language_detection import detect_language
     from rag_module.shared.data_quality import create_backup, postprocess_chunks_for_source
-    from rag_module.shared.offline_pipeline_report import update_offline_pipeline_report
+    from rag_module.audit.offline_pipeline_report import update_offline_pipeline_report
 
 # ===================== CONFIG =====================
 RAW_PATH = "data_storage/raw"

@@ -18,7 +18,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from rag_module.generation.rag_engine import RAGGenerationError, RAGIndexNotReadyError, answer_question
 from rag_module.retrieval.rag_search import invalidate_search_cache, run_hybrid_search_debug
 from rag_module.retrieval.qdrant_search import qdrant_index_ready
-from rag_module.shared.offline_pipeline_report import update_offline_pipeline_report
+from rag_module.audit.offline_pipeline_report import update_offline_pipeline_report
 
 
 REPORT_DIR = PROJECT_ROOT / "data_storage" / "reports"
