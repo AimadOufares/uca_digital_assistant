@@ -67,11 +67,48 @@ def verify_required_artifacts() -> Dict:
     }
 
 
-def verify_indexing_prerequisites() -> None:
-    report = verify_required_artifacts()
+def verify_qdrant_indexing_prerequisites() -> None:
+    qdrant_target = qdrant_url() or str(qdrant_local_path())
+    checks = {
+        "qdrant": {
+            "selected": configured_vector_backend(),
+            "target": qdrant_target,
+            "client_status": _check_import("qdrant_client"),
+        },
+        "embedding_runtime": {
+            "selected": os.getenv("RAG_EMBEDDING_MODEL", "BAAI/bge-m3").strip() or "BAAI/bge-m3",
+            "status": _check_import("sentence_transformers"),
+        },
+        "index_dir": {
+            "path": str(qdrant_local_path()),
+            "writable": True,
+        },
+    }
+
+    missing: List[str] = []
+    if checks["qdrant"]["client_status"] == "missing":
+        missing.append("qdrant_client")
+    if checks["embedding_runtime"]["status"] == "missing":
+        missing.append("sentence_transformers")
+
+    try:
+        qdrant_local_path().mkdir(parents=True, exist_ok=True)
+    except Exception:
+        checks["index_dir"]["writable"] = False
+        missing.append("qdrant_local_path")
+
+    report = {
+        "ready": not missing,
+        "checks": checks,
+        "missing": missing,
+    }
     if report["missing"]:
         missing = ", ".join(report["missing"])
         raise RuntimeError(
-            "Artefacts/dependances manquants pour le pipeline RAG: "
+            "Artefacts/dependances manquants pour l'indexation Qdrant: "
             f"{missing}. Verifie les variables d'environnement et les modeles locaux."
         )
+
+
+def verify_indexing_prerequisites() -> None:
+    verify_qdrant_indexing_prerequisites()

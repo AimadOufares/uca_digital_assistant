@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 
 class RAGIndexNotReadyError(RuntimeError):
-    """Raised when FAISS index or chunks are not available."""
+    """Raised when the Qdrant index is not available."""
 
 
 class RAGGenerationError(RuntimeError):

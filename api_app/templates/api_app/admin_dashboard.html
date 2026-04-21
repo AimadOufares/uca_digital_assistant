@@ -547,7 +547,7 @@
 
         <div class="grid grid-2col">
             <div class="glass-card">
-                <div class="kpi-title">Scores par Étape (Dense · BM25 · Fusion · Final)</div>
+                <div class="kpi-title">Scores par Étape (Dense · Sparse · Fusion · Final)</div>
                 <div class="chart-container">
                     <canvas id="stageChart"></canvas>
                 </div>
@@ -573,7 +573,7 @@
                             <th>Precision@K</th>
                             <th>Latence (ms)</th>
                             <th>Dense</th>
-                            <th>BM25</th>
+                            <th>Sparse</th>
                         </tr>
                     </thead>
                     <tbody id="eval-tbody">
@@ -927,13 +927,13 @@
 
         // Stage comparison bar chart
         makeGroupedBar('stageChart',
-            ['Dense', 'BM25', 'Fusion', 'Final (Rerank)'],
+            ['Dense', 'Sparse', 'Fusion', 'Final (Rerank)'],
             [
                 {
                     label: 'Hit Rate',
                     data: [
                         s.dense_hit_at_k_rate   || 0,
-                        s.bm25_hit_at_k_rate    || 0,
+                        s.sparse_hit_at_k_rate  || 0,
                         s.fusion_hit_at_k_rate  || 0,
                         s.hit_at_k_rate         || 0
                     ],
@@ -975,7 +975,7 @@
                 appendTextCell(tr, `${((r.precision_at_k || 0) * 100).toFixed(1)}%`);
                 appendTextCell(tr, `${(r.latency_ms || 0).toFixed(0)}`);
                 appendTextCell(tr, r.dense_hit_at_k ? '✓' : '✗', r.dense_hit_at_k ? 'tag-hit' : 'tag-miss');
-                appendTextCell(tr, r.bm25_hit_at_k ? '✓' : '✗', r.bm25_hit_at_k ? 'tag-hit' : 'tag-miss');
+                appendTextCell(tr, r.sparse_hit_at_k ? '✓' : '✗', r.sparse_hit_at_k ? 'tag-hit' : 'tag-miss');
                 tbody.appendChild(tr);
             });
         } else {

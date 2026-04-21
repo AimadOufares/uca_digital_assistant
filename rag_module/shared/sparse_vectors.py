@@ -1,5 +1,6 @@
 import json
 import math
+import os
 import re
 from collections import Counter
 from pathlib import Path
@@ -89,8 +90,10 @@ def encode_sparse_text(text: str, encoder: Dict) -> Tuple[List[int], List[float]
 def save_sparse_encoder(path: str, encoder: Dict) -> None:
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
-    with target.open("w", encoding="utf-8") as handle:
+    temp_target = target.with_name(f"{target.name}.tmp")
+    with temp_target.open("w", encoding="utf-8") as handle:
         json.dump(encoder, handle, ensure_ascii=False, indent=2)
+    os.replace(temp_target, target)
 
 
 def load_sparse_encoder(path: str) -> Dict:

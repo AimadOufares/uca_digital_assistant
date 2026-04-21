@@ -71,7 +71,7 @@ SOURCE_HINT_KEYWORDS = {
 }
 
 HIGH_SIGNAL_DOCUMENT_TYPES = {"admission", "inscription", "bourse", "calendrier", "resultats", "formation"}
-MIN_CHUNK_RELEVANCE_SCORE = 1
+MIN_CHUNK_RELEVANCE_SCORE = 2
 
 NORMALIZED_TARGET_KEYWORDS = {normalize_text(keyword) for keyword in TARGET_KEYWORDS}
 NORMALIZED_SOURCE_HINTS = {normalize_text(keyword) for keyword in SOURCE_HINT_KEYWORDS}

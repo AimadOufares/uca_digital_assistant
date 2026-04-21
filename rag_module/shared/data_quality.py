@@ -24,7 +24,7 @@ def _env_int(name: str, default: int) -> int:
     return value if value > 0 else default
 
 
-MAX_CHUNKS_PER_SOURCE = _env_int("RAG_MAX_CHUNKS_PER_SOURCE", 120)
+MAX_CHUNKS_PER_SOURCE = _env_int("RAG_MAX_CHUNKS_PER_SOURCE", 60)
 DOMAIN_FILTER_ENABLED = _env_bool("RAG_DOMAIN_FILTER_ENABLED", True)
 
 

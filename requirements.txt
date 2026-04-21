@@ -12,7 +12,6 @@ cryptography==46.0.6
 docling
 Django==6.0.3
 djangorestframework==3.17.1
-faiss-cpu
 fasttext-wheel
 filelock==3.25.2
 fsspec==2026.2.0

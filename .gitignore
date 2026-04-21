@@ -23,3 +23,8 @@ media/
 # Dossier de données
 data_storage/
 
+# Notes locales non versionnees
+plan_video_demo.md
+rapport_avancement_pfe.md
+script_reunion_pfe.md
+

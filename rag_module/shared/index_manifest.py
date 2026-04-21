@@ -1,4 +1,5 @@
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict
@@ -36,8 +37,10 @@ def load_manifest(path: str) -> Dict:
 def save_manifest(path: str, manifest: Dict) -> None:
     manifest_path = Path(path)
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
-    with manifest_path.open("w", encoding="utf-8") as handle:
+    temp_path = manifest_path.with_name(f"{manifest_path.name}.tmp")
+    with temp_path.open("w", encoding="utf-8") as handle:
         json.dump(manifest, handle, ensure_ascii=False, indent=2)
+    os.replace(temp_path, manifest_path)
 
 
 def validate_manifest(manifest: Dict, expected_model: str, expected_vector_store: str = "") -> None:
@@ -55,7 +58,7 @@ def validate_manifest(manifest: Dict, expected_model: str, expected_vector_store
         )
 
     vector_store = str(manifest.get("vector_store") or "").strip().lower()
-    if expected_vector_store and vector_store and vector_store != expected_vector_store.strip().lower():
+    if expected_vector_store and vector_store != expected_vector_store.strip().lower():
         raise ValueError(
             f"Incoherence index/backend: index construit pour '{vector_store}', "
             f"mais runtime configure pour '{expected_vector_store}'."
@@ -64,3 +67,22 @@ def validate_manifest(manifest: Dict, expected_model: str, expected_vector_store
     dim = manifest.get("embedding_dim")
     if not isinstance(dim, int) or dim <= 0:
         raise ValueError("Manifest d'index invalide: embedding_dim incorrect.")
+
+    chunk_count = manifest.get("chunk_count")
+    if not isinstance(chunk_count, int) or chunk_count <= 0:
+        raise ValueError("Manifest d'index invalide: chunk_count incorrect.")
+
+    policy_version = str(manifest.get("processing_policy_version") or "").strip()
+    if not policy_version:
+        raise ValueError("Manifest d'index invalide: processing_policy_version manquant.")
+
+    if expected_vector_store.strip().lower() == "qdrant":
+        required_string_fields = (
+            "collection_name",
+            "dense_vector_name",
+            "sparse_vector_name",
+            "sparse_encoder_path",
+        )
+        for field_name in required_string_fields:
+            if not str(manifest.get(field_name) or "").strip():
+                raise ValueError(f"Manifest d'index Qdrant invalide: {field_name} manquant.")
