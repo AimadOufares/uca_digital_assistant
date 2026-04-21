@@ -4,9 +4,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict
 
+from ..shared.runtime_config import offline_reports_dir, offline_session_path
 
-SESSION_PATH = Path("data_storage/cache/offline_pipeline_session.json")
-REPORTS_DIR = Path("data_storage/reports")
+SESSION_PATH = offline_session_path()
+REPORTS_DIR = offline_reports_dir()
 SESSION_TTL_SECONDS = 6 * 3600
 
 
@@ -68,6 +69,32 @@ def _resolve_report_path() -> Path:
     return new_path
 
 
+def start_offline_pipeline_report(metadata: Dict | None = None) -> Path:
+    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    report_path = REPORTS_DIR / f"offline_pipeline_report_{timestamp}.json"
+    now_iso = _now_iso()
+    report = {
+        "report_type": "offline_pipeline",
+        "created_at": now_iso,
+        "updated_at": now_iso,
+        "status": "running",
+        "metadata": metadata or {},
+        "summary": {},
+        "stages": {},
+    }
+    _save_json_atomic(report_path, report)
+    _save_json_atomic(
+        SESSION_PATH,
+        {
+            "report_path": str(report_path),
+            "started_at": now_iso,
+            "updated_at": now_iso,
+        },
+    )
+    return report_path
+
+
 def update_offline_pipeline_report(stage: str, payload: Dict) -> Path:
     stage_name = (stage or "").strip().lower() or "unknown"
     report_path = _resolve_report_path()
@@ -97,3 +124,47 @@ def update_offline_pipeline_report(stage: str, payload: Dict) -> Path:
     )
     return report_path
 
+
+def finalize_offline_pipeline_report(status: str, summary: Dict | None = None, metadata_updates: Dict | None = None) -> Path:
+    report_path = _resolve_report_path()
+    report = _load_json(report_path)
+    now_iso = _now_iso()
+    if not report:
+        report = {
+            "report_type": "offline_pipeline",
+            "created_at": now_iso,
+            "updated_at": now_iso,
+            "status": status,
+            "metadata": metadata_updates or {},
+            "summary": summary or {},
+            "stages": {},
+        }
+    else:
+        report["status"] = (status or "").strip().lower() or "unknown"
+        report["updated_at"] = now_iso
+        if summary is not None:
+            report["summary"] = summary
+        if metadata_updates:
+            metadata = report.setdefault("metadata", {})
+            metadata.update(metadata_updates)
+
+    _save_json_atomic(report_path, report)
+    _save_json_atomic(
+        SESSION_PATH,
+        {
+            "report_path": str(report_path),
+            "started_at": str(_load_json(SESSION_PATH).get("started_at") or now_iso),
+            "updated_at": now_iso,
+        },
+    )
+    return report_path
+
+
+def load_latest_offline_pipeline_report() -> Dict:
+    if not REPORTS_DIR.exists():
+        return {}
+
+    files = sorted(REPORTS_DIR.glob("offline_pipeline_report_*.json"), key=lambda item: item.stat().st_mtime, reverse=True)
+    if not files:
+        return {}
+    return _load_json(files[0])

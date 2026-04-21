@@ -11,10 +11,11 @@ from ..offline.qdrant_indexing import (
     QDRANT_MANIFEST_PATH,
     QDRANT_SPARSE_ENCODER_PATH,
     SPARSE_VECTOR_NAME,
+    get_qdrant_alias_map,
     get_qdrant_client,
 )
 from ..shared.index_manifest import load_manifest, validate_manifest
-from ..shared.runtime_config import qdrant_collection_name
+from ..shared.runtime_config import qdrant_active_alias_name, qdrant_collection_name
 from ..shared.sparse_vectors import encode_sparse_text, load_sparse_encoder
 
 logger = logging.getLogger(__name__)
@@ -40,8 +41,8 @@ def _embed_query(query: str) -> List[float]:
     return vector.tolist()
 
 
-def load_qdrant_manifest_or_raise() -> Dict:
-    manifest = load_manifest(str(QDRANT_MANIFEST_PATH))
+def load_qdrant_manifest_or_raise(manifest_override: Optional[Dict] = None) -> Dict:
+    manifest = dict(manifest_override or load_manifest(str(QDRANT_MANIFEST_PATH)))
     validate_manifest(
         manifest,
         expected_model=get_active_model_name(),
@@ -50,15 +51,31 @@ def load_qdrant_manifest_or_raise() -> Dict:
     return manifest
 
 
-def qdrant_index_ready() -> bool:
+def _resolve_collection_name(manifest: Dict) -> str:
+    alias_name = str(manifest.get("active_alias_name") or "").strip()
+    collection_name = str(manifest.get("collection_name") or "").strip()
+    if alias_name:
+        return alias_name
+    return collection_name or qdrant_collection_name()
+
+
+def _resolve_sparse_encoder_path(manifest: Dict) -> Path:
+    raw_value = str(manifest.get("sparse_encoder_path") or QDRANT_SPARSE_ENCODER_PATH).strip()
+    return Path(raw_value)
+
+
+def qdrant_index_ready(manifest_override: Optional[Dict] = None) -> bool:
     try:
-        manifest = load_qdrant_manifest_or_raise()
+        manifest = load_qdrant_manifest_or_raise(manifest_override=manifest_override)
         client = get_qdrant_client()
-        collection_name = str(manifest.get("collection_name") or qdrant_collection_name())
+        collection_name = _resolve_collection_name(manifest)
+        sparse_encoder_path = _resolve_sparse_encoder_path(manifest)
         collections = client.get_collections()
         items = getattr(collections, "collections", []) or []
         names = {getattr(item, "name", "") for item in items}
-        return collection_name in names and Path(QDRANT_SPARSE_ENCODER_PATH).exists()
+        alias_map = get_qdrant_alias_map(client)
+        target_name = alias_map.get(collection_name, collection_name)
+        return target_name in names and sparse_encoder_path.exists()
     except Exception:
         return False
 
@@ -142,13 +159,13 @@ def _merge_query_variant_results(result_batches: List[List[Dict]], limit: int) -
     return rows[:limit]
 
 
-def _dense_search(query: str, query_filter: models.Filter | None, limit: int) -> List[Dict]:
-    manifest = load_qdrant_manifest_or_raise()
+def _dense_search(query: str, query_filter: models.Filter | None, limit: int, manifest: Optional[Dict] = None) -> List[Dict]:
+    active_manifest = load_qdrant_manifest_or_raise(manifest_override=manifest)
     client = get_qdrant_client()
     response = client.query_points(
-        collection_name=str(manifest.get("collection_name") or qdrant_collection_name()),
+        collection_name=_resolve_collection_name(active_manifest),
         query=_embed_query(query),
-        using=str(manifest.get("dense_vector_name") or DENSE_VECTOR_NAME),
+        using=str(active_manifest.get("dense_vector_name") or DENSE_VECTOR_NAME),
         query_filter=query_filter,
         limit=limit,
         with_payload=True,
@@ -156,24 +173,25 @@ def _dense_search(query: str, query_filter: models.Filter | None, limit: int) ->
     return _normalize_scored_points(response, score_type="dense", score_field="vector_raw_score")
 
 
-def _sparse_query_vector(query: str) -> models.SparseVector | None:
-    encoder = load_sparse_encoder(str(QDRANT_SPARSE_ENCODER_PATH))
+def _sparse_query_vector(query: str, manifest: Optional[Dict] = None) -> models.SparseVector | None:
+    active_manifest = load_qdrant_manifest_or_raise(manifest_override=manifest)
+    encoder = load_sparse_encoder(str(_resolve_sparse_encoder_path(active_manifest)))
     indices, values = encode_sparse_text(query, encoder)
     if not indices or not values:
         return None
     return models.SparseVector(indices=indices, values=values)
 
 
-def _sparse_search(query: str, query_filter: models.Filter | None, limit: int) -> List[Dict]:
-    sparse_query = _sparse_query_vector(query)
+def _sparse_search(query: str, query_filter: models.Filter | None, limit: int, manifest: Optional[Dict] = None) -> List[Dict]:
+    active_manifest = load_qdrant_manifest_or_raise(manifest_override=manifest)
+    sparse_query = _sparse_query_vector(query, manifest=active_manifest)
     if sparse_query is None:
         return []
-    manifest = load_qdrant_manifest_or_raise()
     client = get_qdrant_client()
     response = client.query_points(
-        collection_name=str(manifest.get("collection_name") or qdrant_collection_name()),
+        collection_name=_resolve_collection_name(active_manifest),
         query=sparse_query,
-        using=str(manifest.get("sparse_vector_name") or SPARSE_VECTOR_NAME),
+        using=str(active_manifest.get("sparse_vector_name") or SPARSE_VECTOR_NAME),
         query_filter=query_filter,
         limit=limit,
         with_payload=True,
@@ -181,14 +199,14 @@ def _sparse_search(query: str, query_filter: models.Filter | None, limit: int) -
     return _normalize_scored_points(response, score_type="sparse", score_field="sparse_raw_score")
 
 
-def _fusion_search(query: str, query_filter: models.Filter | None, limit: int) -> List[Dict]:
-    sparse_query = _sparse_query_vector(query)
-    manifest = load_qdrant_manifest_or_raise()
+def _fusion_search(query: str, query_filter: models.Filter | None, limit: int, manifest: Optional[Dict] = None) -> List[Dict]:
+    active_manifest = load_qdrant_manifest_or_raise(manifest_override=manifest)
+    sparse_query = _sparse_query_vector(query, manifest=active_manifest)
     client = get_qdrant_client()
     prefetch = [
         models.Prefetch(
             query=_embed_query(query),
-            using=str(manifest.get("dense_vector_name") or DENSE_VECTOR_NAME),
+            using=str(active_manifest.get("dense_vector_name") or DENSE_VECTOR_NAME),
             filter=query_filter,
             limit=limit,
         )
@@ -197,14 +215,14 @@ def _fusion_search(query: str, query_filter: models.Filter | None, limit: int) -
         prefetch.append(
             models.Prefetch(
                 query=sparse_query,
-                using=str(manifest.get("sparse_vector_name") or SPARSE_VECTOR_NAME),
+                using=str(active_manifest.get("sparse_vector_name") or SPARSE_VECTOR_NAME),
                 filter=query_filter,
                 limit=limit,
             )
         )
 
     response = client.query_points(
-        collection_name=str(manifest.get("collection_name") or qdrant_collection_name()),
+        collection_name=_resolve_collection_name(active_manifest),
         prefetch=prefetch,
         query=models.FusionQuery(fusion=models.Fusion.RRF),
         limit=limit,
@@ -213,18 +231,33 @@ def _fusion_search(query: str, query_filter: models.Filter | None, limit: int) -
     return _normalize_scored_points(response, score_type="hybrid", score_field="hybrid_raw_score")
 
 
-def _multi_query_dense_search(queries: List[str], query_filter: models.Filter | None, limit: int) -> List[Dict]:
-    batches = [_dense_search(query, query_filter=query_filter, limit=limit) for query in queries]
+def _multi_query_dense_search(
+    queries: List[str],
+    query_filter: models.Filter | None,
+    limit: int,
+    manifest: Optional[Dict] = None,
+) -> List[Dict]:
+    batches = [_dense_search(query, query_filter=query_filter, limit=limit, manifest=manifest) for query in queries]
     return _merge_query_variant_results(batches, limit=limit)
 
 
-def _multi_query_sparse_search(queries: List[str], query_filter: models.Filter | None, limit: int) -> List[Dict]:
-    batches = [_sparse_search(query, query_filter=query_filter, limit=limit) for query in queries]
+def _multi_query_sparse_search(
+    queries: List[str],
+    query_filter: models.Filter | None,
+    limit: int,
+    manifest: Optional[Dict] = None,
+) -> List[Dict]:
+    batches = [_sparse_search(query, query_filter=query_filter, limit=limit, manifest=manifest) for query in queries]
     return _merge_query_variant_results(batches, limit=limit)
 
 
-def _multi_query_fusion_search(queries: List[str], query_filter: models.Filter | None, limit: int) -> List[Dict]:
-    batches = [_fusion_search(query, query_filter=query_filter, limit=limit) for query in queries]
+def _multi_query_fusion_search(
+    queries: List[str],
+    query_filter: models.Filter | None,
+    limit: int,
+    manifest: Optional[Dict] = None,
+) -> List[Dict]:
+    batches = [_fusion_search(query, query_filter=query_filter, limit=limit, manifest=manifest) for query in queries]
     return _merge_query_variant_results(batches, limit=limit)
 
 
@@ -232,13 +265,14 @@ def run_qdrant_search_debug(
     raw_query: str,
     top_k: int = 5,
     allowed_establishments: Optional[List[str]] = None,
+    manifest_override: Optional[Dict] = None,
 ) -> Dict[str, object]:
     legacy = _legacy_search_module()
     if not raw_query or not raw_query.strip():
         return {
             "query": "",
             "dense_results": [],
-            "bm25_results": [],
+            "sparse_results": [],
             "merged_results": [],
             "boosted_results": [],
             "guarded_results": [],
@@ -258,10 +292,10 @@ def run_qdrant_search_debug(
         retrieve_k = max(retrieve_k, 60)
     queries = legacy.generate_multi_queries(query)
 
-    dense_results = _multi_query_dense_search(queries, query_filter=query_filter, limit=retrieve_k)
-    sparse_results = _multi_query_sparse_search(queries, query_filter=query_filter, limit=retrieve_k)
-    fusion_results = _multi_query_fusion_search(queries, query_filter=query_filter, limit=retrieve_k)
-    merged_results = legacy.merge_dense_and_bm25(dense_results, sparse_results, top_k=retrieve_k)
+    dense_results = _multi_query_dense_search(queries, query_filter=query_filter, limit=retrieve_k, manifest=manifest_override)
+    sparse_results = _multi_query_sparse_search(queries, query_filter=query_filter, limit=retrieve_k, manifest=manifest_override)
+    fusion_results = _multi_query_fusion_search(queries, query_filter=query_filter, limit=retrieve_k, manifest=manifest_override)
+    merged_results = legacy.merge_dense_and_sparse(dense_results, sparse_results, top_k=retrieve_k)
 
     dense_by_id = {result.get("id"): result for result in dense_results}
     sparse_by_id = {result.get("id"): result for result in sparse_results}
@@ -272,7 +306,7 @@ def run_qdrant_search_debug(
         item = dict(result)
         fallback_scores = manual_merged_by_id.get(item.get("id"), {})
         item["dense_score"] = float(dense_by_id.get(item.get("id"), {}).get("score", 0.0) or 0.0)
-        item["bm25_score"] = float(sparse_by_id.get(item.get("id"), {}).get("score", 0.0) or 0.0)
+        item["sparse_score"] = float(sparse_by_id.get(item.get("id"), {}).get("score", 0.0) or 0.0)
         if "hybrid_raw_score" not in item and "hybrid_raw_score" in fallback_scores:
             item["hybrid_raw_score"] = float(fallback_scores.get("hybrid_raw_score", 0.0) or 0.0)
         if item.get("score_type") != "hybrid":
@@ -318,7 +352,7 @@ def run_qdrant_search_debug(
     return {
         "query": query,
         "dense_results": dense_results,
-        "bm25_results": sparse_results,
+        "sparse_results": sparse_results,
         "fusion_results": fusion_results,
         "merged_results": enriched_merged,
         "boosted_results": boosted,
@@ -335,10 +369,12 @@ def get_relevant_chunks_qdrant(
     raw_query: str,
     top_k: int = 5,
     allowed_establishments: Optional[List[str]] = None,
+    manifest_override: Optional[Dict] = None,
 ) -> List[Dict]:
     debug_payload = run_qdrant_search_debug(
         raw_query,
         top_k=top_k,
         allowed_establishments=allowed_establishments,
+        manifest_override=manifest_override,
     )
     return list(debug_payload.get("final_results", []))

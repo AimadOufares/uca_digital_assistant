@@ -8,7 +8,7 @@ import unicodedata
 from datetime import datetime
 from pathlib import Path
 from statistics import mean
-from typing import Dict, List, Set
+from typing import Dict, List, Optional, Set
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -17,7 +17,6 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from rag_module.generation.rag_engine import RAGGenerationError, RAGIndexNotReadyError, answer_question
 from rag_module.retrieval.rag_search import invalidate_search_cache, run_hybrid_search_debug
-from rag_module.retrieval.qdrant_search import qdrant_index_ready
 from rag_module.audit.offline_pipeline_report import update_offline_pipeline_report
 
 
@@ -145,9 +144,15 @@ def _stage_metrics(chunks: List[Dict], keywords: List[str], expected_doc_types: 
     }
 
 
-def _retrieval_metrics(question: str, keywords: List[str], expected_doc_types: List[str], top_k: int) -> Dict:
+def _retrieval_metrics(
+    question: str,
+    keywords: List[str],
+    expected_doc_types: List[str],
+    top_k: int,
+    manifest_override: Optional[Dict] = None,
+) -> Dict:
     start = time.perf_counter()
-    payload = run_hybrid_search_debug(question, top_k=top_k)
+    payload = run_hybrid_search_debug(question, top_k=top_k, manifest_override=manifest_override)
     elapsed_ms = (time.perf_counter() - start) * 1000
 
     final_chunks = list(payload.get("final_results", []))
@@ -157,7 +162,7 @@ def _retrieval_metrics(question: str, keywords: List[str], expected_doc_types: L
             "coverage_at_k": 0.0,
             "hit_at_k": 0,
             "dense_hit_at_k": 0,
-            "bm25_hit_at_k": 0,
+            "sparse_hit_at_k": 0,
             "fusion_hit_at_k": 0,
             "native_fusion_hit_at_k": 0,
             "latency_ms": round(elapsed_ms, 2),
@@ -175,7 +180,7 @@ def _retrieval_metrics(question: str, keywords: List[str], expected_doc_types: L
     best_match = max(float(item["score"]) for item in final_scores)
 
     dense_stage = _stage_metrics(list(payload.get("dense_results", [])), keywords, expected_doc_types, top_k)
-    bm25_stage = _stage_metrics(list(payload.get("bm25_results", [])), keywords, expected_doc_types, top_k)
+    sparse_stage = _stage_metrics(list(payload.get("sparse_results", [])), keywords, expected_doc_types, top_k)
     fusion_stage = _stage_metrics(list(payload.get("merged_results", [])), keywords, expected_doc_types, top_k)
     native_fusion_stage = _stage_metrics(
         list(payload.get("fusion_results", payload.get("merged_results", []))),
@@ -191,7 +196,7 @@ def _retrieval_metrics(question: str, keywords: List[str], expected_doc_types: L
         "coverage_at_k": round(avg_coverage, 4),
         "hit_at_k": int(relevant > 0),
         "dense_hit_at_k": int(dense_stage["hit"] > 0),
-        "bm25_hit_at_k": int(bm25_stage["hit"] > 0),
+        "sparse_hit_at_k": int(sparse_stage["hit"] > 0),
         "fusion_hit_at_k": int(fusion_stage["hit"] > 0),
         "native_fusion_hit_at_k": int(native_fusion_stage["hit"] > 0),
         "latency_ms": round(elapsed_ms, 2),
@@ -230,7 +235,7 @@ def _generation_metrics(question: str, keywords: List[str], expected_doc_types: 
     }
 
 
-def evaluate(top_k: int, run_generation: bool) -> Dict:
+def evaluate(top_k: int, run_generation: bool, manifest_override: Optional[Dict] = None) -> Dict:
     rows = []
     for case in EVAL_SET:
         question = case["question"]
@@ -238,7 +243,7 @@ def evaluate(top_k: int, run_generation: bool) -> Dict:
         expected_doc_types = case.get("expected_doc_types", [])
         row = {"question": question, "keywords": keywords, "expected_doc_types": expected_doc_types}
         try:
-            row.update(_retrieval_metrics(question, keywords, expected_doc_types, top_k))
+            row.update(_retrieval_metrics(question, keywords, expected_doc_types, top_k, manifest_override=manifest_override))
         except Exception as exc:
             row.update(
                 {
@@ -246,7 +251,7 @@ def evaluate(top_k: int, run_generation: bool) -> Dict:
                     "coverage_at_k": 0.0,
                     "hit_at_k": 0,
                     "dense_hit_at_k": 0,
-                    "bm25_hit_at_k": 0,
+                    "sparse_hit_at_k": 0,
                     "fusion_hit_at_k": 0,
                     "native_fusion_hit_at_k": 0,
                     "latency_ms": 0.0,
@@ -276,7 +281,7 @@ def evaluate(top_k: int, run_generation: bool) -> Dict:
             "coverage_at_k_avg": round(mean([r.get("coverage_at_k", 0.0) for r in rows]), 4) if rows else 0.0,
             "hit_at_k_rate": round(mean([r.get("hit_at_k", 0) for r in rows]), 4) if rows else 0.0,
             "dense_hit_at_k_rate": round(mean([r.get("dense_hit_at_k", 0) for r in rows]), 4) if rows else 0.0,
-            "bm25_hit_at_k_rate": round(mean([r.get("bm25_hit_at_k", 0) for r in rows]), 4) if rows else 0.0,
+            "sparse_hit_at_k_rate": round(mean([r.get("sparse_hit_at_k", 0) for r in rows]), 4) if rows else 0.0,
             "fusion_hit_at_k_rate": round(mean([r.get("fusion_hit_at_k", 0) for r in rows]), 4) if rows else 0.0,
             "native_fusion_hit_at_k_rate": round(mean([r.get("native_fusion_hit_at_k", 0) for r in rows]), 4) if rows else 0.0,
             "best_match_score_avg": round(mean([r.get("best_match_score", 0.0) for r in rows]), 4) if rows else 0.0,
@@ -310,80 +315,6 @@ def evaluate_kpi_gates(report: Dict, precision_gate: float, hit_gate: float) -> 
     }
 
 
-def _with_backend(backend: str, callback):
-    previous = os.environ.get("RAG_VECTOR_BACKEND")
-    try:
-        os.environ["RAG_VECTOR_BACKEND"] = backend
-        invalidate_search_cache(clear_models=True)
-        return callback()
-    finally:
-        if previous is None:
-            os.environ.pop("RAG_VECTOR_BACKEND", None)
-        else:
-            os.environ["RAG_VECTOR_BACKEND"] = previous
-        invalidate_search_cache(clear_models=True)
-
-
-def compare_backends(top_k: int, run_generation: bool, backends: List[str]) -> Dict:
-    requested = [backend.strip().lower() for backend in backends if backend.strip()]
-    unique_backends: List[str] = []
-    for backend in requested:
-        if backend not in unique_backends:
-            unique_backends.append(backend)
-
-    reports: Dict[str, Dict] = {}
-    readiness: Dict[str, Dict[str, object]] = {}
-    for backend in unique_backends:
-        if backend == "qdrant":
-            readiness[backend] = {"ready": bool(qdrant_index_ready())}
-        else:
-            readiness[backend] = {
-                "ready": (PROJECT_ROOT / "data_storage" / "index" / "index.faiss").exists()
-                and (PROJECT_ROOT / "data_storage" / "index" / "chunks.json").exists()
-            }
-        if not readiness[backend]["ready"]:
-            reports[backend] = {
-                "generated_at": datetime.now().isoformat(),
-                "top_k": top_k,
-                "questions_evaluated": 0,
-                "summary": {},
-                "error": f"backend_not_ready:{backend}",
-            }
-            continue
-        reports[backend] = _with_backend(backend, lambda: evaluate(top_k=top_k, run_generation=run_generation))
-
-    diff: Dict[str, object] = {}
-    if len(unique_backends) >= 2:
-        base_backend = unique_backends[0]
-        compare_backend = unique_backends[1]
-        base_summary = reports.get(base_backend, {}).get("summary", {}) if isinstance(reports.get(base_backend), dict) else {}
-        compare_summary = reports.get(compare_backend, {}).get("summary", {}) if isinstance(reports.get(compare_backend), dict) else {}
-        for key in (
-            "precision_at_k_avg",
-            "coverage_at_k_avg",
-            "hit_at_k_rate",
-            "best_match_score_avg",
-            "metadata_boost_gain_avg",
-            "rerank_gain_avg",
-            "retrieval_latency_ms_avg",
-        ):
-            if key in base_summary and key in compare_summary:
-                diff[key] = round(float(compare_summary.get(key, 0.0)) - float(base_summary.get(key, 0.0)), 4)
-        diff["from"] = base_backend
-        diff["to"] = compare_backend
-
-    comparison = {
-        "generated_at": datetime.now().isoformat(),
-        "top_k": top_k,
-        "backends": unique_backends,
-        "readiness": readiness,
-        "reports": reports,
-        "diff": diff,
-    }
-    update_offline_pipeline_report("backend_comparison", comparison)
-    return comparison
-
-
 def write_report(report: Dict) -> Dict[str, Path]:
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -402,7 +333,7 @@ def write_report(report: Dict) -> Dict[str, Path]:
         f"Precision@k (avg): {report['summary'].get('precision_at_k_avg', 0.0)}",
         f"Coverage@k (avg): {report['summary'].get('coverage_at_k_avg', 0.0)}",
         f"Dense hit@k rate: {report['summary'].get('dense_hit_at_k_rate', 0.0)}",
-        f"BM25 hit@k rate: {report['summary'].get('bm25_hit_at_k_rate', 0.0)}",
+        f"Sparse hit@k rate: {report['summary'].get('sparse_hit_at_k_rate', 0.0)}",
         f"Fusion hit@k rate: {report['summary'].get('fusion_hit_at_k_rate', 0.0)}",
         f"Native fusion hit@k rate: {report['summary'].get('native_fusion_hit_at_k_rate', 0.0)}",
         f"Best match score (avg): {report['summary'].get('best_match_score_avg', 0.0)}",
@@ -424,68 +355,16 @@ def write_report(report: Dict) -> Dict[str, Path]:
 
     return {"json": json_path, "txt": txt_path}
 
-
-def write_backend_comparison_report(report: Dict) -> Dict[str, Path]:
-    REPORT_DIR.mkdir(parents=True, exist_ok=True)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    json_path = REPORT_DIR / f"rag_backend_compare_{timestamp}.json"
-    txt_path = REPORT_DIR / f"rag_backend_compare_{timestamp}.txt"
-
-    with json_path.open("w", encoding="utf-8") as handle:
-        json.dump(report, handle, indent=2, ensure_ascii=False)
-
-    lines = [
-        "RAG BACKEND COMPARISON",
-        f"Generated at: {report.get('generated_at')}",
-        f"Top-k: {report.get('top_k')}",
-        f"Backends: {', '.join(report.get('backends', []))}",
-        "",
-    ]
-    readiness = report.get("readiness", {}) or {}
-    for backend in report.get("backends", []):
-        ready = readiness.get(backend, {}).get("ready")
-        lines.append(f"{backend} ready: {ready}")
-        summary = ((report.get("reports", {}) or {}).get(backend, {}) or {}).get("summary", {})
-        if summary:
-            lines.append(f"{backend} Precision@k: {summary.get('precision_at_k_avg', 0.0)}")
-            lines.append(f"{backend} Hit@k: {summary.get('hit_at_k_rate', 0.0)}")
-            lines.append(f"{backend} Rerank gain: {summary.get('rerank_gain_avg', 0.0)}")
-            lines.append(f"{backend} Retrieval latency avg (ms): {summary.get('retrieval_latency_ms_avg', 0.0)}")
-        lines.append("")
-
-    diff = report.get("diff", {}) or {}
-    if diff:
-        lines.append(f"Delta {diff.get('from')} -> {diff.get('to')}")
-        for key, value in diff.items():
-            if key in {"from", "to"}:
-                continue
-            lines.append(f"{key}: {value}")
-
-    with txt_path.open("w", encoding="utf-8") as handle:
-        handle.write("\n".join(lines))
-
-    return {"json": json_path, "txt": txt_path}
-
-
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Evaluation heuristique hybride du RAG (dense, BM25, fusion et generation).")
+    parser = argparse.ArgumentParser(description="Evaluation heuristique hybride du RAG Qdrant (dense, sparse, fusion et generation).")
     parser.add_argument("--top-k", type=int, default=5, help="Nombre de chunks recuperes pour l'evaluation.")
     parser.add_argument("--skip-generation", action="store_true", help="N'evalue que la retrieval sans generation de reponse.")
     parser.add_argument("--precision-gate", type=float, default=DEFAULT_PRECISION_GATE, help="Seuil Precision@k moyen.")
     parser.add_argument("--hit-gate", type=float, default=DEFAULT_HIT_GATE, help="Seuil Hit@k rate.")
     parser.add_argument("--enforce-kpi-gates", action="store_true", help="Retourne un code d'erreur si les gates KPI echouent.")
-    parser.add_argument("--compare-backends", action="store_true", help="Compare les backends FAISS et Qdrant sur le meme set d'evaluation.")
-    parser.add_argument("--backends", default="faiss,qdrant", help="Liste comma-separated des backends a comparer.")
     args = parser.parse_args()
 
     top_k = max(1, args.top_k)
-    if args.compare_backends:
-        backends = [item.strip() for item in str(args.backends or "").split(",") if item.strip()]
-        comparison = compare_backends(top_k=top_k, run_generation=not args.skip_generation, backends=backends)
-        output_paths = write_backend_comparison_report(comparison)
-        print(f"Comparaison terminee. JSON: {output_paths['json']}")
-        print(f"Comparaison terminee. TXT : {output_paths['txt']}")
-        return
 
     report = evaluate(top_k=top_k, run_generation=not args.skip_generation)
     kpi_gates = evaluate_kpi_gates(report, precision_gate=args.precision_gate, hit_gate=args.hit_gate)

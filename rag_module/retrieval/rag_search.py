@@ -1,22 +1,13 @@
 import hashlib
-import json
 import logging
 import math
-import os
 import re
-from functools import lru_cache
-from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-import faiss
-import numpy as np
 import unidecode
-from sentence_transformers import SentenceTransformer
 from sentence_transformers.cross_encoder import CrossEncoder
 
 try:
-    from ..offline.indexing import DEFAULT_EMBEDDING_MODEL
-    from ..retrieval.bm25_search import build_bm25_index, load_bm25_corpus, search_bm25
     from ..shared.context_resolution import (
         CANONICAL_ESTABLISHMENTS,
         UCA_GLOBAL,
@@ -25,13 +16,9 @@ try:
         normalize_establishment_label,
     )
     from ..shared.env_loader import load_env_file
-    from ..shared.index_manifest import load_manifest, validate_manifest
     from ..shared.metadata_policy import normalize_text
     from ..shared.relevance_policy import boost_results_with_metadata
-    from ..shared.runtime_config import configured_vector_backend
 except ImportError:  # pragma: no cover
-    from rag_module.offline.indexing import DEFAULT_EMBEDDING_MODEL
-    from rag_module.retrieval.bm25_search import build_bm25_index, load_bm25_corpus, search_bm25
     from rag_module.shared.context_resolution import (
         CANONICAL_ESTABLISHMENTS,
         UCA_GLOBAL,
@@ -40,18 +27,11 @@ except ImportError:  # pragma: no cover
         normalize_establishment_label,
     )
     from rag_module.shared.env_loader import load_env_file
-    from rag_module.shared.index_manifest import load_manifest, validate_manifest
     from rag_module.shared.metadata_policy import normalize_text
     from rag_module.shared.relevance_policy import boost_results_with_metadata
-    from rag_module.shared.runtime_config import configured_vector_backend
 
 load_env_file()
 
-
-INDEX_PATH = "data_storage/index/index.faiss"
-CHUNKS_PATH = "data_storage/index/chunks.json"
-MANIFEST_PATH = "data_storage/index/index_manifest.json"
-BM25_CORPUS_PATH = "data_storage/index/bm25_corpus.json"
 
 RERANK_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 
@@ -59,7 +39,7 @@ TOP_K_RETRIEVE = 20
 TOP_K_FINAL = 5
 MAX_CONTEXT_CHARS = 2500
 DENSE_WEIGHT = 0.65
-BM25_WEIGHT = 0.35
+SPARSE_WEIGHT = 0.35
 
 USE_RERANK = True
 USE_SPELLCHECK = False
@@ -266,35 +246,12 @@ NORMALIZED_LEVEL_KEYWORDS = {
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 logger = logging.getLogger(__name__)
 
-_embedding_model = None
-_embedding_model_name = None
 _reranker = None
-_index = None
-_chunks = None
-_manifest = None
-_bm25_corpus = None
-_bm25_index = None
-_index_mtime = None
-_chunks_mtime = None
-_manifest_mtime = None
-_bm25_mtime = None
 
 
 def invalidate_search_cache(clear_models: bool = False) -> None:
-    global _index, _chunks, _manifest, _bm25_corpus, _bm25_index
-    global _index_mtime, _chunks_mtime, _manifest_mtime, _bm25_mtime
-    global _embedding_model, _embedding_model_name, _reranker
+    global _reranker
 
-    _index = None
-    _chunks = None
-    _manifest = None
-    _bm25_corpus = None
-    _bm25_index = None
-    _index_mtime = None
-    _chunks_mtime = None
-    _manifest_mtime = None
-    _bm25_mtime = None
-    embed_text.cache_clear()
     try:
         from .qdrant_search import _embed_query  # type: ignore
 
@@ -302,46 +259,7 @@ def invalidate_search_cache(clear_models: bool = False) -> None:
     except Exception:
         pass
     if clear_models:
-        _embedding_model = None
-        _embedding_model_name = None
         _reranker = None
-
-
-def _configured_embedding_model_name() -> str:
-    return os.getenv("RAG_EMBEDDING_MODEL", "").strip()
-
-
-def get_runtime_embedding_model_name() -> str:
-    configured = _configured_embedding_model_name()
-    manifest = load_manifest_or_raise()
-    manifest_model = str(manifest.get("model_name") or "").strip()
-    if configured and manifest_model and configured != manifest_model:
-        raise ValueError(
-            f"Le modele runtime '{configured}' ne correspond pas au modele de l'index '{manifest_model}'."
-        )
-    return manifest_model or configured or DEFAULT_EMBEDDING_MODEL
-
-
-def is_e5_model(model_name: str) -> bool:
-    return "e5" in (model_name or "").lower()
-
-
-def get_embedding_model():
-    global _embedding_model, _embedding_model_name
-    model_name = get_runtime_embedding_model_name()
-    if _embedding_model is None or _embedding_model_name != model_name:
-        logger.info("Chargement du modele embedding: %s", model_name)
-        try:
-            _embedding_model = SentenceTransformer(
-                model_name,
-                device="cpu",
-                local_files_only=True,
-            )
-        except Exception:
-            _embedding_model = SentenceTransformer(model_name, device="cpu")
-        _embedding_model.max_seq_length = 512
-        _embedding_model_name = model_name
-    return _embedding_model
 
 
 def get_reranker():
@@ -364,73 +282,6 @@ def get_reranker():
             logger.warning("Reranker indisponible, fallback sans rerank: %s", exc)
             _reranker = None
     return _reranker
-
-
-def load_manifest_or_raise() -> Dict:
-    global _manifest, _manifest_mtime
-
-    manifest_file = Path(MANIFEST_PATH)
-    if not manifest_file.exists():
-        raise FileNotFoundError("Manifest d'index introuvable.")
-
-    current_mtime = manifest_file.stat().st_mtime
-    if _manifest is None or _manifest_mtime != current_mtime:
-        _manifest = load_manifest(MANIFEST_PATH)
-        expected = _configured_embedding_model_name() or str(_manifest.get("model_name") or "").strip()
-        validate_manifest(_manifest, expected_model=expected)
-        _manifest_mtime = current_mtime
-    return _manifest
-
-
-def get_faiss_index_and_chunks() -> Tuple[faiss.Index, List[Dict]]:
-    global _index, _chunks, _index_mtime, _chunks_mtime
-
-    index_file = Path(INDEX_PATH)
-    chunks_file = Path(CHUNKS_PATH)
-    if not index_file.exists() or not chunks_file.exists():
-        logger.error("Index FAISS ou chunks.json introuvable. Execute d'abord indexing.py")
-        raise FileNotFoundError("Index FAISS non trouve")
-
-    load_manifest_or_raise()
-
-    current_index_mtime = index_file.stat().st_mtime
-    current_chunks_mtime = chunks_file.stat().st_mtime
-    needs_reload = (
-        _index is None
-        or _chunks is None
-        or _index_mtime != current_index_mtime
-        or _chunks_mtime != current_chunks_mtime
-    )
-    if needs_reload:
-        logger.info("Chargement de l'index FAISS...")
-        _index = faiss.read_index(str(index_file))
-        logger.info("Chargement des chunks...")
-        with open(chunks_file, "r", encoding="utf-8") as handle:
-            _chunks = json.load(handle)
-        manifest = load_manifest_or_raise()
-        if int(manifest.get("chunk_count", len(_chunks)) or len(_chunks)) != len(_chunks):
-            logger.warning("Le manifest et chunks.json ne sont pas parfaitement alignes.")
-        _index_mtime = current_index_mtime
-        _chunks_mtime = current_chunks_mtime
-
-    return _index, _chunks
-
-
-def get_bm25_resources() -> Tuple[List[Dict], Dict]:
-    global _bm25_corpus, _bm25_index, _bm25_mtime
-
-    corpus_file = Path(BM25_CORPUS_PATH)
-    if not corpus_file.exists():
-        raise FileNotFoundError("Corpus BM25 introuvable.")
-
-    current_mtime = corpus_file.stat().st_mtime
-    if _bm25_corpus is None or _bm25_index is None or _bm25_mtime != current_mtime:
-        logger.info("Chargement du corpus BM25...")
-        _bm25_corpus = load_bm25_corpus(BM25_CORPUS_PATH)
-        _bm25_index = build_bm25_index(_bm25_corpus)
-        _bm25_mtime = current_mtime
-
-    return _bm25_corpus, _bm25_index
 
 
 def preprocess_query(query: str) -> str:
@@ -459,14 +310,6 @@ def enhance_query(query: str) -> str:
     return correct_query(preprocess_query(query))
 
 
-def prepare_query_text(query: str) -> str:
-    normalized = enhance_query(query)
-    model_name = get_runtime_embedding_model_name()
-    if is_e5_model(model_name):
-        return f"query: {normalized}"
-    return normalized
-
-
 def generate_multi_queries(query: str) -> List[str]:
     if not USE_MULTI_QUERY:
         return [query]
@@ -481,49 +324,7 @@ def generate_multi_queries(query: str) -> List[str]:
     return list(dict.fromkeys(variations))
 
 
-@lru_cache(maxsize=500)
-def embed_text(text: str) -> np.ndarray:
-    model = get_embedding_model()
-    prepared = prepare_query_text(text)
-    return model.encode(prepared, normalize_embeddings=True)
-
-
-def embed_queries(queries: List[str]) -> np.ndarray:
-    return np.array([embed_text(query) for query in queries], dtype="float32")
-
-
-def _normalize_vector_score(raw_score: float, metric_type: int) -> float:
-    if metric_type == faiss.METRIC_L2:
-        return float(max(0.0, min(1.0, 1.0 - (raw_score / 2.0))))
-    if metric_type == faiss.METRIC_INNER_PRODUCT:
-        return float(max(0.0, min(1.0, (raw_score + 1.0) / 2.0)))
-    return raw_score
-
-
-def search_faiss(query_vectors: np.ndarray, top_k: int = TOP_K_RETRIEVE) -> List[Dict]:
-    index, chunks = get_faiss_index_and_chunks()
-    if index.ntotal == 0:
-        return []
-
-    top_k = max(1, int(top_k))
-    distances, indices = index.search(query_vectors, top_k)
-    metric_type = getattr(index, "metric_type", faiss.METRIC_L2)
-
-    results: List[Dict] = []
-    for i, idx_list in enumerate(indices):
-        for rank, idx in enumerate(idx_list):
-            if 0 <= idx < len(chunks):
-                chunk = dict(chunks[idx])
-                raw_score = float(distances[i][rank])
-                chunk["vector_raw_score"] = raw_score
-                chunk["score"] = _normalize_vector_score(raw_score, metric_type)
-                chunk["score_type"] = "dense"
-                chunk["query_source"] = "multi" if len(query_vectors) > 1 else "single"
-                results.append(chunk)
-    return results
-
-
-def merge_dense_and_bm25(dense_results: List[Dict], bm25_results: List[Dict], top_k: int) -> List[Dict]:
+def merge_dense_and_sparse(dense_results: List[Dict], sparse_results: List[Dict], top_k: int) -> List[Dict]:
     merged: Dict[str, Dict] = {}
 
     for result in dense_results:
@@ -539,7 +340,7 @@ def merge_dense_and_bm25(dense_results: List[Dict], bm25_results: List[Dict], to
                 "text": result.get("text", ""),
                 "metadata": metadata,
                 "dense_score": 0.0,
-                "bm25_score": 0.0,
+                "sparse_score": 0.0,
                 "score": 0.0,
                 "score_type": "hybrid",
                 "retrieval_sources": [],
@@ -549,7 +350,7 @@ def merge_dense_and_bm25(dense_results: List[Dict], bm25_results: List[Dict], to
         if "dense" not in entry["retrieval_sources"]:
             entry["retrieval_sources"].append("dense")
 
-    for result in bm25_results:
+    for result in sparse_results:
         metadata = result.get("metadata", {}) or {}
         chunk_id = result.get("id") or metadata.get("chunk_hash") or metadata.get("hash")
         if not chunk_id:
@@ -562,21 +363,21 @@ def merge_dense_and_bm25(dense_results: List[Dict], bm25_results: List[Dict], to
                 "text": result.get("text", ""),
                 "metadata": metadata,
                 "dense_score": 0.0,
-                "bm25_score": 0.0,
+                "sparse_score": 0.0,
                 "score": 0.0,
                 "score_type": "hybrid",
                 "retrieval_sources": [],
             },
         )
-        entry["bm25_score"] = max(float(entry["bm25_score"]), float(result.get("score", 0.0) or 0.0))
-        if "bm25" not in entry["retrieval_sources"]:
-            entry["retrieval_sources"].append("bm25")
+        entry["sparse_score"] = max(float(entry["sparse_score"]), float(result.get("score", 0.0) or 0.0))
+        if "sparse" not in entry["retrieval_sources"]:
+            entry["retrieval_sources"].append("sparse")
 
     merged_results: List[Dict] = []
     for entry in merged.values():
         dense_score = float(entry.get("dense_score", 0.0))
-        bm25_score = float(entry.get("bm25_score", 0.0))
-        entry["score"] = max(0.0, min(1.0, (dense_score * DENSE_WEIGHT) + (bm25_score * BM25_WEIGHT)))
+        sparse_score = float(entry.get("sparse_score", 0.0))
+        entry["score"] = max(0.0, min(1.0, (dense_score * DENSE_WEIGHT) + (sparse_score * SPARSE_WEIGHT)))
         merged_results.append(entry)
 
     merged_results.sort(key=lambda item: float(item.get("score", 0.0)), reverse=True)
@@ -744,9 +545,12 @@ def _chunk_haystack(chunk: Dict) -> str:
     metadata = chunk.get("metadata", {}) or {}
     fields = [
         chunk.get("text", ""),
+        metadata.get("section_title", ""),
+        " ".join(str(part).strip() for part in metadata.get("section_path", []) if str(part).strip()),
         metadata.get("source", ""),
         metadata.get("file_name", ""),
         metadata.get("document_type", ""),
+        metadata.get("year", ""),
         get_metadata_establishment(metadata),
     ]
     return normalize_text(" ".join(str(field or "") for field in fields))
@@ -961,7 +765,7 @@ def apply_retrieval_guardrails(
             float(item.get("support_score", 0.0)),
             float(item.get("score", 0.0)),
             float(item.get("dense_score", 0.0)),
-            float(item.get("bm25_score", 0.0)),
+            float(item.get("sparse_score", 0.0)),
         ),
         reverse=True,
     )
@@ -1058,145 +862,45 @@ def decide_retrieval_abstention(results: List[Dict], query_profile: Dict[str, An
     return {"abstain": False, "reason": ""}
 
 
-def active_search_backend() -> str:
-    configured = configured_vector_backend()
-    if configured == "qdrant":
-        try:
-            from .qdrant_search import qdrant_index_ready
-
-            if qdrant_index_ready():
-                return "qdrant"
-        except Exception:
-            pass
-        if Path(INDEX_PATH).exists() and Path(CHUNKS_PATH).exists():
-            return "faiss"
-    return configured or "faiss"
-
-
 def is_search_backend_ready() -> bool:
-    backend = active_search_backend()
-    if backend == "qdrant":
-        try:
-            from .qdrant_search import qdrant_index_ready
+    try:
+        from .qdrant_search import qdrant_index_ready
 
-            return qdrant_index_ready()
-        except Exception:
-            return False
-    return Path(INDEX_PATH).exists() and Path(CHUNKS_PATH).exists()
+        return qdrant_index_ready()
+    except Exception:
+        return False
 
 
 def run_hybrid_search_debug(
     raw_query: str,
     top_k: int = TOP_K_FINAL,
     allowed_establishments: Optional[List[str]] = None,
+    manifest_override: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, object]:
-    if active_search_backend() == "qdrant":
-        from .qdrant_search import run_qdrant_search_debug
+    from .qdrant_search import run_qdrant_search_debug
 
-        return run_qdrant_search_debug(raw_query, top_k=top_k, allowed_establishments=allowed_establishments)
-
-    if not raw_query or not raw_query.strip():
-        return {
-            "query": "",
-            "dense_results": [],
-            "bm25_results": [],
-            "fusion_results": [],
-            "merged_results": [],
-            "boosted_results": [],
-            "guarded_results": [],
-            "final_results": [],
-            "abstain": True,
-            "abstain_reason": "empty_query",
-            "query_profile": {},
-        }
-
-    top_k = max(1, int(top_k))
-    query = enhance_query(raw_query)
-    logger.info("Recherche hybride pour: '%s' -> '%s'", raw_query, query)
-
-    queries = generate_multi_queries(query)
-    query_vectors = embed_queries(queries)
-    retrieve_k = max(TOP_K_RETRIEVE, top_k * 4)
-    if _normalize_allowed_establishments(allowed_establishments):
-        retrieve_k = max(retrieve_k * 4, 80)
-
-    dense_results = _filter_results_by_allowed_establishments(
-        search_faiss(query_vectors, top_k=retrieve_k),
-        allowed_establishments,
-    )
-    _, bm25_index = get_bm25_resources()
-    bm25_results = _filter_results_by_allowed_establishments(
-        search_bm25(query, bm25_index, top_k=retrieve_k),
-        allowed_establishments,
-    )
-
-    retrieved = merge_dense_and_bm25(dense_results, bm25_results, top_k=retrieve_k)
-    retrieved = _filter_results_by_allowed_establishments(deduplicate_chunks(retrieved), allowed_establishments)
-    boosted = apply_metadata_boost(retrieved, query)
-    guarded, guardrail_diagnostics = apply_retrieval_guardrails(
-        query,
-        boosted,
+    return run_qdrant_search_debug(
+        raw_query,
         top_k=top_k,
         allowed_establishments=allowed_establishments,
+        manifest_override=manifest_override,
     )
-    reranked = rerank_chunks(query, guarded, top_k=max(top_k * 2, top_k))
-    final_ranked = apply_post_rerank_guardrails(
-        _filter_results_by_allowed_establishments(reranked, allowed_establishments),
-        query_profile=guardrail_diagnostics.get("query_profile", {}),
-        top_k=top_k,
-    )
-    abstention = decide_retrieval_abstention(final_ranked, guardrail_diagnostics.get("query_profile", {}))
-    fallback_results = select_support_fallback_results(
-        _filter_results_by_allowed_establishments(guarded, allowed_establishments),
-        query_profile=guardrail_diagnostics.get("query_profile", {}),
-        top_k=top_k,
-    )
-    if abstention["abstain"] and abstention["reason"] == "top_rerank_too_low" and fallback_results:
-        final_results = truncate_chunks(fallback_results, MAX_CONTEXT_CHARS)
-        abstention = {"abstain": False, "reason": "support_fallback"}
-    else:
-        final_results = [] if abstention["abstain"] else truncate_chunks(
-            _filter_results_by_allowed_establishments(final_ranked, allowed_establishments),
-            MAX_CONTEXT_CHARS,
-        )
-
-    logger.info("%s chunks pertinents retournes apres fusion et reranking", len(final_results))
-    return {
-        "query": query,
-        "dense_results": dense_results,
-        "bm25_results": bm25_results,
-        "fusion_results": retrieved,
-        "merged_results": retrieved,
-        "boosted_results": boosted,
-        "guarded_results": guarded,
-        "final_results": final_results,
-        "abstain": abstention["abstain"],
-        "abstain_reason": abstention["reason"],
-        "query_profile": guardrail_diagnostics.get("query_profile", {}),
-        "guardrail_diagnostics": guardrail_diagnostics,
-    }
 
 
 def get_relevant_chunks(
     raw_query: str,
     top_k: int = TOP_K_FINAL,
     allowed_establishments: Optional[List[str]] = None,
+    manifest_override: Optional[Dict[str, Any]] = None,
 ) -> List[Dict]:
-    if active_search_backend() == "qdrant":
-        from .qdrant_search import get_relevant_chunks_qdrant
+    from .qdrant_search import get_relevant_chunks_qdrant
 
-        return get_relevant_chunks_qdrant(
-            raw_query,
-            top_k=top_k,
-            allowed_establishments=allowed_establishments,
-        )
-
-    debug_payload = run_hybrid_search_debug(
+    return get_relevant_chunks_qdrant(
         raw_query,
         top_k=top_k,
         allowed_establishments=allowed_establishments,
+        manifest_override=manifest_override,
     )
-    return list(debug_payload.get("final_results", []))
 
 
 if __name__ == "__main__":

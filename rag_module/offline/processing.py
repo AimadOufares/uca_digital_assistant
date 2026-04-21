@@ -5,6 +5,7 @@ import json
 import hashlib
 import logging
 import string
+import copy
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Tuple
@@ -663,11 +664,12 @@ def _delete_chunk_file_if_unreferenced(
     chunk_hash: str,
     refcounts: Dict[str, int],
     seen_chunks: set,
+    dry_run: bool = False,
 ) -> bool:
     if refcounts.get(chunk_hash, 0) > 0:
         return False
     path = os.path.join(PROCESSED_PATH, f"{chunk_hash}.json")
-    if os.path.exists(path):
+    if os.path.exists(path) and not dry_run:
         try:
             os.remove(path)
         except Exception:
@@ -677,13 +679,14 @@ def _delete_chunk_file_if_unreferenced(
 
 
 # ===================== MAIN =====================
-def preprocess_all():
+def preprocess_all(dry_run: bool = False, with_report: bool = False):
     os.makedirs(PROCESSED_PATH, exist_ok=True)
 
     cache = load_cache()
     file_records: Dict[str, Dict] = cache.get("files", {})
+    working_file_records: Dict[str, Dict] = copy.deepcopy(file_records)
     seen_chunks = {Path(f).stem for f in os.listdir(PROCESSED_PATH) if f.endswith(".json")}
-    refcounts = _chunk_refcounts(file_records)
+    refcounts = _chunk_refcounts(working_file_records)
 
     files = [
         os.path.join(root, f)
@@ -706,6 +709,12 @@ def preprocess_all():
         "removed_chunks": 0,
         "chunks_saved": 0,
         "chunks_overwritten": 0,
+        "chunks_added": 0,
+        "chunks_removed": 0,
+        "dry_run": bool(dry_run),
+        "new_files": [],
+        "modified_files": [],
+        "deleted_files": [],
     }
 
     # Pre-hash in parallel to speed up large runs.
@@ -728,7 +737,7 @@ def preprocess_all():
         file_hash = file_hashes.get(path)
         if not file_hash:
             continue
-        record = file_records.get(path, {})
+        record = working_file_records.get(path, {})
         old_hashes = record.get("chunk_hashes", [])
         has_all_chunks = all(
             os.path.exists(os.path.join(PROCESSED_PATH, f"{ch}.json")) for ch in old_hashes
@@ -741,24 +750,31 @@ def preprocess_all():
             stats["files_unchanged"] += 1
             continue
         changed_candidates.append((path, file_hash))
+        if path not in working_file_records:
+            stats["new_files"].append(path)
+        else:
+            stats["modified_files"].append(path)
 
     stats["files_scheduled"] = len(changed_candidates)
     change_ratio = float(len(changed_candidates)) / float(max(len(files), 1))
 
-    backup_dir = create_backup(PROCESSED_PATH, CACHE_FILE, change_ratio=change_ratio)
+    backup_dir = None
+    if not dry_run:
+        backup_dir = create_backup(PROCESSED_PATH, CACHE_FILE, change_ratio=change_ratio)
     if backup_dir:
         logger.info("Backup created before cleanup: %s", backup_dir)
 
-    deleted_sources = [p for p in list(file_records.keys()) if not os.path.exists(p)]
+    deleted_sources = [p for p in list(working_file_records.keys()) if not os.path.exists(p)]
+    stats["deleted_files"] = list(deleted_sources)
     removed_chunks = 0
     for path in deleted_sources:
-        record = file_records.pop(path, {})
+        record = working_file_records.pop(path, {})
         for ch in set(record.get("chunk_hashes", [])):
             if ch in refcounts:
                 refcounts[ch] -= 1
                 if refcounts[ch] <= 0:
                     refcounts.pop(ch, None)
-            if _delete_chunk_file_if_unreferenced(ch, refcounts, seen_chunks):
+            if _delete_chunk_file_if_unreferenced(ch, refcounts, seen_chunks, dry_run=dry_run):
                 removed_chunks += 1
     if deleted_sources:
         logger.info(
@@ -787,9 +803,11 @@ def preprocess_all():
                 elif status != "processed":
                     stats["rejected_other"] += 1
 
-                previous_hashes = set(file_records.get(path, {}).get("chunk_hashes", []))
+                previous_hashes = set(working_file_records.get(path, {}).get("chunk_hashes", []))
                 new_hashes = [chunk["metadata"]["chunk_hash"] for chunk in chunks]
                 new_hashes_set = set(new_hashes)
+                added_hashes = new_hashes_set - previous_hashes
+                removed_hashes = previous_hashes - new_hashes_set
 
                 saved_count = 0
                 overwritten_count = 0
@@ -798,8 +816,8 @@ def preprocess_all():
                         refcounts[old_ch] -= 1
                         if refcounts[old_ch] <= 0:
                             refcounts.pop(old_ch, None)
-                    if old_ch not in new_hashes_set:
-                        _delete_chunk_file_if_unreferenced(old_ch, refcounts, seen_chunks)
+                    if old_ch in removed_hashes:
+                        _delete_chunk_file_if_unreferenced(old_ch, refcounts, seen_chunks, dry_run=dry_run)
 
                 for chunk in chunks:
                     ch_hash = chunk["metadata"]["chunk_hash"]
@@ -807,8 +825,9 @@ def preprocess_all():
                         continue
                     out_path = os.path.join(PROCESSED_PATH, f"{ch_hash}.json")
                     existed = os.path.exists(out_path)
-                    _write_json_atomic(out_path, chunk)
-                    if existed:
+                    if not dry_run:
+                        _write_json_atomic(out_path, chunk)
+                    if existed or ch_hash in previous_hashes:
                         overwritten_count += 1
                     else:
                         saved_count += 1
@@ -818,7 +837,7 @@ def preprocess_all():
                 for ch in new_hashes_set:
                     refcounts[ch] = refcounts.get(ch, 0) + 1
 
-                file_records[path] = {
+                working_file_records[path] = {
                     "file_hash": file_hash,
                     "chunk_hashes": list(dict.fromkeys(new_hashes)),
                     "policy_version": PROCESSING_POLICY_VERSION,
@@ -826,6 +845,8 @@ def preprocess_all():
                 stats["files_processed"] += 1
                 stats["chunks_saved"] += saved_count
                 stats["chunks_overwritten"] += overwritten_count
+                stats["chunks_added"] += len(added_hashes)
+                stats["chunks_removed"] += len(removed_hashes)
 
                 logger.info(
                     "Processed: %s -> %s chunks (%s saved, %s overwritten)",
@@ -839,7 +860,8 @@ def preprocess_all():
                 stats["processing_errors"] += 1
                 logger.error("Processing error for %s: %s", path, e)
 
-    save_cache({"version": 2, "files": file_records})
+    if not dry_run:
+        save_cache({"version": 2, "files": working_file_records})
     stats["finished_at"] = datetime.now(timezone.utc).isoformat()
     report_payload = {
         "started_at": stats["started_at"],
@@ -847,6 +869,7 @@ def preprocess_all():
         "settings": {
             "processing_workers": PROCESSING_WORKERS,
             "processing_policy_version": PROCESSING_POLICY_VERSION,
+            "dry_run": bool(dry_run),
         },
         "metrics": {
             "files_scanned": stats["files_scanned"],
@@ -860,11 +883,21 @@ def preprocess_all():
             "removed_chunks": stats["removed_chunks"],
             "chunks_saved": stats["chunks_saved"],
             "chunks_overwritten": stats["chunks_overwritten"],
+            "chunks_added": stats["chunks_added"],
+            "chunks_removed": stats["chunks_removed"],
+        },
+        "changes": {
+            "new_files": stats["new_files"],
+            "modified_files": stats["modified_files"],
+            "deleted_files": stats["deleted_files"],
         },
     }
     report_path = str(update_offline_pipeline_report("processing", report_payload))
     logger.info("Processing report updated: %s", report_path)
-    logger.info("Processing completed successfully.")
+    logger.info("Processing completed successfully%s.", " (dry-run)" if dry_run else "")
+    if with_report:
+        report_payload["report_path"] = report_path
+        return report_payload
 
 
 if __name__ == "__main__":

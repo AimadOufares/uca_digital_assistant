@@ -161,6 +161,7 @@ class AdminDashboardAPIView(APIView):
             "data_audit": "data_audit",
             "raw_quality_audit": "raw_quality_audit",
             "rag_eval": "rag_eval",
+            "offline_pipeline": "offline_pipeline_report",
         }
 
         payload = {}
