@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from rag_module.offline import indexing, preparation, qdrant_indexing
-from rag_module.retrieval import qdrant_search
+from rag_module.retrieval import qdrant_search, rag_search
 from rag_module.shared.index_manifest import validate_manifest
 
 
@@ -371,6 +371,78 @@ class QdrantReadinessTests(unittest.TestCase):
             with patch.object(qdrant_search, "get_active_model_name", return_value="BAAI/bge-m3"):
                 with patch.object(qdrant_search, "get_qdrant_client", return_value=fake_client):
                     self.assertFalse(qdrant_search.qdrant_index_ready())
+
+
+class RetrievalPipelineTests(unittest.TestCase):
+    def test_run_hybrid_search_debug_returns_explicit_trace_for_empty_query(self):
+        payload = rag_search.run_hybrid_search_debug("   ", top_k=3)
+
+        self.assertTrue(payload["abstain"])
+        self.assertEqual(payload["abstain_reason"], "empty_query")
+        self.assertIn("trace", payload)
+        self.assertEqual(payload["trace"]["pipeline_version"], "retrieval_explicit_v1")
+        self.assertEqual(payload["trace"]["decision_summary"]["final_result_count"], 0)
+
+    def test_run_hybrid_search_debug_orchestrates_candidate_search_and_decision_trace(self):
+        candidate_chunk = {
+            "id": "chunk-1",
+            "text": "Inscription master FSSM 2026 dossier et calendrier d'inscription administrative.",
+            "metadata": {
+                "chunk_hash": "chunk-1",
+                "document_type": "inscription",
+                "etablissement": "FSSM",
+                "year": 2026,
+                "chunk_relevance_score": 3,
+                "source": "data_storage/processed/chunk-1.json",
+            },
+            "score": 0.92,
+            "score_type": "hybrid",
+            "retrieval_sources": ["dense", "sparse"],
+        }
+        candidate_payload = {
+            "manifest": {
+                "collection_name": "uca_chunks_current",
+                "active_alias_name": "uca_chunks_current",
+                "model_name": "BAAI/bge-m3",
+                "vector_store": "qdrant",
+            },
+            "query_filter_applied": True,
+            "query_filter": {"must": ["faculty", "year"]},
+            "latency_ms": {"dense": 10.0, "sparse": 12.0, "fusion": 8.0, "total": 30.0},
+            "dense_results": [dict(candidate_chunk, score=0.91, score_type="dense")],
+            "sparse_results": [dict(candidate_chunk, score=0.87, score_type="sparse")],
+            "fusion_results": [dict(candidate_chunk, score=0.92, score_type="hybrid")],
+        }
+
+        def _fake_rerank(query, chunks_list, top_k=5):
+            rows = []
+            for chunk in chunks_list[:top_k]:
+                item = dict(chunk)
+                item["rerank_score"] = 8.0
+                item["score_type"] = "rerank"
+                rows.append(item)
+            return rows
+
+        with patch("rag_module.retrieval.qdrant_search.run_qdrant_candidate_search", return_value=candidate_payload):
+            with patch.object(rag_search, "apply_metadata_boost", side_effect=lambda results, query: list(results)):
+                with patch.object(rag_search, "rerank_chunks", side_effect=_fake_rerank):
+                    payload = rag_search.run_hybrid_search_debug(
+                        "Comment faire l'inscription master FSSM 2026 ?",
+                        top_k=2,
+                        allowed_establishments=["FSSM"],
+                    )
+
+        self.assertFalse(payload["abstain"])
+        self.assertEqual(len(payload["final_results"]), 1)
+        self.assertIn("candidate_retrieval", payload)
+        self.assertEqual(payload["candidate_retrieval"]["manifest"]["active_alias_name"], "uca_chunks_current")
+        self.assertIn("reranked_results", payload)
+        self.assertIn("final_ranked_results", payload)
+        self.assertEqual(payload["trace"]["stages"]["candidate_retrieval"]["backend"], "qdrant")
+        self.assertTrue(payload["trace"]["stages"]["candidate_retrieval"]["query_filter_applied"])
+        self.assertEqual(payload["trace"]["decision_summary"]["final_result_count"], 1)
+        self.assertFalse(payload["trace"]["decision_summary"]["fallback_used"])
+        self.assertEqual(payload["trace"]["decision_summary"]["top_result"]["id"], "chunk-1")
 
 
 if __name__ == "__main__":

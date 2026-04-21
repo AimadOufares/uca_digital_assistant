@@ -2,6 +2,8 @@ import hashlib
 import logging
 import math
 import re
+import time
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 import unidecode
@@ -466,6 +468,87 @@ def truncate_chunks(chunks_list: List[Dict], max_chars: int = MAX_CONTEXT_CHARS)
     return selected
 
 
+def _normalize_result_row(result: Dict) -> Dict:
+    entry = dict(result or {})
+    metadata = entry.get("metadata", {}) or {}
+    if not isinstance(metadata, dict):
+        metadata = {}
+    entry["metadata"] = metadata
+    entry["id"] = entry.get("id") or metadata.get("chunk_hash") or metadata.get("hash") or ""
+    entry["text"] = str(entry.get("text", "") or "")
+    entry["score"] = float(entry.get("score", 0.0) or 0.0)
+    entry["dense_score"] = float(entry.get("dense_score", 0.0) or 0.0)
+    entry["sparse_score"] = float(entry.get("sparse_score", 0.0) or 0.0)
+    if "support_score" in entry:
+        entry["support_score"] = float(entry.get("support_score", 0.0) or 0.0)
+    if "final_support_score" in entry:
+        entry["final_support_score"] = float(entry.get("final_support_score", 0.0) or 0.0)
+    if "rerank_score" in entry:
+        entry["rerank_score"] = float(entry.get("rerank_score", 0.0) or 0.0)
+    if "rerank_score_normalized" in entry:
+        entry["rerank_score_normalized"] = float(entry.get("rerank_score_normalized", 0.0) or 0.0)
+    if "thematic_score" in entry:
+        entry["thematic_score"] = float(entry.get("thematic_score", 0.0) or 0.0)
+    entry["score_type"] = str(entry.get("score_type") or "unknown")
+    entry["retrieval_sources"] = list(dict.fromkeys(entry.get("retrieval_sources", []) or []))
+    entry["rejection_reasons"] = list(dict.fromkeys(entry.get("rejection_reasons") or entry.get("reasons") or []))
+    return entry
+
+
+def _normalize_result_rows(results: List[Dict]) -> List[Dict]:
+    return [_normalize_result_row(item) for item in results]
+
+
+def _summarize_results(results: List[Dict], top_n: int = 3) -> Dict[str, Any]:
+    rows = _normalize_result_rows(results)
+    sources = sorted(
+        {
+            source
+            for row in rows
+            for source in row.get("retrieval_sources", [])
+            if isinstance(source, str) and source.strip()
+        }
+    )
+    return {
+        "count": len(rows),
+        "best_score": round(max((float(row.get("score", 0.0) or 0.0) for row in rows), default=0.0), 4),
+        "top_ids": [row.get("id", "") for row in rows[:top_n]],
+        "top_scores": [round(float(row.get("score", 0.0) or 0.0), 4) for row in rows[:top_n]],
+        "sources": sources,
+    }
+
+
+def _bucket_rejection_reasons(results: List[Dict]) -> Dict[str, int]:
+    buckets: Dict[str, int] = {}
+    for row in results:
+        reasons = list(row.get("rejection_reasons") or row.get("reasons") or [])
+        if not reasons:
+            buckets["unknown"] = buckets.get("unknown", 0) + 1
+            continue
+        for reason in reasons:
+            key = str(reason or "").strip() or "unknown"
+            buckets[key] = buckets.get(key, 0) + 1
+    return dict(sorted(buckets.items(), key=lambda item: (-item[1], item[0])))
+
+
+def _top_result_snapshot(results: List[Dict]) -> Dict[str, Any]:
+    rows = _normalize_result_rows(results)
+    if not rows:
+        return {}
+    top = rows[0]
+    metadata = top.get("metadata", {}) or {}
+    return {
+        "id": top.get("id", ""),
+        "score": round(float(top.get("score", 0.0) or 0.0), 4),
+        "support_score": round(float(top.get("support_score", 0.0) or 0.0), 4) if "support_score" in top else 0.0,
+        "final_support_score": round(float(top.get("final_support_score", 0.0) or 0.0), 4) if "final_support_score" in top else 0.0,
+        "score_type": str(top.get("score_type") or ""),
+        "document_type": str(metadata.get("document_type") or ""),
+        "establishment": get_metadata_establishment(metadata),
+        "source": str(metadata.get("source") or metadata.get("file_name") or ""),
+    }
+
+
 def _tokenize_normalized(text: str) -> Set[str]:
     return set(re.findall(r"\b[\w']+\b", normalize_text(text)))
 
@@ -755,9 +838,13 @@ def apply_retrieval_guardrails(
             should_drop = True
 
         if should_drop:
+            enriched["rejected"] = True
+            enriched["rejection_reasons"] = list(dict.fromkeys(enriched.get("reasons", []) or []))
             rejected.append(enriched)
             continue
 
+        enriched["rejected"] = False
+        enriched["rejection_reasons"] = []
         guarded.append(enriched)
 
     guarded.sort(
@@ -776,6 +863,8 @@ def apply_retrieval_guardrails(
         "guarded_count": len(guarded),
         "rejected_count": len(rejected),
         "rejection_reasons_top": [item.get("reasons", []) for item in rejected[:5]],
+        "rejection_reason_buckets": _bucket_rejection_reasons(rejected),
+        "rejected_results": rejected,
         "top_k_requested": top_k,
     }
     return guarded[: max(TOP_K_RETRIEVE, top_k * 4)], diagnostics
@@ -862,6 +951,238 @@ def decide_retrieval_abstention(results: List[Dict], query_profile: Dict[str, An
     return {"abstain": False, "reason": ""}
 
 
+def _empty_debug_payload(raw_query: str, top_k: int, allowed_establishments: Optional[List[str]] = None) -> Dict[str, object]:
+    normalized_allowed = _normalize_allowed_establishments(allowed_establishments)
+    return {
+        "query": "",
+        "raw_query": raw_query,
+        "query_variants": [],
+        "dense_results": [],
+        "sparse_results": [],
+        "fusion_results": [],
+        "merged_results": [],
+        "boosted_results": [],
+        "guarded_results": [],
+        "reranked_results": [],
+        "final_ranked_results": [],
+        "fallback_results": [],
+        "final_results": [],
+        "abstain": True,
+        "abstain_reason": "empty_query",
+        "query_profile": {},
+        "guardrail_diagnostics": {},
+        "allowed_establishments_normalized": normalized_allowed,
+        "candidate_retrieval": {},
+        "trace": {
+            "pipeline_version": "retrieval_explicit_v1",
+            "stages": {
+                "prepare_query": {
+                    "raw_query": raw_query,
+                    "query": "",
+                    "query_variants": [],
+                    "allowed_establishments": normalized_allowed,
+                },
+            },
+            "decision_summary": {
+                "abstain": True,
+                "abstain_reason": "empty_query",
+                "fallback_used": False,
+                "top_k_requested": max(1, int(top_k or TOP_K_FINAL)),
+                "final_result_count": 0,
+                "top_result": {},
+            },
+        },
+    }
+
+
+def _build_explicit_retrieval_pipeline(
+    raw_query: str,
+    top_k: int,
+    allowed_establishments: Optional[List[str]] = None,
+    manifest_override: Optional[Dict[str, Any]] = None,
+) -> Dict[str, object]:
+    if not raw_query or not raw_query.strip():
+        return _empty_debug_payload(raw_query, top_k, allowed_establishments=allowed_establishments)
+
+    from .qdrant_search import run_qdrant_candidate_search
+
+    started_at = time.perf_counter()
+    effective_top_k = max(1, int(top_k))
+    query = enhance_query(raw_query)
+    normalized_allowed = _normalize_allowed_establishments(allowed_establishments)
+    query_profile = build_query_profile(query, allowed_establishments=normalized_allowed)
+    retrieve_k = max(TOP_K_RETRIEVE * 2, effective_top_k * 6)
+    if normalized_allowed:
+        retrieve_k = max(retrieve_k, 60)
+    queries = generate_multi_queries(query)
+
+    candidate_payload = run_qdrant_candidate_search(
+        query=query,
+        queries=queries,
+        query_profile=query_profile,
+        retrieve_k=retrieve_k,
+        allowed_establishments=normalized_allowed,
+        manifest_override=manifest_override,
+    )
+
+    dense_results = _normalize_result_rows(list(candidate_payload.get("dense_results", [])))
+    sparse_results = _normalize_result_rows(list(candidate_payload.get("sparse_results", [])))
+    fusion_results = _normalize_result_rows(list(candidate_payload.get("fusion_results", [])))
+    merged_results = _normalize_result_rows(merge_dense_and_sparse(dense_results, sparse_results, top_k=retrieve_k))
+
+    dense_by_id = {result.get("id"): result for result in dense_results}
+    sparse_by_id = {result.get("id"): result for result in sparse_results}
+    merged_by_id = {result.get("id"): result for result in merged_results}
+    ranking_seed = fusion_results or merged_results
+    enriched_merged: List[Dict] = []
+    for result in ranking_seed:
+        item = _normalize_result_row(result)
+        fallback_scores = merged_by_id.get(item.get("id"), {})
+        item["dense_score"] = float(dense_by_id.get(item.get("id"), {}).get("score", 0.0) or 0.0)
+        item["sparse_score"] = float(sparse_by_id.get(item.get("id"), {}).get("score", 0.0) or 0.0)
+        if "hybrid_raw_score" not in item and "hybrid_raw_score" in fallback_scores:
+            item["hybrid_raw_score"] = float(fallback_scores.get("hybrid_raw_score", 0.0) or 0.0)
+        item["score_type"] = str(fallback_scores.get("score_type") or item.get("score_type") or "hybrid")
+        item["retrieval_sources"] = [
+            source
+            for source, lookup in (("dense", dense_by_id), ("sparse", sparse_by_id))
+            if item.get("id") in lookup
+        ]
+        enriched_merged.append(_normalize_result_row(item))
+
+    boosted_results = _normalize_result_rows(
+        _filter_results_by_allowed_establishments(apply_metadata_boost(enriched_merged, query), normalized_allowed)
+    )
+    guarded_results, guardrail_diagnostics = apply_retrieval_guardrails(
+        query,
+        boosted_results,
+        top_k=effective_top_k,
+        allowed_establishments=normalized_allowed,
+    )
+    guarded_results = _normalize_result_rows(guarded_results)
+    rejected_results = _normalize_result_rows(list(guardrail_diagnostics.get("rejected_results", [])))
+
+    reranked_results = _normalize_result_rows(rerank_chunks(query, guarded_results, top_k=max(effective_top_k * 2, effective_top_k)))
+    final_ranked_results = _normalize_result_rows(
+        apply_post_rerank_guardrails(
+            _filter_results_by_allowed_establishments(reranked_results, normalized_allowed),
+            query_profile=guardrail_diagnostics.get("query_profile", {}),
+            top_k=effective_top_k,
+        )
+    )
+    abstention = decide_retrieval_abstention(final_ranked_results, guardrail_diagnostics.get("query_profile", {}))
+    fallback_results = _normalize_result_rows(
+        select_support_fallback_results(
+            _filter_results_by_allowed_establishments(guarded_results, normalized_allowed),
+            query_profile=guardrail_diagnostics.get("query_profile", {}),
+            top_k=effective_top_k,
+        )
+    )
+
+    fallback_used = False
+    if abstention["abstain"] and abstention["reason"] == "top_rerank_too_low" and fallback_results:
+        final_results = _normalize_result_rows(truncate_chunks(fallback_results, MAX_CONTEXT_CHARS))
+        abstention = {"abstain": False, "reason": "support_fallback"}
+        fallback_used = True
+    else:
+        final_results = [] if abstention["abstain"] else _normalize_result_rows(
+            truncate_chunks(
+                _filter_results_by_allowed_establishments(final_ranked_results, normalized_allowed),
+                MAX_CONTEXT_CHARS,
+            )
+        )
+
+    reranked_ids = {item.get("id") for item in reranked_results if item.get("id")}
+    final_ranked_ids = {item.get("id") for item in final_ranked_results if item.get("id")}
+    post_rerank_rejected = [
+        item
+        for item in reranked_results
+        if item.get("id") and item.get("id") in reranked_ids - final_ranked_ids
+    ]
+
+    total_latency_ms = round((time.perf_counter() - started_at) * 1000.0, 2)
+    trace = {
+        "pipeline_version": "retrieval_explicit_v1",
+        "stages": {
+            "prepare_query": {
+                "raw_query": raw_query,
+                "query": query,
+                "query_variants": queries,
+                "allowed_establishments": normalized_allowed,
+                "query_profile": query_profile,
+            },
+            "candidate_retrieval": {
+                "backend": "qdrant",
+                "retrieve_k": retrieve_k,
+                "manifest": candidate_payload.get("manifest", {}),
+                "query_filter_applied": bool(candidate_payload.get("query_filter_applied")),
+                "query_filter": candidate_payload.get("query_filter"),
+                "latency_ms": candidate_payload.get("latency_ms", {}),
+                "dense": _summarize_results(dense_results),
+                "sparse": _summarize_results(sparse_results),
+                "fusion": _summarize_results(fusion_results),
+            },
+            "candidate_merge": {
+                "merged": _summarize_results(enriched_merged),
+            },
+            "metadata_boost": {
+                "boosted": _summarize_results(boosted_results),
+            },
+            "guardrails": {
+                "guarded": _summarize_results(guarded_results),
+                "rejected_count": len(rejected_results),
+                "rejection_reason_buckets": _bucket_rejection_reasons(rejected_results),
+            },
+            "rerank": {
+                "enabled": bool(USE_RERANK),
+                "reranked": _summarize_results(reranked_results),
+                "post_rerank_rejected_count": len(post_rerank_rejected),
+            },
+            "final_selection": {
+                "final_ranked": _summarize_results(final_ranked_results),
+                "fallback": _summarize_results(fallback_results),
+                "final_results": _summarize_results(final_results),
+                "latency_ms_total": total_latency_ms,
+            },
+        },
+        "decision_summary": {
+            "abstain": bool(abstention["abstain"]),
+            "abstain_reason": str(abstention["reason"] or ""),
+            "fallback_used": fallback_used,
+            "top_k_requested": effective_top_k,
+            "final_result_count": len(final_results),
+            "top_result": _top_result_snapshot(final_results),
+        },
+    }
+
+    return {
+        "query": query,
+        "raw_query": raw_query,
+        "query_variants": queries,
+        "dense_results": dense_results,
+        "sparse_results": sparse_results,
+        "fusion_results": fusion_results,
+        "merged_results": enriched_merged,
+        "boosted_results": boosted_results,
+        "guarded_results": guarded_results,
+        "reranked_results": reranked_results,
+        "final_ranked_results": final_ranked_results,
+        "fallback_results": fallback_results,
+        "final_results": final_results,
+        "abstain": bool(abstention["abstain"]),
+        "abstain_reason": str(abstention["reason"] or ""),
+        "query_profile": guardrail_diagnostics.get("query_profile", query_profile),
+        "guardrail_diagnostics": {
+            **guardrail_diagnostics,
+            "rejected_results": rejected_results,
+            "rejection_reason_buckets": _bucket_rejection_reasons(rejected_results),
+        },
+        "allowed_establishments_normalized": normalized_allowed,
+        "candidate_retrieval": candidate_payload,
+        "trace": trace,
+    }
+
+
 def is_search_backend_ready() -> bool:
     try:
         from .qdrant_search import qdrant_index_ready
@@ -877,9 +1198,7 @@ def run_hybrid_search_debug(
     allowed_establishments: Optional[List[str]] = None,
     manifest_override: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, object]:
-    from .qdrant_search import run_qdrant_search_debug
-
-    return run_qdrant_search_debug(
+    return _build_explicit_retrieval_pipeline(
         raw_query,
         top_k=top_k,
         allowed_establishments=allowed_establishments,
@@ -893,14 +1212,13 @@ def get_relevant_chunks(
     allowed_establishments: Optional[List[str]] = None,
     manifest_override: Optional[Dict[str, Any]] = None,
 ) -> List[Dict]:
-    from .qdrant_search import get_relevant_chunks_qdrant
-
-    return get_relevant_chunks_qdrant(
+    debug_payload = _build_explicit_retrieval_pipeline(
         raw_query,
         top_k=top_k,
         allowed_establishments=allowed_establishments,
         manifest_override=manifest_override,
     )
+    return list(debug_payload.get("final_results", []))
 
 
 if __name__ == "__main__":

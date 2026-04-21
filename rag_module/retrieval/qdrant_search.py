@@ -1,4 +1,5 @@
 import logging
+import time
 from functools import lru_cache
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -159,6 +160,26 @@ def _merge_query_variant_results(result_batches: List[List[Dict]], limit: int) -
     return rows[:limit]
 
 
+def _time_search_call(search_fn, *args, **kwargs) -> tuple[List[Dict], float]:
+    started = time.perf_counter()
+    results = search_fn(*args, **kwargs)
+    elapsed_ms = (time.perf_counter() - started) * 1000.0
+    return results, round(elapsed_ms, 2)
+
+
+def _serialize_query_filter(query_filter: models.Filter | None) -> Dict | None:
+    if query_filter is None:
+        return None
+    try:
+        if hasattr(query_filter, "model_dump"):
+            return query_filter.model_dump(exclude_none=True)
+        if hasattr(query_filter, "dict"):
+            return query_filter.dict(exclude_none=True)  # type: ignore[attr-defined]
+    except Exception:
+        return {"repr": repr(query_filter)}
+    return {"repr": repr(query_filter)}
+
+
 def _dense_search(query: str, query_filter: models.Filter | None, limit: int, manifest: Optional[Dict] = None) -> List[Dict]:
     active_manifest = load_qdrant_manifest_or_raise(manifest_override=manifest)
     client = get_qdrant_client()
@@ -261,6 +282,65 @@ def _multi_query_fusion_search(
     return _merge_query_variant_results(batches, limit=limit)
 
 
+def run_qdrant_candidate_search(
+    query: str,
+    queries: List[str],
+    query_profile: Dict,
+    retrieve_k: int,
+    allowed_establishments: Optional[List[str]] = None,
+    manifest_override: Optional[Dict] = None,
+) -> Dict[str, object]:
+    active_manifest = load_qdrant_manifest_or_raise(manifest_override=manifest_override)
+    normalized_queries = [item for item in queries if (item or "").strip()]
+    query_filter = _query_filter(query_profile, allowed_establishments=allowed_establishments)
+
+    dense_results, dense_latency_ms = _time_search_call(
+        _multi_query_dense_search,
+        normalized_queries,
+        query_filter=query_filter,
+        limit=retrieve_k,
+        manifest=active_manifest,
+    )
+    sparse_results, sparse_latency_ms = _time_search_call(
+        _multi_query_sparse_search,
+        normalized_queries,
+        query_filter=query_filter,
+        limit=retrieve_k,
+        manifest=active_manifest,
+    )
+    fusion_results, fusion_latency_ms = _time_search_call(
+        _multi_query_fusion_search,
+        normalized_queries,
+        query_filter=query_filter,
+        limit=retrieve_k,
+        manifest=active_manifest,
+    )
+
+    return {
+        "query": query,
+        "queries": normalized_queries,
+        "retrieve_k": int(retrieve_k),
+        "query_filter_applied": query_filter is not None,
+        "query_filter": _serialize_query_filter(query_filter),
+        "manifest": {
+            "collection_name": _resolve_collection_name(active_manifest),
+            "published_collection_name": str(active_manifest.get("published_collection_name") or ""),
+            "active_alias_name": str(active_manifest.get("active_alias_name") or qdrant_active_alias_name()),
+            "model_name": str(active_manifest.get("model_name") or ""),
+            "vector_store": str(active_manifest.get("vector_store") or "qdrant"),
+        },
+        "latency_ms": {
+            "dense": dense_latency_ms,
+            "sparse": sparse_latency_ms,
+            "fusion": fusion_latency_ms,
+            "total": round(dense_latency_ms + sparse_latency_ms + fusion_latency_ms, 2),
+        },
+        "dense_results": dense_results,
+        "sparse_results": sparse_results,
+        "fusion_results": fusion_results,
+    }
+
+
 def run_qdrant_search_debug(
     raw_query: str,
     top_k: int = 5,
@@ -268,101 +348,12 @@ def run_qdrant_search_debug(
     manifest_override: Optional[Dict] = None,
 ) -> Dict[str, object]:
     legacy = _legacy_search_module()
-    if not raw_query or not raw_query.strip():
-        return {
-            "query": "",
-            "dense_results": [],
-            "sparse_results": [],
-            "merged_results": [],
-            "boosted_results": [],
-            "guarded_results": [],
-            "final_results": [],
-            "abstain": True,
-            "abstain_reason": "empty_query",
-            "query_profile": {},
-        }
-
-    top_k = max(1, int(top_k))
-    query = legacy.enhance_query(raw_query)
-    normalized_allowed = legacy._normalize_allowed_establishments(allowed_establishments)
-    query_profile = legacy.build_query_profile(query, allowed_establishments=normalized_allowed)
-    query_filter = _query_filter(query_profile, allowed_establishments=normalized_allowed)
-    retrieve_k = max(legacy.TOP_K_RETRIEVE * 2, top_k * 6)
-    if normalized_allowed:
-        retrieve_k = max(retrieve_k, 60)
-    queries = legacy.generate_multi_queries(query)
-
-    dense_results = _multi_query_dense_search(queries, query_filter=query_filter, limit=retrieve_k, manifest=manifest_override)
-    sparse_results = _multi_query_sparse_search(queries, query_filter=query_filter, limit=retrieve_k, manifest=manifest_override)
-    fusion_results = _multi_query_fusion_search(queries, query_filter=query_filter, limit=retrieve_k, manifest=manifest_override)
-    merged_results = legacy.merge_dense_and_sparse(dense_results, sparse_results, top_k=retrieve_k)
-
-    dense_by_id = {result.get("id"): result for result in dense_results}
-    sparse_by_id = {result.get("id"): result for result in sparse_results}
-    manual_merged_by_id = {result.get("id"): result for result in merged_results}
-    ranking_seed = fusion_results or merged_results
-    enriched_merged: List[Dict] = []
-    for result in ranking_seed:
-        item = dict(result)
-        fallback_scores = manual_merged_by_id.get(item.get("id"), {})
-        item["dense_score"] = float(dense_by_id.get(item.get("id"), {}).get("score", 0.0) or 0.0)
-        item["sparse_score"] = float(sparse_by_id.get(item.get("id"), {}).get("score", 0.0) or 0.0)
-        if "hybrid_raw_score" not in item and "hybrid_raw_score" in fallback_scores:
-            item["hybrid_raw_score"] = float(fallback_scores.get("hybrid_raw_score", 0.0) or 0.0)
-        if item.get("score_type") != "hybrid":
-            item["score_type"] = str(fallback_scores.get("score_type") or item.get("score_type") or "hybrid")
-        item["retrieval_sources"] = [
-            source
-            for source, lookup in (("dense", dense_by_id), ("sparse", sparse_by_id))
-            if item.get("id") in lookup
-        ]
-        enriched_merged.append(item)
-
-    boosted = legacy._filter_results_by_allowed_establishments(
-        legacy.apply_metadata_boost(enriched_merged, query),
-        normalized_allowed,
-    )
-    guarded, guardrail_diagnostics = legacy.apply_retrieval_guardrails(
-        query,
-        boosted,
+    return legacy.run_hybrid_search_debug(
+        raw_query,
         top_k=top_k,
-        allowed_establishments=normalized_allowed,
+        allowed_establishments=allowed_establishments,
+        manifest_override=manifest_override,
     )
-    reranked = legacy.rerank_chunks(query, guarded, top_k=max(top_k * 2, top_k))
-    final_ranked = legacy.apply_post_rerank_guardrails(
-        legacy._filter_results_by_allowed_establishments(reranked, normalized_allowed),
-        query_profile=guardrail_diagnostics.get("query_profile", {}),
-        top_k=top_k,
-    )
-    abstention = legacy.decide_retrieval_abstention(final_ranked, guardrail_diagnostics.get("query_profile", {}))
-    fallback_results = legacy.select_support_fallback_results(
-        legacy._filter_results_by_allowed_establishments(guarded, normalized_allowed),
-        query_profile=guardrail_diagnostics.get("query_profile", {}),
-        top_k=top_k,
-    )
-    if abstention["abstain"] and abstention["reason"] == "top_rerank_too_low" and fallback_results:
-        final_results = legacy.truncate_chunks(fallback_results, legacy.MAX_CONTEXT_CHARS)
-        abstention = {"abstain": False, "reason": "support_fallback"}
-    else:
-        final_results = [] if abstention["abstain"] else legacy.truncate_chunks(
-            legacy._filter_results_by_allowed_establishments(final_ranked, normalized_allowed),
-            legacy.MAX_CONTEXT_CHARS,
-        )
-
-    return {
-        "query": query,
-        "dense_results": dense_results,
-        "sparse_results": sparse_results,
-        "fusion_results": fusion_results,
-        "merged_results": enriched_merged,
-        "boosted_results": boosted,
-        "guarded_results": guarded,
-        "final_results": final_results,
-        "abstain": abstention["abstain"],
-        "abstain_reason": abstention["reason"],
-        "query_profile": guardrail_diagnostics.get("query_profile", {}),
-        "guardrail_diagnostics": guardrail_diagnostics,
-    }
 
 
 def get_relevant_chunks_qdrant(
@@ -371,10 +362,10 @@ def get_relevant_chunks_qdrant(
     allowed_establishments: Optional[List[str]] = None,
     manifest_override: Optional[Dict] = None,
 ) -> List[Dict]:
-    debug_payload = run_qdrant_search_debug(
+    legacy = _legacy_search_module()
+    return legacy.get_relevant_chunks(
         raw_query,
         top_k=top_k,
         allowed_establishments=allowed_establishments,
         manifest_override=manifest_override,
     )
-    return list(debug_payload.get("final_results", []))

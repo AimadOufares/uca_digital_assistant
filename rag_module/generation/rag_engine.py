@@ -2,6 +2,7 @@ import logging
 import math
 import os
 import re
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -39,6 +40,7 @@ DEFAULT_MAX_TOKENS = 420
 DEFAULT_TEMPERATURE = 0.15
 DEFAULT_REQUEST_TIMEOUT = 120.0
 DEFAULT_RETRIEVAL_K = 4
+MIN_GENERATED_ANSWER_CHARS = 40
 
 
 def _env_int(name: str, default: int) -> int:
@@ -68,6 +70,13 @@ def _safe_sentences(text: str) -> List[str]:
         return []
     parts = re.split(r"(?<=[.!?])\s+", text.strip())
     return [p.strip() for p in parts if p.strip()]
+
+
+def _safe_preview(text: str, max_chars: int = 220) -> str:
+    value = re.sub(r"\s+", " ", str(text or "")).strip()
+    if len(value) <= max_chars:
+        return value
+    return value[:max_chars].rstrip() + "..."
 
 
 def _confidence_label_from_chunks(chunks: List[Dict]) -> str:
@@ -156,16 +165,101 @@ def _abstention_answer() -> str:
     return "Information non disponible dans mes sources actuelles."
 
 
-def _generate_with_openai(prompt: str) -> str:
+def _normalize_confidence_label(value: str) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized in {"eleve", "moyen", "faible"}:
+        return normalized
+    return "moyen"
+
+
+def _extract_primary_answer_text(answer: str) -> str:
+    text = str(answer or "").strip()
+    if not text:
+        return ""
+    match = re.search(
+        r"Reponse\s*(.*?)(?:\n\s*Sources utiles|\n\s*Niveau de confiance|\n\s*Points a verifier|\Z)",
+        text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if match:
+        return match.group(1).strip()
+    return text
+
+
+def _ensure_structured_answer(answer: str, chunks: List[Dict]) -> str:
+    text = str(answer or "").strip()
+    if not text:
+        return ""
+
+    primary_answer = _extract_primary_answer_text(text)
+    sources = _fallback_sources_section(chunks)
+    if not sources:
+        sources = ["Aucune source pertinente disponible."]
+    confidence_label = _confidence_label_from_chunks(chunks)
+
+    has_reponse = bool(re.search(r"^\s*Reponse\b", text, flags=re.IGNORECASE | re.MULTILINE))
+    has_sources = bool(re.search(r"^\s*Sources utiles\b", text, flags=re.IGNORECASE | re.MULTILINE))
+    has_confidence = bool(re.search(r"^\s*Niveau de confiance\b", text, flags=re.IGNORECASE | re.MULTILINE))
+
+    if has_reponse and has_sources and has_confidence:
+        return text
+
+    structured_parts = [
+        "Reponse",
+        primary_answer or text,
+        "",
+        "Sources utiles",
+        *[f"- {item}" for item in sources],
+        "",
+        f"Niveau de confiance: {_normalize_confidence_label(confidence_label)}",
+    ]
+    return "\n".join(structured_parts).strip()
+
+
+def _generated_answer_is_usable(answer: str) -> bool:
+    text = str(answer or "").strip()
+    if len(text) < MIN_GENERATED_ANSWER_CHARS:
+        return False
+    primary_answer = _extract_primary_answer_text(text)
+    if len(primary_answer) < 20:
+        return False
+    if primary_answer.strip().lower() == _abstention_answer().lower():
+        return False
+    return True
+
+
+def _generation_backend_status(
+    *,
+    backend: str,
+    success: bool,
+    model: str = "",
+    latency_ms: float = 0.0,
+    answer: str = "",
+    error: str = "",
+) -> Dict[str, Any]:
+    return {
+        "backend": backend,
+        "success": bool(success),
+        "model": str(model or ""),
+        "latency_ms": round(float(latency_ms or 0.0), 2),
+        "answer": str(answer or ""),
+        "answer_preview": _safe_preview(answer),
+        "answer_chars": len(str(answer or "")),
+        "error": str(error or ""),
+    }
+
+
+def _generate_with_openai(prompt: str) -> Dict[str, Any]:
     api_key = os.getenv("OPENAI_API_KEY", "").strip()
     if not api_key or OpenAI is None:
-        return ""
+        return _generation_backend_status(backend="openai", success=False, model="", error="openai_unavailable")
 
     model = os.getenv("RAG_CHAT_MODEL", DEFAULT_OPENAI_MODEL).strip() or DEFAULT_OPENAI_MODEL
     max_tokens = _env_int("RAG_MAX_TOKENS", DEFAULT_MAX_TOKENS)
     temperature = _env_float("RAG_TEMPERATURE", DEFAULT_TEMPERATURE)
     timeout = _env_float("RAG_REQUEST_TIMEOUT", DEFAULT_REQUEST_TIMEOUT)
     client = OpenAI(api_key=api_key, timeout=timeout)
+    started = time.perf_counter()
 
     try:
         response = client.responses.create(
@@ -174,10 +268,23 @@ def _generate_with_openai(prompt: str) -> str:
             temperature=temperature,
             max_output_tokens=max_tokens,
         )
-        return (getattr(response, "output_text", "") or "").strip()
+        answer = (getattr(response, "output_text", "") or "").strip()
+        return _generation_backend_status(
+            backend="openai",
+            success=bool(answer),
+            model=model,
+            latency_ms=(time.perf_counter() - started) * 1000.0,
+            answer=answer,
+        )
     except Exception as exc:
         logger.warning("Generation OpenAI indisponible, fallback local active: %s", exc)
-        return ""
+        return _generation_backend_status(
+            backend="openai",
+            success=False,
+            model=model,
+            latency_ms=(time.perf_counter() - started) * 1000.0,
+            error=str(exc),
+        )
 
 
 def _is_embedding_model(model_id: str) -> bool:
@@ -201,9 +308,9 @@ def _resolve_lm_studio_model(client: Any, configured_model: str) -> str:
         return ""
 
 
-def _generate_with_lm_studio(prompt: str) -> str:
+def _generate_with_lm_studio(prompt: str) -> Dict[str, Any]:
     if OpenAI is None:
-        return ""
+        return _generation_backend_status(backend="lmstudio", success=False, model="", error="openai_sdk_unavailable")
 
     base_url = os.getenv("LM_STUDIO_BASE_URL", DEFAULT_LM_STUDIO_BASE_URL).strip()
     configured_model = os.getenv("RAG_LM_STUDIO_MODEL", DEFAULT_LM_STUDIO_MODEL).strip()
@@ -213,13 +320,15 @@ def _generate_with_lm_studio(prompt: str) -> str:
     timeout = _env_float("RAG_REQUEST_TIMEOUT", DEFAULT_REQUEST_TIMEOUT)
 
     if not base_url:
-        return ""
+        return _generation_backend_status(backend="lmstudio", success=False, model="", error="lmstudio_base_url_missing")
 
     client = OpenAI(base_url=base_url, api_key=api_key, timeout=timeout)
     model = _resolve_lm_studio_model(client, configured_model)
     if not model:
         logger.warning("Aucun modele LM Studio texte n'a ete trouve.")
-        return ""
+        return _generation_backend_status(backend="lmstudio", success=False, model="", error="lmstudio_model_missing")
+
+    started = time.perf_counter()
 
     try:
         response = client.chat.completions.create(
@@ -230,13 +339,32 @@ def _generate_with_lm_studio(prompt: str) -> str:
         )
         choices = getattr(response, "choices", []) or []
         if not choices:
-            return ""
+            return _generation_backend_status(
+                backend="lmstudio",
+                success=False,
+                model=model,
+                latency_ms=(time.perf_counter() - started) * 1000.0,
+                error="lmstudio_empty_choices",
+            )
         message = getattr(choices[0], "message", None)
         content = getattr(message, "content", "") if message is not None else ""
-        return (content or "").strip()
+        answer = (content or "").strip()
+        return _generation_backend_status(
+            backend="lmstudio",
+            success=bool(answer),
+            model=model,
+            latency_ms=(time.perf_counter() - started) * 1000.0,
+            answer=answer,
+        )
     except Exception as exc:
         logger.warning("LM Studio indisponible (%s).", exc)
-        return ""
+        return _generation_backend_status(
+            backend="lmstudio",
+            success=False,
+            model=model,
+            latency_ms=(time.perf_counter() - started) * 1000.0,
+            error=str(exc),
+        )
 
 
 def _generation_order() -> List[str]:
@@ -319,18 +447,19 @@ class RAGEngine:
         env_prompt_style = os.getenv("RAG_PROMPT_STYLE", prompt_style).strip().lower()
         self.prompt_style = env_prompt_style if env_prompt_style in {"auto", "standard", "concise"} else "auto"
 
-    def retrieve(self, query: str, resolution_context: Optional[Dict] = None) -> List[Dict]:
+    def retrieve_debug(self, query: str, resolution_context: Optional[Dict] = None) -> Dict[str, Any]:
         try:
             from ..retrieval import rag_search
 
             if not rag_search.is_search_backend_ready():
                 raise RAGIndexNotReadyError("Index RAG introuvable. Lancez d'abord l'indexation.")
             allowed_establishments = allowed_establishments_for_resolution(resolution_context or {})
-            return rag_search.get_relevant_chunks(
+            debug_payload = rag_search.run_hybrid_search_debug(
                 query,
                 top_k=self.retrieval_k,
                 allowed_establishments=allowed_establishments,
             )
+            return debug_payload if isinstance(debug_payload, dict) else {}
         except FileNotFoundError as exc:
             raise RAGIndexNotReadyError("Index RAG introuvable. Lancez d'abord l'indexation.") from exc
         except RAGIndexNotReadyError:
@@ -340,26 +469,74 @@ class RAGEngine:
                 "Le moteur de recherche RAG n'est pas pret (index ou modeles indisponibles)."
             ) from exc
 
-    def generate(self, query: str, chunks: List[Dict], resolution_context: Optional[Dict] = None) -> str:
-        if not chunks:
-            return _abstention_answer()
+    def retrieve(self, query: str, resolution_context: Optional[Dict] = None) -> List[Dict]:
+        retrieval_debug = self.retrieve_debug(query, resolution_context=resolution_context)
+        return list(retrieval_debug.get("final_results", []))
 
-        backends = _generation_order()
-        prompt_style = self.prompt_style
-        if prompt_style == "auto":
-            prompt_style = "standard"
+    def _effective_prompt_style(self) -> str:
+        return "standard" if self.prompt_style == "auto" else self.prompt_style
 
+    def _build_generation_prompt(self, query: str, chunks: List[Dict], resolution_context: Optional[Dict] = None) -> Dict[str, Any]:
+        prompt_style = self._effective_prompt_style()
         prompt = build_rag_prompt(
             query=query,
             chunks=chunks,
             style=prompt_style,
             resolution_context=resolution_context,
         )
-        for backend in backends:
-            answer = _generate_with_lm_studio(prompt) if backend == "lmstudio" else _generate_with_openai(prompt)
-            if answer:
-                return answer
-        return _extractive_fallback_answer(query, chunks)
+        return {
+            "prompt": prompt,
+            "prompt_style": prompt_style,
+            "prompt_chars": len(prompt),
+            "chunk_count": len(chunks),
+            "confidence_label": _confidence_label_from_chunks(chunks),
+            "sources_preview": _fallback_sources_section(chunks),
+        }
+
+    def generate_with_debug(self, query: str, chunks: List[Dict], resolution_context: Optional[Dict] = None) -> Dict[str, Any]:
+        if not chunks:
+            return {
+                "answer": _abstention_answer(),
+                "backend": "none",
+                "used_fallback": True,
+                "fallback_type": "abstention",
+                "backend_attempts": [],
+                "prompt": {"prompt_style": self._effective_prompt_style(), "prompt_chars": 0, "chunk_count": 0},
+            }
+
+        prompt_payload = self._build_generation_prompt(query, chunks, resolution_context=resolution_context)
+        prompt = str(prompt_payload.get("prompt") or "")
+        backend_attempts: List[Dict[str, Any]] = []
+
+        for backend in _generation_order():
+            result = _generate_with_lm_studio(prompt) if backend == "lmstudio" else _generate_with_openai(prompt)
+            backend_attempts.append(result)
+            raw_candidate_answer = str(result.get("answer") or "")
+            candidate_answer = _ensure_structured_answer(raw_candidate_answer, chunks)
+            if result.get("success"):
+                normalized_answer = candidate_answer or _ensure_structured_answer(raw_candidate_answer, chunks)
+                if _generated_answer_is_usable(normalized_answer):
+                    return {
+                        "answer": normalized_answer,
+                        "backend": backend,
+                        "used_fallback": False,
+                        "fallback_type": "",
+                        "backend_attempts": backend_attempts,
+                        "prompt": {key: value for key, value in prompt_payload.items() if key != "prompt"},
+                    }
+
+        fallback_answer = _extractive_fallback_answer(query, chunks)
+        return {
+            "answer": fallback_answer,
+            "backend": "fallback",
+            "used_fallback": True,
+            "fallback_type": "extractive",
+            "backend_attempts": backend_attempts,
+            "prompt": {key: value for key, value in prompt_payload.items() if key != "prompt"},
+        }
+
+    def generate(self, query: str, chunks: List[Dict], resolution_context: Optional[Dict] = None) -> str:
+        return str(self.generate_with_debug(query, chunks, resolution_context=resolution_context).get("answer") or "")
 
     def answer(self, query: str, user_establishment: Optional[str] = None) -> Dict:
         cleaned_query = (query or "").strip()
@@ -384,11 +561,25 @@ class RAGEngine:
                 "resolution": resolution_context,
             }
 
-        chunks = self.retrieve(cleaned_query, resolution_context=resolution_context)
+        retrieval_debug = self.retrieve_debug(cleaned_query, resolution_context=resolution_context)
+        chunks = list(retrieval_debug.get("final_results", []))
         if not chunks:
-            return {"answer": _abstention_answer(), "sources": [], "resolution": resolution_context}
+            return {
+                "answer": _abstention_answer(),
+                "sources": [],
+                "resolution": resolution_context,
+                "retrieval_debug": retrieval_debug,
+                "generation_debug": {
+                    "backend": "none",
+                    "used_fallback": True,
+                    "fallback_type": "abstention",
+                    "backend_attempts": [],
+                    "prompt": {"prompt_style": self._effective_prompt_style(), "prompt_chars": 0, "chunk_count": 0},
+                },
+            }
         try:
-            answer = self.generate(cleaned_query, chunks, resolution_context=resolution_context)
+            generation_debug = self.generate_with_debug(cleaned_query, chunks, resolution_context=resolution_context)
+            answer = str(generation_debug.get("answer") or "")
         except Exception as exc:
             raise RAGGenerationError("Erreur lors de la generation de reponse.") from exc
 
@@ -396,6 +587,8 @@ class RAGEngine:
             "answer": answer.strip(),
             "sources": _normalize_sources(chunks),
             "resolution": resolution_context,
+            "retrieval_debug": retrieval_debug,
+            "generation_debug": generation_debug,
         }
 
 
