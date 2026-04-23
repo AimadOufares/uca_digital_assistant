@@ -27,9 +27,6 @@ except ImportError:  # pragma: no cover
 
 # ===================== CONFIG =====================
 RUNTIME = get_runtime_settings()
-RAW_PATH = str(RUNTIME.rag_raw_dir)
-PROCESSED_PATH = str(RUNTIME.rag_processed_dir)
-CACHE_FILE = str(RUNTIME.rag_cache_dir / "file_cache.json")
 PROCESSING_POLICY_VERSION = "v4_strict_quality_2026_04_05_r3_sourcehash"
 
 CHUNK_TOKENS = 500
@@ -46,6 +43,31 @@ MIN_LANG_CONFIDENCE = 0.85
 MAX_URLS_PER_CHUNK = 1
 MAX_REPEAT_CHAR_RUN = 6
 ALLOWED_LANGUAGES = {"fr", "ar", "en"}
+
+CORPUS_POLICIES = {
+    "main": {
+        "min_words": MIN_WORDS,
+        "min_doc_words": MIN_DOC_WORDS,
+        "min_doc_chars": MIN_DOC_CHARS,
+        "min_quality_score": MIN_QUALITY_SCORE,
+        "min_alpha_ratio": MIN_ALPHA_RATIO,
+        "max_digit_ratio": MAX_DIGIT_RATIO,
+        "max_symbol_ratio": MAX_SYMBOL_RATIO,
+        "min_unique_ratio": MIN_UNIQUE_TOKEN_RATIO,
+        "max_urls_per_chunk": MAX_URLS_PER_CHUNK,
+    },
+    "archive": {
+        "min_words": 6,
+        "min_doc_words": 80,
+        "min_doc_chars": 400,
+        "min_quality_score": 42,
+        "min_alpha_ratio": 0.50,
+        "max_digit_ratio": 0.35,
+        "max_symbol_ratio": 0.28,
+        "min_unique_ratio": 0.22,
+        "max_urls_per_chunk": 2,
+    },
+}
 
 NOISE_LINE_REGEXES = [
     r"^\s*(menu|home|accueil|contact|connexion|login|logout|search|rechercher)\s*$",
@@ -248,39 +270,72 @@ def quality_score(text: str) -> int:
     return int(max(0.0, min(100.0, round(score))))
 
 
-def is_high_quality_chunk(text: str) -> bool:
+def _corpus_paths(corpus: str) -> Tuple[str, str, str]:
+    if corpus == "archive":
+        return (
+            str(RUNTIME.rag_raw_archive_dir),
+            str(RUNTIME.rag_processed_archive_dir),
+            str(RUNTIME.rag_cache_dir / "file_cache_archive.json"),
+        )
+    return (
+        str(RUNTIME.rag_raw_main_dir),
+        str(RUNTIME.rag_processed_main_dir),
+        str(RUNTIME.rag_cache_dir / "file_cache_main.json"),
+    )
+
+
+def _corpus_policy(corpus: str) -> Dict[str, float]:
+    return CORPUS_POLICIES["archive" if corpus == "archive" else "main"]
+
+
+def _load_raw_metadata(corpus: str) -> Dict[str, Dict]:
+    raw_dir, _, _ = _corpus_paths(corpus)
+    metadata_path = Path(raw_dir) / ".metadata.json"
+    if not metadata_path.exists():
+        return {}
+    try:
+        with metadata_path.open("r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+        return payload if isinstance(payload, dict) else {}
+    except Exception:
+        return {}
+
+
+def is_high_quality_chunk(text: str, corpus: str = "main") -> bool:
+    policy = _corpus_policy(corpus)
     metrics = _text_metrics(text)
-    if metrics["words"] < MIN_WORDS:
+    if metrics["words"] < policy["min_words"]:
         return False
-    if metrics["alpha_ratio"] < MIN_ALPHA_RATIO:
+    if metrics["alpha_ratio"] < policy["min_alpha_ratio"]:
         return False
-    if metrics["digit_ratio"] > MAX_DIGIT_RATIO:
+    if metrics["digit_ratio"] > policy["max_digit_ratio"]:
         return False
-    if metrics["symbol_ratio"] > MAX_SYMBOL_RATIO:
+    if metrics["symbol_ratio"] > policy["max_symbol_ratio"]:
         return False
-    if metrics["unique_ratio"] < MIN_UNIQUE_TOKEN_RATIO:
+    if metrics["unique_ratio"] < policy["min_unique_ratio"]:
         return False
-    if metrics["url_count"] > MAX_URLS_PER_CHUNK:
+    if metrics["url_count"] > policy["max_urls_per_chunk"]:
         return False
-    return quality_score(text) >= MIN_QUALITY_SCORE
+    return quality_score(text) >= policy["min_quality_score"]
 
 
-def _is_high_quality_document(text: str) -> bool:
-    if len(text) < MIN_DOC_CHARS:
+def _is_high_quality_document(text: str, corpus: str = "main") -> bool:
+    policy = _corpus_policy(corpus)
+    if len(text) < policy["min_doc_chars"]:
         return False
-    if len(_tokenize_words(text)) < MIN_DOC_WORDS:
+    if len(_tokenize_words(text)) < policy["min_doc_words"]:
         return False
 
     metrics = _text_metrics(text[: min(len(text), 6000)])
-    if metrics["alpha_ratio"] < MIN_ALPHA_RATIO:
+    if metrics["alpha_ratio"] < policy["min_alpha_ratio"]:
         return False
-    if metrics["digit_ratio"] > MAX_DIGIT_RATIO:
+    if metrics["digit_ratio"] > policy["max_digit_ratio"]:
         return False
-    if metrics["symbol_ratio"] > MAX_SYMBOL_RATIO:
+    if metrics["symbol_ratio"] > policy["max_symbol_ratio"]:
         return False
-    if metrics["unique_ratio"] < MIN_UNIQUE_TOKEN_RATIO:
+    if metrics["unique_ratio"] < policy["min_unique_ratio"]:
         return False
-    if quality_score(text[: min(len(text), 6000)]) < MIN_QUALITY_SCORE:
+    if quality_score(text[: min(len(text), 6000)]) < policy["min_quality_score"]:
         return False
     return True
 
@@ -369,13 +424,13 @@ def split_sentences(text: str) -> List[str]:
     return [s.strip() for s in sentences if s.strip() and not _is_noise_line(s)]
 
 
-def recursive_chunk(text: str, chunk_size: int = CHUNK_TOKENS, overlap_tokens: int = OVERLAP_TOKENS) -> List[str]:
+def recursive_chunk(text: str, corpus: str = "main", chunk_size: int = CHUNK_TOKENS, overlap_tokens: int = OVERLAP_TOKENS) -> List[str]:
     text = clean_text(text)
     if not text:
         return []
 
     if len(ENCODER.encode(text)) <= chunk_size:
-        return [text] if is_high_quality_chunk(text) else []
+        return [text] if is_high_quality_chunk(text, corpus=corpus) else []
 
     paragraphs = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
 
@@ -398,17 +453,17 @@ def recursive_chunk(text: str, chunk_size: int = CHUNK_TOKENS, overlap_tokens: i
                         window.append(word)
                     else:
                         long_chunk = " ".join(window).strip()
-                        if is_high_quality_chunk(long_chunk):
+                        if is_high_quality_chunk(long_chunk, corpus=corpus):
                             chunks.append(long_chunk)
                         window = [word]
                 long_chunk = " ".join(window).strip()
-                if is_high_quality_chunk(long_chunk):
+                if is_high_quality_chunk(long_chunk, corpus=corpus):
                     chunks.append(long_chunk)
                 continue
 
             if current_tokens + sent_tokens > chunk_size and current:
                 chunk_text = " ".join(current).strip()
-                if is_high_quality_chunk(chunk_text):
+                if is_high_quality_chunk(chunk_text, corpus=corpus):
                     chunks.append(chunk_text)
 
                 overlap: List[str] = []
@@ -428,14 +483,14 @@ def recursive_chunk(text: str, chunk_size: int = CHUNK_TOKENS, overlap_tokens: i
 
     if current:
         chunk_text = " ".join(current).strip()
-        if is_high_quality_chunk(chunk_text):
+        if is_high_quality_chunk(chunk_text, corpus=corpus):
             chunks.append(chunk_text)
 
     return _deduplicate_chunk_texts(chunks)
 
 
 # ===================== PROCESS FILE =====================
-def preprocess_file(file_path: str) -> List[Dict]:
+def preprocess_file(file_path: str, corpus: str = "main", raw_metadata: Dict | None = None) -> List[Dict]:
     ext = Path(file_path).suffix.lower()
     extractors = {
         ".html": extract_text_html,
@@ -459,7 +514,7 @@ def preprocess_file(file_path: str) -> List[Dict]:
         return []
 
     cleaned_text = clean_text(raw_text)
-    if not _is_high_quality_document(cleaned_text):
+    if not _is_high_quality_document(cleaned_text, corpus=corpus):
         logger.info("Skip low-quality document: %s", Path(file_path).name)
         return []
 
@@ -468,7 +523,7 @@ def preprocess_file(file_path: str) -> List[Dict]:
         logger.info("Skip uncertain language document: %s", Path(file_path).name)
         return []
 
-    chunks = recursive_chunk(cleaned_text)
+    chunks = recursive_chunk(cleaned_text, corpus=corpus)
     if not chunks:
         return []
 
@@ -499,17 +554,23 @@ def preprocess_file(file_path: str) -> List[Dict]:
                 "quality_alpha_ratio": round(metrics["alpha_ratio"], 4),
                 "quality_unique_ratio": round(metrics["unique_ratio"], 4),
                 "date_processed": datetime.now(timezone.utc).isoformat(),
+                "corpus": corpus,
             }
         })
 
-    return postprocess_chunks_for_source(results, file_path)
+    if raw_metadata:
+        for result in results:
+            result["metadata"].update(raw_metadata)
+            result["metadata"]["corpus"] = corpus
+
+    return postprocess_chunks_for_source(results, file_path, corpus=corpus)
 
 
 # ===================== CACHE =====================
-def load_cache() -> Dict:
-    if os.path.exists(CACHE_FILE):
+def load_cache(cache_file: str) -> Dict:
+    if os.path.exists(cache_file):
         try:
-            with open(CACHE_FILE, encoding="utf-8") as f:
+            with open(cache_file, encoding="utf-8") as f:
                 raw = json.load(f)
             if isinstance(raw, dict) and "files" in raw and isinstance(raw["files"], dict):
                 files = {}
@@ -535,9 +596,9 @@ def load_cache() -> Dict:
     return {"version": 2, "files": {}}
 
 
-def save_cache(cache: Dict):
-    os.makedirs(os.path.dirname(CACHE_FILE), exist_ok=True)
-    with open(CACHE_FILE, "w", encoding="utf-8") as f:
+def save_cache(cache: Dict, cache_file: str):
+    os.makedirs(os.path.dirname(cache_file), exist_ok=True)
+    with open(cache_file, "w", encoding="utf-8") as f:
         json.dump(cache, f, indent=2, ensure_ascii=False)
 
 
@@ -554,10 +615,11 @@ def _delete_chunk_file_if_unreferenced(
     chunk_hash: str,
     refcounts: Dict[str, int],
     seen_chunks: set,
+    processed_path: str,
 ) -> bool:
     if refcounts.get(chunk_hash, 0) > 0:
         return False
-    path = os.path.join(PROCESSED_PATH, f"{chunk_hash}.json")
+    path = os.path.join(processed_path, f"{chunk_hash}.json")
     if os.path.exists(path):
         try:
             os.remove(path)
@@ -567,25 +629,26 @@ def _delete_chunk_file_if_unreferenced(
     return True
 
 
-# ===================== MAIN =====================
-def preprocess_all():
-    os.makedirs(PROCESSED_PATH, exist_ok=True)
-    backup_dir = create_backup(PROCESSED_PATH, CACHE_FILE)
+def _preprocess_corpus(corpus: str) -> None:
+    raw_path, processed_path, cache_file = _corpus_paths(corpus)
+    raw_metadata = _load_raw_metadata(corpus)
+    os.makedirs(processed_path, exist_ok=True)
+    backup_dir = create_backup(processed_path, cache_file)
     if backup_dir:
         logger.info("Backup created before cleanup: %s", backup_dir)
 
-    cache = load_cache()
+    cache = load_cache(cache_file)
     file_records: Dict[str, Dict] = cache.get("files", {})
-    seen_chunks = {Path(f).stem for f in os.listdir(PROCESSED_PATH) if f.endswith(".json")}
+    seen_chunks = {Path(f).stem for f in os.listdir(processed_path) if f.endswith(".json")}
     refcounts = _chunk_refcounts(file_records)
 
     files = [
         os.path.join(root, f)
-        for root, _, fs in os.walk(RAW_PATH)
+        for root, _, fs in os.walk(raw_path)
         for f in fs if not f.startswith(".")
     ]
 
-    logger.info("%s files detected in %s", len(files), RAW_PATH)
+    logger.info("%s files detected in %s [%s]", len(files), raw_path, corpus)
 
     deleted_sources = [p for p in list(file_records.keys()) if not os.path.exists(p)]
     removed_chunks = 0
@@ -596,7 +659,7 @@ def preprocess_all():
                 refcounts[ch] -= 1
                 if refcounts[ch] <= 0:
                     refcounts.pop(ch, None)
-            if _delete_chunk_file_if_unreferenced(ch, refcounts, seen_chunks):
+            if _delete_chunk_file_if_unreferenced(ch, refcounts, seen_chunks, processed_path):
                 removed_chunks += 1
     if deleted_sources:
         logger.info(
@@ -613,7 +676,7 @@ def preprocess_all():
             record = file_records.get(f, {})
             old_hashes = record.get("chunk_hashes", [])
             has_all_chunks = all(
-                os.path.exists(os.path.join(PROCESSED_PATH, f"{ch}.json")) for ch in old_hashes
+                os.path.exists(os.path.join(processed_path, f"{ch}.json")) for ch in old_hashes
             )
             if (
                 record.get("file_hash") == file_hash
@@ -622,7 +685,7 @@ def preprocess_all():
             ):
                 logger.info("Skip unchanged -> %s", Path(f).name)
                 continue
-            future_to_path[executor.submit(preprocess_file, f)] = (f, file_hash)
+            future_to_path[executor.submit(preprocess_file, f, corpus, raw_metadata.get(f, {}))] = (f, file_hash)
 
         for future in as_completed(future_to_path):
             path, file_hash = future_to_path[future]
@@ -640,13 +703,13 @@ def preprocess_all():
                         if refcounts[old_ch] <= 0:
                             refcounts.pop(old_ch, None)
                     if old_ch not in new_hashes_set:
-                        _delete_chunk_file_if_unreferenced(old_ch, refcounts, seen_chunks)
+                        _delete_chunk_file_if_unreferenced(old_ch, refcounts, seen_chunks, processed_path)
 
                 for chunk in chunks:
                     ch_hash = chunk["metadata"]["chunk_hash"]
                     if ch_hash in updated_chunk_hashes:
                         continue
-                    out_path = os.path.join(PROCESSED_PATH, f"{ch_hash}.json")
+                    out_path = os.path.join(processed_path, f"{ch_hash}.json")
                     existed = os.path.exists(out_path)
                     with open(out_path, "w", encoding="utf-8") as f:
                         json.dump(chunk, f, ensure_ascii=False, indent=2)
@@ -667,7 +730,8 @@ def preprocess_all():
                 }
 
                 logger.info(
-                    "Processed: %s -> %s chunks (%s saved, %s overwritten)",
+                    "Processed [%s]: %s -> %s chunks (%s saved, %s overwritten)",
+                    corpus,
                     Path(path).name,
                     len(chunks),
                     saved_count,
@@ -677,8 +741,17 @@ def preprocess_all():
             except Exception as e:
                 logger.error("Processing error for %s: %s", path, e)
 
-    save_cache({"version": 2, "files": file_records})
-    logger.info("Processing completed successfully.")
+    save_cache({"version": 2, "files": file_records}, cache_file)
+    logger.info("Processing completed successfully for corpus=%s.", corpus)
+
+
+# ===================== MAIN =====================
+def preprocess_all(corpus: str = "all"):
+    if corpus in {"main", "archive"}:
+        _preprocess_corpus(corpus)
+        return
+    for selected in ("main", "archive"):
+        _preprocess_corpus(selected)
 
 
 if __name__ == "__main__":

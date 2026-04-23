@@ -39,7 +39,7 @@ def _downsample_evenly(items: List[Dict], max_items: int) -> List[Dict]:
     return [items[index] for index in indices]
 
 
-def postprocess_chunks_for_source(chunks: List[Dict], source_path: str) -> List[Dict]:
+def postprocess_chunks_for_source(chunks: List[Dict], source_path: str, corpus: str = "main") -> List[Dict]:
     prepared_chunks: List[Dict] = []
     joined_text_parts: List[str] = []
 
@@ -71,8 +71,9 @@ def postprocess_chunks_for_source(chunks: List[Dict], source_path: str) -> List[
         metadata["source_relevance_hits"] = source_relevance_hits
         metadata["chunk_relevance_score"] = chunk_relevance_score
         metadata["chunk_relevance_hits"] = chunk_relevance_hits
+        metadata["corpus"] = corpus
 
-        if DOMAIN_FILTER_ENABLED and not should_keep_chunk(chunk_relevance_score):
+        if corpus == "main" and DOMAIN_FILTER_ENABLED and not should_keep_chunk(chunk_relevance_score):
             continue
 
         updated_chunk = dict(chunk)

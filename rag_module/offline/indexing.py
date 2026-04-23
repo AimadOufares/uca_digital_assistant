@@ -23,7 +23,7 @@ load_env_file()
 RUNTIME = get_runtime_settings()
 
 
-PROCESSED_PATH = str(RUNTIME.rag_processed_dir)
+PROCESSED_PATH = str(RUNTIME.rag_processed_main_dir)
 INDEX_PATH = str(RUNTIME.rag_index_dir)
 CACHE_PATH = str(RUNTIME.rag_cache_dir / "embeddings_cache.json")
 INDEX_MANIFEST_PATH = os.path.join(INDEX_PATH, "index_manifest.json")
@@ -154,8 +154,9 @@ def save_cache(cache: Dict[str, Dict[str, List[float]]]) -> None:
         json.dump(cache, handle, ensure_ascii=False)
 
 
-def load_chunks() -> List[Dict]:
-    files = sorted(Path(PROCESSED_PATH).glob("*.json"))
+def load_chunks(corpus: str = "main") -> List[Dict]:
+    processed_path = Path(RUNTIME.rag_processed_archive_dir if corpus == "archive" else RUNTIME.rag_processed_main_dir)
+    files = sorted(processed_path.glob("*.json"))
     chunks: List[Dict] = []
     seen_ids = set()
     seen_text_hashes = set()
@@ -201,12 +202,22 @@ def load_chunks() -> List[Dict]:
                 }
             )
 
+            merged_metadata["corpus"] = corpus
             chunks.append({"id": chunk_id, "text": text, "metadata": merged_metadata})
         except Exception as exc:
             logger.warning("Erreur fichier %s: %s", file, exc)
 
     logger.info("%s chunks charges", len(chunks))
     return chunks
+
+
+def _metadata_distribution(chunks: List[Dict], field_name: str) -> Dict[str, int]:
+    distribution: Dict[str, int] = {}
+    for chunk in chunks:
+        metadata = chunk.get("metadata", {}) or {}
+        value = str(metadata.get(field_name) or "unknown")
+        distribution[value] = distribution.get(value, 0) + 1
+    return distribution
 
 
 def load_index_manifest() -> Dict:
@@ -298,7 +309,7 @@ def embed(texts: List[str], cache: Dict[str, Dict[str, List[float]]]) -> List[Li
     return embeddings
 
 
-def build_index(chunks: List[Dict]) -> None:
+def build_index(chunks: List[Dict], corpus: str = "main", ingestion_mode_used: str = "fast") -> None:
     chunks_to_index = filter_chunks_for_reindex(chunks, load_index_manifest())
     texts = [c["text"] for c in chunks_to_index]
     if not texts:
@@ -332,6 +343,11 @@ def build_index(chunks: List[Dict]) -> None:
         index_type="faiss_hnsw_dense_plus_bm25",
     )
     manifest["requested_model_name"] = get_model_name()
+    manifest["corpus"] = corpus
+    manifest["document_count"] = len({str((chunk.get("metadata", {}) or {}).get("source_hash") or chunk.get("id")) for chunk in chunks_to_index})
+    manifest["category_distribution"] = _metadata_distribution(chunks_to_index, "document_category")
+    manifest["source_priority_distribution"] = _metadata_distribution(chunks_to_index, "source_priority")
+    manifest["ingestion_mode_used"] = ingestion_mode_used
     if get_active_model_name() != get_model_name():
         manifest["fallback_model_name"] = get_active_model_name()
     save_index_manifest(manifest)
@@ -345,8 +361,8 @@ def build_index(chunks: List[Dict]) -> None:
 
 
 if __name__ == "__main__":
-    chunks_data = load_chunks()
+    chunks_data = load_chunks(corpus="main")
     if not chunks_data:
         logger.error("Aucun chunk trouve !")
     else:
-        build_index(chunks_data)
+        build_index(chunks_data, corpus="main")

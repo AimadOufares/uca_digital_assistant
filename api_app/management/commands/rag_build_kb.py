@@ -15,11 +15,33 @@ class Command(BaseCommand):
             default=[],
             help="URL seed additionnelle. Repetable.",
         )
+        parser.add_argument(
+            "--mode",
+            choices=["fast", "extended"],
+            default="fast",
+            help="Mode d'ingestion a utiliser.",
+        )
+        parser.add_argument(
+            "--target-corpus",
+            choices=["main", "archive", "all"],
+            default="all",
+            help="Corpus a ingerer et traiter.",
+        )
+        parser.add_argument(
+            "--premium-only",
+            action="store_true",
+            help="N'utilise que les seeds premium definies dans la cartographie.",
+        )
         parser.add_argument("--publish", action="store_true", help="Publie l'index construit comme index actif.")
         parser.add_argument("--build-id", default="", help="Identifiant de build explicite.")
 
     def handle(self, *args, **options):
-        config = IngestionJobConfig(seeds=options["seeds"] or None)
+        config = IngestionJobConfig(
+            seeds=options["seeds"] or None,
+            mode=options["mode"],
+            target_corpus=options["target_corpus"],
+            premium_only=bool(options["premium_only"]),
+        )
         result = build_knowledge_base(
             config=config,
             publish=bool(options["publish"]),

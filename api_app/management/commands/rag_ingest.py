@@ -15,8 +15,38 @@ class Command(BaseCommand):
             default=[],
             help="URL seed additionnelle. Repetable.",
         )
+        parser.add_argument(
+            "--mode",
+            choices=["fast", "extended"],
+            default="fast",
+            help="Mode d'ingestion a utiliser.",
+        )
+        parser.add_argument(
+            "--target-corpus",
+            choices=["main", "archive", "all"],
+            default="all",
+            help="Corpus cible de l'operation.",
+        )
+        parser.add_argument(
+            "--premium-only",
+            action="store_true",
+            help="N'utilise que les seeds premium definies dans la cartographie.",
+        )
 
     def handle(self, *args, **options):
-        config = IngestionJobConfig(seeds=options["seeds"] or None)
+        config = IngestionJobConfig(
+            seeds=options["seeds"] or None,
+            mode=options["mode"],
+            target_corpus=options["target_corpus"],
+            premium_only=bool(options["premium_only"]),
+        )
         result = run_ingestion(config)
-        self.stdout.write(self.style.SUCCESS(f"Ingestion terminee: {result['documents_collected']} documents."))
+        self.stdout.write(
+            self.style.SUCCESS(
+                "Ingestion terminee: "
+                f"{result['documents_collected']} documents, "
+                f"main={result.get('main_count', 0)}, "
+                f"archive={result.get('archive_count', 0)}, "
+                f"reject={result.get('reject_count', 0)}."
+            )
+        )

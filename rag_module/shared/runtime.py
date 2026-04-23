@@ -54,9 +54,16 @@ class RuntimeSettings:
     database_url: str
     rag_data_root: Path
     rag_raw_dir: Path
+    rag_raw_main_dir: Path
+    rag_raw_archive_dir: Path
     rag_processed_dir: Path
+    rag_processed_main_dir: Path
+    rag_processed_archive_dir: Path
     rag_index_dir: Path
+    rag_index_main_dir: Path
+    rag_index_archive_dir: Path
     rag_cache_dir: Path
+    rag_ingestion_state_dir: Path
     rag_reports_dir: Path
     rag_backups_dir: Path
     rag_locks_dir: Path
@@ -76,9 +83,16 @@ class RuntimeSettings:
         for path in (
             self.rag_data_root,
             self.rag_raw_dir,
+            self.rag_raw_main_dir,
+            self.rag_raw_archive_dir,
             self.rag_processed_dir,
+            self.rag_processed_main_dir,
+            self.rag_processed_archive_dir,
             self.rag_index_dir,
+            self.rag_index_main_dir,
+            self.rag_index_archive_dir,
             self.rag_cache_dir,
+            self.rag_ingestion_state_dir,
             self.rag_reports_dir,
             self.rag_backups_dir,
             self.rag_locks_dir,
@@ -107,15 +121,50 @@ def get_runtime_settings() -> RuntimeSettings:
         project_root,
         rag_data_root / "processed",
     )
+    rag_raw_main_dir = _resolve_path(
+        os.getenv("RAG_RAW_MAIN_DIR", ""),
+        project_root,
+        rag_raw_dir / "main",
+    )
+    rag_raw_archive_dir = _resolve_path(
+        os.getenv("RAG_RAW_ARCHIVE_DIR", ""),
+        project_root,
+        rag_raw_dir / "archive",
+    )
+    rag_processed_main_dir = _resolve_path(
+        os.getenv("RAG_PROCESSED_MAIN_DIR", ""),
+        project_root,
+        rag_processed_dir / "main",
+    )
+    rag_processed_archive_dir = _resolve_path(
+        os.getenv("RAG_PROCESSED_ARCHIVE_DIR", ""),
+        project_root,
+        rag_processed_dir / "archive",
+    )
     rag_index_dir = _resolve_path(
         os.getenv("RAG_INDEX_DIR", ""),
         project_root,
         rag_data_root / "index",
     )
+    rag_index_main_dir = _resolve_path(
+        os.getenv("RAG_INDEX_MAIN_DIR", ""),
+        project_root,
+        rag_index_dir / "main",
+    )
+    rag_index_archive_dir = _resolve_path(
+        os.getenv("RAG_INDEX_ARCHIVE_DIR", ""),
+        project_root,
+        rag_index_dir / "archive",
+    )
     rag_cache_dir = _resolve_path(
         os.getenv("RAG_CACHE_DIR", ""),
         project_root,
         rag_data_root / "cache",
+    )
+    rag_ingestion_state_dir = _resolve_path(
+        os.getenv("RAG_INGESTION_STATE_DIR", ""),
+        project_root,
+        rag_cache_dir / "ingestion",
     )
     rag_reports_dir = _resolve_path(
         os.getenv("RAG_REPORTS_DIR", ""),
@@ -147,9 +196,16 @@ def get_runtime_settings() -> RuntimeSettings:
         database_url=_env_str("DATABASE_URL", "sqlite:///db.sqlite3"),
         rag_data_root=rag_data_root,
         rag_raw_dir=rag_raw_dir,
+        rag_raw_main_dir=rag_raw_main_dir,
+        rag_raw_archive_dir=rag_raw_archive_dir,
         rag_processed_dir=rag_processed_dir,
+        rag_processed_main_dir=rag_processed_main_dir,
+        rag_processed_archive_dir=rag_processed_archive_dir,
         rag_index_dir=rag_index_dir,
+        rag_index_main_dir=rag_index_main_dir,
+        rag_index_archive_dir=rag_index_archive_dir,
         rag_cache_dir=rag_cache_dir,
+        rag_ingestion_state_dir=rag_ingestion_state_dir,
         rag_reports_dir=rag_reports_dir,
         rag_backups_dir=rag_backups_dir,
         rag_locks_dir=rag_locks_dir,

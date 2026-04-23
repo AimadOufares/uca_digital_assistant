@@ -29,6 +29,26 @@ def _chunk_processing_policy(chunks: List[Dict]) -> str:
     return "unknown"
 
 
+def _chunk_metadata_distribution(chunks: List[Dict], field_name: str) -> Dict[str, int]:
+    distribution: Dict[str, int] = {}
+    for chunk in chunks:
+        metadata = chunk.get("metadata", {}) or {}
+        raw_value = metadata.get(field_name, "unknown")
+        values = raw_value if isinstance(raw_value, list) else [raw_value]
+        for value in values:
+            key = str(value).strip() or "unknown"
+            distribution[key] = distribution.get(key, 0) + 1
+    return dict(sorted(distribution.items(), key=lambda item: item[0]))
+
+
+def _document_count(chunks: List[Dict]) -> int:
+    sources = {
+        str(chunk.get("metadata", {}).get("source_hash") or chunk.get("metadata", {}).get("source") or chunk.get("id") or "")
+        for chunk in chunks
+    }
+    return len({source for source in sources if source})
+
+
 def _stable_point_id(chunk: Dict) -> str:
     chunk_id = str(chunk.get("id") or "")
     if chunk_id:
@@ -104,6 +124,20 @@ class FaissVectorStoreAdapter(VectorStoreAdapter):
         manifest["requested_model_name"] = get_model_name()
         manifest["build_id"] = build_id
         manifest["backend"] = "faiss"
+        manifest["corpus"] = "main"
+        manifest["document_count"] = _document_count(chunks)
+        manifest["category_distribution"] = _chunk_metadata_distribution(chunks, "document_category")
+        manifest["source_priority_distribution"] = _chunk_metadata_distribution(chunks, "source_priority")
+        manifest["ingestion_mode_used"] = str(
+            next(
+                (
+                    chunk.get("metadata", {}).get("ingestion_mode")
+                    for chunk in chunks
+                    if chunk.get("metadata", {}).get("ingestion_mode")
+                ),
+                "fast",
+            )
+        )
         save_manifest(str(paths["manifest_file"]), manifest)
 
         if publish:
@@ -194,6 +228,20 @@ class QdrantVectorStoreAdapter(VectorStoreAdapter):
         manifest["build_id"] = build_id
         manifest["backend"] = "qdrant"
         manifest["collection_name"] = collection_name
+        manifest["corpus"] = "main"
+        manifest["document_count"] = _document_count(chunks)
+        manifest["category_distribution"] = _chunk_metadata_distribution(chunks, "document_category")
+        manifest["source_priority_distribution"] = _chunk_metadata_distribution(chunks, "source_priority")
+        manifest["ingestion_mode_used"] = str(
+            next(
+                (
+                    chunk.get("metadata", {}).get("ingestion_mode")
+                    for chunk in chunks
+                    if chunk.get("metadata", {}).get("ingestion_mode")
+                ),
+                "fast",
+            )
+        )
         manifest_path = build_dir / "index_manifest.json"
         save_manifest(str(manifest_path), manifest)
         with (build_dir / "chunks.json").open("w", encoding="utf-8") as handle:

@@ -11,33 +11,54 @@ from .services.online import answer_question as answer_question_service
 logger = logging.getLogger(__name__)
 
 
-def run_ingestion(seeds: Optional[List[str]] = None) -> List[Dict]:
+def run_ingestion(
+    seeds: Optional[List[str]] = None,
+    mode: str = "fast",
+    target_corpus: str = "all",
+    premium_only: bool = False,
+) -> Dict:
     """Etape 1: collecte des documents bruts."""
     logger.info("Ingestion lancee avec %s seed(s).", len(seeds or []))
-    result = run_ingestion_service(IngestionJobConfig(seeds=seeds))
-    return [{"documents_collected": result.get("documents_collected", 0)}]
+    return run_ingestion_service(
+        IngestionJobConfig(
+            seeds=seeds,
+            mode=mode,
+            target_corpus=target_corpus,
+            premium_only=premium_only,
+        )
+    )
 
 
-def run_processing() -> None:
+def run_processing(corpus: str = "all") -> None:
     """Etape 2: nettoyage + chunking des fichiers bruts."""
-    logger.info("Processing lance.")
-    run_processing_service()
+    logger.info("Processing lance pour corpus=%s.", corpus)
+    run_processing_service(corpus=corpus)
 
 
-def run_indexing() -> int:
+def run_indexing(corpus: str = "main") -> int:
     """Etape 3: creation/mise a jour de l'index hybride dense + lexical."""
-    logger.info("Indexing lance.")
-    result = run_indexing_service(publish=False)
+    logger.info("Indexing lance pour corpus=%s.", corpus)
+    result = run_indexing_service(corpus=corpus, publish=False)
     return int(result.chunk_count)
 
 
-def build_knowledge_base(seeds: Optional[List[str]] = None) -> int:
+def build_knowledge_base(
+    seeds: Optional[List[str]] = None,
+    mode: str = "fast",
+    target_corpus: str = "all",
+    premium_only: bool = False,
+) -> int:
     """
     Pipeline offline complet.
     A executer manuellement (pas a chaque question).
     """
     result = build_kb_service(
-        config=IngestionJobConfig(seeds=seeds),
+        config=IngestionJobConfig(
+            seeds=seeds,
+            mode=mode,
+            target_corpus=target_corpus,
+            premium_only=premium_only,
+        ),
         publish=False,
     )
     logger.info("Base de connaissances prete (%s chunks).", result.chunk_count)

@@ -5,6 +5,7 @@ from rest_framework import status
 from rest_framework.test import APITestCase
 
 from rag_module.contracts import AnswerResult
+from rag_module.offline.ingestion_utils import decide_document, default_seeds
 
 
 class ChatApiTests(APITestCase):
@@ -52,3 +53,50 @@ class HealthApiTests(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_503_SERVICE_UNAVAILABLE)
         self.assertFalse(response.json()["ready"])
+
+
+class IngestionPolicyTests(APITestCase):
+    def test_fast_default_seeds_are_subset_of_extended(self):
+        fast_seeds = set(default_seeds("fast"))
+        extended_seeds = set(default_seeds("extended"))
+
+        self.assertTrue(fast_seeds)
+        self.assertTrue(fast_seeds.issubset(extended_seeds))
+
+    def test_high_value_student_page_routes_to_main(self):
+        decision = decide_document(
+            url="https://www.uca.ma/fr/inscription-administrative",
+            quality_score=82,
+            keyword_hits=["inscription", "scolarite"],
+            depth=0,
+            extension=".html",
+            mode="fast",
+        )
+
+        self.assertEqual(decision.corpus_target, "main")
+        self.assertEqual(decision.source_priority, "A")
+
+    def test_secondary_research_page_routes_to_archive(self):
+        decision = decide_document(
+            url="https://www.uca.ma/fr/recherche/laboratoire-innovation",
+            quality_score=70,
+            keyword_hits=[],
+            depth=1,
+            extension=".html",
+            mode="extended",
+        )
+
+        self.assertEqual(decision.corpus_target, "archive")
+        self.assertIn(decision.source_priority, {"B", "C"})
+
+    def test_low_quality_page_is_rejected(self):
+        decision = decide_document(
+            url="https://www.uca.ma/fr/navigation",
+            quality_score=20,
+            keyword_hits=[],
+            depth=0,
+            extension=".html",
+            mode="fast",
+        )
+
+        self.assertEqual(decision.corpus_target, "reject")
