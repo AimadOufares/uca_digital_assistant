@@ -6,13 +6,16 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, Iterable, List
 
+from rag_module.adapters.storage import DocumentStorage
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-RAW_DIR = PROJECT_ROOT / "data_storage" / "raw"
-PROCESSED_DIR = PROJECT_ROOT / "data_storage" / "processed"
-INDEX_CHUNKS_PATH = PROJECT_ROOT / "data_storage" / "index" / "chunks.json"
-INDEX_META_PATH = PROJECT_ROOT / "data_storage" / "index" / "metadata.json"
-REPORT_DIR = PROJECT_ROOT / "data_storage" / "reports"
+STORAGE = DocumentStorage()
+RAW_DIR = STORAGE.settings.rag_raw_dir
+PROCESSED_DIR = STORAGE.settings.rag_processed_dir
+INDEX_CHUNKS_PATH = STORAGE.settings.rag_index_dir / "chunks.json"
+INDEX_META_PATH = STORAGE.settings.rag_index_dir / "metadata.json"
+REPORT_DIR = STORAGE.report_dir
 
 
 def _iter_json_files(folder: Path) -> Iterable[Path]:

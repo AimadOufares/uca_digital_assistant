@@ -13,16 +13,19 @@ from sentence_transformers import SentenceTransformer
 try:
     from ..shared.env_loader import load_env_file
     from ..shared.index_manifest import build_manifest, load_manifest, save_manifest
+    from ..shared.runtime import get_runtime_settings
 except ImportError:  # pragma: no cover
     from rag_module.shared.env_loader import load_env_file
     from rag_module.shared.index_manifest import build_manifest, load_manifest, save_manifest
+    from rag_module.shared.runtime import get_runtime_settings
 
 load_env_file()
+RUNTIME = get_runtime_settings()
 
 
-PROCESSED_PATH = "data_storage/processed"
-INDEX_PATH = "data_storage/index"
-CACHE_PATH = "data_storage/cache/embeddings_cache.json"
+PROCESSED_PATH = str(RUNTIME.rag_processed_dir)
+INDEX_PATH = str(RUNTIME.rag_index_dir)
+CACHE_PATH = str(RUNTIME.rag_cache_dir / "embeddings_cache.json")
 INDEX_MANIFEST_PATH = os.path.join(INDEX_PATH, "index_manifest.json")
 BM25_CORPUS_PATH = os.path.join(INDEX_PATH, "bm25_corpus.json")
 

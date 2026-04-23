@@ -1,37 +1,34 @@
 import logging
 from typing import Dict, List, Optional
 
-from .generation.rag_engine import answer_question
-from .offline.indexing import build_index, load_chunks
-from .offline.ingestion import DEFAULT_SEEDS, crawl
-from .offline.processing import preprocess_all
-from .retrieval.rag_search import invalidate_search_cache
+from .contracts import IngestionJobConfig, QuestionRequest
+from .services.offline import build_knowledge_base as build_kb_service
+from .services.offline import run_indexing as run_indexing_service
+from .services.offline import run_ingestion as run_ingestion_service
+from .services.offline import run_processing as run_processing_service
+from .services.online import answer_question as answer_question_service
 
 logger = logging.getLogger(__name__)
 
 
 def run_ingestion(seeds: Optional[List[str]] = None) -> List[Dict]:
     """Etape 1: collecte des documents bruts."""
-    selected_seeds = seeds or DEFAULT_SEEDS
-    logger.info("Ingestion lancee avec %s seed(s).", len(selected_seeds))
-    return crawl(selected_seeds)
+    logger.info("Ingestion lancee avec %s seed(s).", len(seeds or []))
+    result = run_ingestion_service(IngestionJobConfig(seeds=seeds))
+    return [{"documents_collected": result.get("documents_collected", 0)}]
 
 
 def run_processing() -> None:
     """Etape 2: nettoyage + chunking des fichiers bruts."""
     logger.info("Processing lance.")
-    preprocess_all()
+    run_processing_service()
 
 
 def run_indexing() -> int:
     """Etape 3: creation/mise a jour de l'index hybride dense + lexical."""
     logger.info("Indexing lance.")
-    chunks = load_chunks()
-    if not chunks:
-        raise RuntimeError("Aucun chunk disponible pour l'indexation.")
-    build_index(chunks)
-    invalidate_search_cache(clear_models=True)
-    return len(chunks)
+    result = run_indexing_service(publish=False)
+    return int(result.chunk_count)
 
 
 def build_knowledge_base(seeds: Optional[List[str]] = None) -> int:
@@ -39,11 +36,12 @@ def build_knowledge_base(seeds: Optional[List[str]] = None) -> int:
     Pipeline offline complet.
     A executer manuellement (pas a chaque question).
     """
-    run_ingestion(seeds)
-    run_processing()
-    total_chunks = run_indexing()
-    logger.info("Base de connaissances prete (%s chunks).", total_chunks)
-    return total_chunks
+    result = build_kb_service(
+        config=IngestionJobConfig(seeds=seeds),
+        publish=False,
+    )
+    logger.info("Base de connaissances prete (%s chunks).", result.chunk_count)
+    return int(result.chunk_count)
 
 
 def ask_question(question: str) -> Dict:
@@ -53,7 +51,8 @@ def ask_question(question: str) -> Dict:
     - generation de reponse
     Ne lance jamais ingestion/processing/indexing.
     """
-    return answer_question(question)
+    result = answer_question_service(QuestionRequest(question=question))
+    return {"answer": result.answer, "sources": result.sources}
 
 
 def run_pipeline(

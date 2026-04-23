@@ -17,11 +17,14 @@ import requests
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
 
+from ..shared.runtime import get_runtime_settings
+
 # ==============================
 # CONFIGURATION
 # ==============================
-RAW_DATA_PATH = "data_storage/raw"
-META_PATH = "data_storage/index/metadata.json"
+RUNTIME = get_runtime_settings()
+RAW_DATA_PATH = str(RUNTIME.rag_raw_dir)
+META_PATH = str(RUNTIME.rag_index_dir / "metadata.json")
 
 TIMEOUT = 20
 RETRIES = 3

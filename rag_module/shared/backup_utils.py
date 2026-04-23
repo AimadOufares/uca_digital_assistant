@@ -4,6 +4,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+from .runtime import get_runtime_settings
 
 def _env_bool(name: str, default: bool) -> bool:
     raw = os.getenv(name, "").strip().lower()
@@ -28,7 +29,13 @@ def create_backup(processed_path: str, cache_file: str, backup_root: str = "data
         return None
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    runtime = get_runtime_settings()
+    resolved_backup_root = Path(backup_root)
+    if backup_root == "data_storage/backups":
+        resolved_backup_root = runtime.rag_backups_dir
     target_dir = Path(backup_root) / f"processed_{timestamp}"
+    if backup_root == "data_storage/backups":
+        target_dir = resolved_backup_root / f"processed_{timestamp}"
     target_dir.parent.mkdir(parents=True, exist_ok=True)
 
     shutil.copytree(processed_dir, target_dir)

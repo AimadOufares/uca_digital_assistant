@@ -6,7 +6,9 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 from .prompt_builder import build_rag_prompt
+from ..adapters.llm_provider import LLMProviderAdapter
 from ..shared.env_loader import load_env_file
+from ..shared.runtime import get_runtime_settings
 
 try:
     from openai import OpenAI
@@ -26,7 +28,7 @@ class RAGGenerationError(RuntimeError):
     """Raised when answer generation fails."""
 
 
-DEFAULT_LM_STUDIO_BASE_URL = "http://127.0.0.1:1234/v1"
+DEFAULT_LM_STUDIO_BASE_URL = ""
 DEFAULT_LM_STUDIO_MODEL = ""
 DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
 DEFAULT_MAX_TOKENS = 420
@@ -152,11 +154,12 @@ def _abstention_answer() -> str:
 
 
 def _generate_with_openai(prompt: str) -> str:
-    api_key = os.getenv("OPENAI_API_KEY", "").strip()
+    runtime = get_runtime_settings()
+    api_key = runtime.openai_api_key or os.getenv("OPENAI_API_KEY", "").strip()
     if not api_key or OpenAI is None:
         return ""
 
-    model = os.getenv("RAG_CHAT_MODEL", DEFAULT_OPENAI_MODEL).strip() or DEFAULT_OPENAI_MODEL
+    model = os.getenv("RAG_CHAT_MODEL", runtime.rag_chat_model).strip() or runtime.rag_chat_model or DEFAULT_OPENAI_MODEL
     max_tokens = _env_int("RAG_MAX_TOKENS", DEFAULT_MAX_TOKENS)
     temperature = _env_float("RAG_TEMPERATURE", DEFAULT_TEMPERATURE)
     timeout = _env_float("RAG_REQUEST_TIMEOUT", DEFAULT_REQUEST_TIMEOUT)
@@ -200,9 +203,10 @@ def _generate_with_lm_studio(prompt: str) -> str:
     if OpenAI is None:
         return ""
 
-    base_url = os.getenv("LM_STUDIO_BASE_URL", DEFAULT_LM_STUDIO_BASE_URL).strip()
+    runtime = get_runtime_settings()
+    base_url = os.getenv("LM_STUDIO_BASE_URL", runtime.lm_studio_base_url or DEFAULT_LM_STUDIO_BASE_URL).strip()
     configured_model = os.getenv("RAG_LM_STUDIO_MODEL", DEFAULT_LM_STUDIO_MODEL).strip()
-    api_key = os.getenv("LM_STUDIO_API_KEY", "lm-studio").strip() or "lm-studio"
+    api_key = os.getenv("LM_STUDIO_API_KEY", runtime.lm_studio_api_key or "lm-studio").strip() or "lm-studio"
     max_tokens = _env_int("RAG_LM_STUDIO_MAX_TOKENS", _env_int("RAG_MAX_TOKENS", DEFAULT_LM_STUDIO_MAX_TOKENS))
     temperature = _env_float("RAG_TEMPERATURE", DEFAULT_TEMPERATURE)
     timeout = _env_float("RAG_REQUEST_TIMEOUT", DEFAULT_REQUEST_TIMEOUT)
@@ -235,14 +239,7 @@ def _generate_with_lm_studio(prompt: str) -> str:
 
 
 def _generation_order() -> List[str]:
-    provider = os.getenv("RAG_LLM_PROVIDER", "lmstudio").strip().lower()
-    if provider in {"lmstudio", "local"}:
-        return ["lmstudio"]
-    if provider == "openai":
-        return ["openai"]
-    if provider == "auto":
-        return ["lmstudio", "openai"]
-    return ["lmstudio", "openai"]
+    return LLMProviderAdapter(get_runtime_settings()).provider_order()
 
 
 def _prompt_style_for_backend(configured_style: str, backend: str) -> str:

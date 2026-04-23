@@ -11,25 +11,32 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 import faiss
 import numpy as np
 import unidecode
+from qdrant_client import QdrantClient
 from sentence_transformers import SentenceTransformer
 from sentence_transformers.cross_encoder import CrossEncoder
 
 try:
+    from ..adapters.storage import DocumentStorage
     from ..offline.indexing import DEFAULT_EMBEDDING_MODEL
     from ..retrieval.bm25_search import build_bm25_index, load_bm25_corpus, search_bm25
     from ..shared.env_loader import load_env_file
     from ..shared.index_manifest import load_manifest, validate_manifest
     from ..shared.metadata_policy import FACULTY_RULES, normalize_text
     from ..shared.relevance_policy import boost_results_with_metadata
+    from ..shared.runtime import get_runtime_settings
 except ImportError:  # pragma: no cover
+    from rag_module.adapters.storage import DocumentStorage
     from rag_module.offline.indexing import DEFAULT_EMBEDDING_MODEL
     from rag_module.retrieval.bm25_search import build_bm25_index, load_bm25_corpus, search_bm25
     from rag_module.shared.env_loader import load_env_file
     from rag_module.shared.index_manifest import load_manifest, validate_manifest
     from rag_module.shared.metadata_policy import FACULTY_RULES, normalize_text
     from rag_module.shared.relevance_policy import boost_results_with_metadata
+    from rag_module.shared.runtime import get_runtime_settings
 
 load_env_file()
+RUNTIME = get_runtime_settings()
+STORAGE = DocumentStorage(RUNTIME)
 
 
 INDEX_PATH = "data_storage/index/index.faiss"
@@ -279,6 +286,39 @@ _manifest_mtime = None
 _bm25_mtime = None
 
 
+def _vector_backend() -> str:
+    return get_runtime_settings().rag_vector_backend
+
+
+def _active_faiss_paths() -> Dict[str, Path]:
+    return STORAGE.resolve_active_faiss_paths()
+
+
+def _active_manifest_path() -> Path:
+    pointer = STORAGE.load_active_index_pointer()
+    if pointer.get("backend") == "qdrant":
+        manifest_path = Path(pointer.get("manifest_path", ""))
+        if manifest_path.exists():
+            return manifest_path
+    return _active_faiss_paths()["manifest_file"]
+
+
+def _qdrant_client() -> QdrantClient:
+    runtime = get_runtime_settings()
+    kwargs = {"url": runtime.rag_qdrant_url}
+    if runtime.rag_qdrant_api_key:
+        kwargs["api_key"] = runtime.rag_qdrant_api_key
+    return QdrantClient(**kwargs)
+
+
+def _qdrant_collection_name() -> str:
+    pointer = STORAGE.load_active_index_pointer()
+    collection_name = str(pointer.get("collection_name") or "").strip()
+    if collection_name:
+        return collection_name
+    return get_runtime_settings().rag_active_index_name
+
+
 def invalidate_search_cache(clear_models: bool = False) -> None:
     global _index, _chunks, _manifest, _bm25_corpus, _bm25_index
     global _index_mtime, _chunks_mtime, _manifest_mtime, _bm25_mtime
@@ -362,7 +402,7 @@ def get_reranker():
 def load_manifest_or_raise() -> Dict:
     global _manifest, _manifest_mtime
 
-    manifest_file = Path(MANIFEST_PATH)
+    manifest_file = _active_manifest_path()
     if not manifest_file.exists():
         raise FileNotFoundError("Manifest d'index introuvable.")
 
@@ -378,8 +418,9 @@ def load_manifest_or_raise() -> Dict:
 def get_faiss_index_and_chunks() -> Tuple[faiss.Index, List[Dict]]:
     global _index, _chunks, _index_mtime, _chunks_mtime
 
-    index_file = Path(INDEX_PATH)
-    chunks_file = Path(CHUNKS_PATH)
+    paths = _active_faiss_paths()
+    index_file = paths["index_file"]
+    chunks_file = paths["chunks_file"]
     if not index_file.exists() or not chunks_file.exists():
         logger.error("Index FAISS ou chunks.json introuvable. Execute d'abord indexing.py")
         raise FileNotFoundError("Index FAISS non trouve")
@@ -412,7 +453,7 @@ def get_faiss_index_and_chunks() -> Tuple[faiss.Index, List[Dict]]:
 def get_bm25_resources() -> Tuple[List[Dict], Dict]:
     global _bm25_corpus, _bm25_index, _bm25_mtime
 
-    corpus_file = Path(BM25_CORPUS_PATH)
+    corpus_file = _active_faiss_paths()["bm25_file"]
     if not corpus_file.exists():
         raise FileNotFoundError("Corpus BM25 introuvable.")
 
@@ -531,6 +572,40 @@ def search_faiss(query_vectors: np.ndarray, top_k: int = TOP_K_RETRIEVE) -> List
                 chunk["score_type"] = "dense"
                 chunk["query_source"] = "multi" if len(query_vectors) > 1 else "single"
                 results.append(chunk)
+    return results
+
+
+def search_qdrant(query_vectors: np.ndarray, top_k: int = TOP_K_RETRIEVE) -> List[Dict]:
+    runtime = get_runtime_settings()
+    if not runtime.rag_qdrant_url:
+        raise FileNotFoundError("Qdrant n'est pas configure.")
+
+    client = _qdrant_client()
+    collection_name = _qdrant_collection_name()
+    results: List[Dict] = []
+
+    for vector in query_vectors:
+        response = client.query_points(
+            collection_name=collection_name,
+            query=vector.tolist(),
+            limit=max(1, int(top_k)),
+            with_payload=True,
+            with_vectors=False,
+        )
+        for point in getattr(response, "points", []) or []:
+            payload = getattr(point, "payload", {}) or {}
+            metadata = payload.get("metadata", {}) or {}
+            results.append(
+                {
+                    "id": payload.get("id") or str(getattr(point, "id", "")),
+                    "text": payload.get("text", "") or "",
+                    "metadata": metadata,
+                    "vector_raw_score": float(getattr(point, "score", 0.0) or 0.0),
+                    "score": max(0.0, min(1.0, float(getattr(point, "score", 0.0) or 0.0))),
+                    "score_type": "dense",
+                    "query_source": "multi" if len(query_vectors) > 1 else "single",
+                }
+            )
     return results
 
 
@@ -1029,9 +1104,13 @@ def run_hybrid_search_debug(raw_query: str, top_k: int = TOP_K_FINAL) -> Dict[st
     query_vectors = embed_queries(queries)
     retrieve_k = max(TOP_K_RETRIEVE, top_k * 4)
 
-    dense_results = search_faiss(query_vectors, top_k=retrieve_k)
-    _, bm25_index = get_bm25_resources()
-    bm25_results = search_bm25(query, bm25_index, top_k=retrieve_k)
+    if _vector_backend() == "qdrant":
+        dense_results = search_qdrant(query_vectors, top_k=retrieve_k)
+        bm25_results = []
+    else:
+        dense_results = search_faiss(query_vectors, top_k=retrieve_k)
+        _, bm25_index = get_bm25_resources()
+        bm25_results = search_bm25(query, bm25_index, top_k=retrieve_k)
 
     retrieved = merge_dense_and_bm25(dense_results, bm25_results, top_k=retrieve_k)
     retrieved = deduplicate_chunks(retrieved)

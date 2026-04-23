@@ -19,12 +19,14 @@ from bs4 import BeautifulSoup
 from difflib import SequenceMatcher
 from langdetect import LangDetectException, detect_langs
 
+from rag_module.adapters.storage import DocumentStorage
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-RAW_DIR = PROJECT_ROOT / "data_storage" / "raw"
-REPORTS_DIR = PROJECT_ROOT / "data_storage" / "reports"
-QUARANTINE_DIR = PROJECT_ROOT / "data_storage" / "quarantine"
-BACKUPS_DIR = PROJECT_ROOT / "data_storage" / "backups"
+STORAGE = DocumentStorage()
+RAW_DIR = STORAGE.settings.rag_raw_dir
+REPORTS_DIR = STORAGE.report_dir
+QUARANTINE_DIR = STORAGE.settings.rag_quarantine_dir
+BACKUPS_DIR = STORAGE.settings.rag_backups_dir
 
 ALLOWED_LANGS = {"fr", "ar", "en"}
 MIN_LANG_CONFIDENCE = 0.85

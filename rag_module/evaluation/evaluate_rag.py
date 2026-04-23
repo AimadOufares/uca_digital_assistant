@@ -9,6 +9,7 @@ from pathlib import Path
 from statistics import mean
 from typing import Dict, List, Set
 
+from rag_module.adapters.storage import DocumentStorage
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
@@ -17,8 +18,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from rag_module.generation.rag_engine import RAGGenerationError, RAGIndexNotReadyError, answer_question
 from rag_module.retrieval.rag_search import run_hybrid_search_debug
 
-
-REPORT_DIR = PROJECT_ROOT / "data_storage" / "reports"
+REPORT_DIR = DocumentStorage().report_dir
 FALLBACK_MARKERS = [
     "information non disponible",
     "pas pu traiter",

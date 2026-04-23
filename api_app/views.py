@@ -1,6 +1,4 @@
 import logging
-import json
-from pathlib import Path
 
 from django.utils.decorators import method_decorator
 from django.views.decorators.csrf import ensure_csrf_cookie
@@ -10,11 +8,11 @@ from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from rag_module.generation.rag_engine import (
-    RAGGenerationError,
-    RAGIndexNotReadyError,
-    answer_question,
-)
+from rag_module.contracts import QuestionRequest
+from rag_module.generation.rag_engine import RAGGenerationError, RAGIndexNotReadyError
+from rag_module.services.health import build_live_health, build_ready_health
+from rag_module.services.online import answer_question
+from rag_module.services.reports import load_latest_reports
 
 logger = logging.getLogger(__name__)
 
@@ -51,10 +49,10 @@ class ChatAPIView(APIView):
 
         message = serializer.validated_data["message"]
         try:
-            result = answer_question(message)
+            result = answer_question(QuestionRequest(question=message))
             return Response(
                 {
-                    "answer": result.get("answer", "").strip(),
+                    "answer": result.answer.strip(),
                 },
                 status=status.HTTP_200_OK,
             )
@@ -86,24 +84,20 @@ class AdminDashboardAPIView(APIView):
     permission_classes = [AllowAny]
 
     def get(self, request):
-        project_root = Path(__file__).resolve().parents[2]
-        reports_dir = project_root / "data_storage" / "reports"
-        
-        def get_latest_json(prefix):
-            if not reports_dir.exists():
-                return {}
-            files = list(reports_dir.glob(f"{prefix}_*.json"))
-            if not files:
-                return {}
-            latest_file = max(files, key=lambda f: f.stat().st_mtime)
-            try:
-                with latest_file.open("r", encoding="utf-8") as h:
-                    return json.load(h)
-            except Exception:
-                return {}
+        return Response(load_latest_reports(), status=status.HTTP_200_OK)
 
-        return Response({
-            "data_audit": get_latest_json("data_audit"),
-            "raw_quality_audit": get_latest_json("raw_quality_audit"),
-            "rag_eval": get_latest_json("rag_eval")
-        }, status=status.HTTP_200_OK)
+
+class LiveHealthAPIView(APIView):
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        return Response(build_live_health(), status=status.HTTP_200_OK)
+
+
+class ReadyHealthAPIView(APIView):
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        payload = build_ready_health()
+        http_status = status.HTTP_200_OK if payload.get("ready") else status.HTTP_503_SERVICE_UNAVAILABLE
+        return Response(payload, status=http_status)

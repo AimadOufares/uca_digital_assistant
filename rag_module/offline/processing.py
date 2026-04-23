@@ -20,13 +20,16 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 try:
     from ..shared.data_quality import create_backup, postprocess_chunks_for_source
+    from ..shared.runtime import get_runtime_settings
 except ImportError:  # pragma: no cover
     from rag_module.shared.data_quality import create_backup, postprocess_chunks_for_source
+    from rag_module.shared.runtime import get_runtime_settings
 
 # ===================== CONFIG =====================
-RAW_PATH = "data_storage/raw"
-PROCESSED_PATH = "data_storage/processed"
-CACHE_FILE = "data_storage/cache/file_cache.json"
+RUNTIME = get_runtime_settings()
+RAW_PATH = str(RUNTIME.rag_raw_dir)
+PROCESSED_PATH = str(RUNTIME.rag_processed_dir)
+CACHE_FILE = str(RUNTIME.rag_cache_dir / "file_cache.json")
 PROCESSING_POLICY_VERSION = "v4_strict_quality_2026_04_05_r3_sourcehash"
 
 CHUNK_TOKENS = 500
