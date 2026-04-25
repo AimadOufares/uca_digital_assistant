@@ -11,6 +11,13 @@ import numpy as np
 from sentence_transformers import SentenceTransformer
 
 try:
+    from qdrant_client import QdrantClient
+    from qdrant_client.http import models as qdrant_models
+    HAS_QDRANT = True
+except ImportError:
+    HAS_QDRANT = False
+
+try:
     from ..shared.env_loader import load_env_file
     from ..shared.index_manifest import build_manifest, load_manifest, save_manifest
     from ..shared.runtime import get_runtime_settings
@@ -34,7 +41,7 @@ FALLBACK_EMBEDDING_MODELS = [
     "sentence-transformers/all-MiniLM-L6-v2",
     "all-MiniLM-L6-v2",
 ]
-BATCH_SIZE = 32
+BATCH_SIZE = 128 # Augmenté pour un meilleur rendement CPU (au lieu de 32)
 HNSW_M = 32
 HNSW_EF_CONSTRUCTION = 200
 HNSW_EF_SEARCH = 64
@@ -155,7 +162,13 @@ def save_cache(cache: Dict[str, Dict[str, List[float]]]) -> None:
 
 
 def load_chunks(corpus: str = "main") -> List[Dict]:
-    processed_path = Path(RUNTIME.rag_processed_archive_dir if corpus == "archive" else RUNTIME.rag_processed_main_dir)
+    if corpus == "archive":
+        processed_path = Path(RUNTIME.rag_processed_archive_dir)
+    elif corpus == "drive":
+        processed_path = Path(RUNTIME.rag_processed_dir / "drive")
+    else:
+        processed_path = Path(RUNTIME.rag_processed_main_dir)
+        
     files = sorted(processed_path.glob("*.json"))
     chunks: List[Dict] = []
     seen_ids = set()
@@ -350,6 +363,41 @@ def build_index(chunks: List[Dict], corpus: str = "main", ingestion_mode_used: s
     manifest["ingestion_mode_used"] = ingestion_mode_used
     if get_active_model_name() != get_model_name():
         manifest["fallback_model_name"] = get_active_model_name()
+        
+    # Synchronisation Qdrant Automatique
+    if HAS_QDRANT and RUNTIME.rag_qdrant_url:
+        try:
+            logger.info("Synchronisation vers Qdrant (%s)...", RUNTIME.rag_qdrant_url)
+            kwargs = {"url": RUNTIME.rag_qdrant_url}
+            if getattr(RUNTIME, "rag_qdrant_api_key", None):
+                kwargs["api_key"] = RUNTIME.rag_qdrant_api_key
+                
+            qclient = QdrantClient(**kwargs)
+            col_name = getattr(RUNTIME, "rag_qdrant_collection_prefix", "uca_kb")
+            
+            # Recréer la collection (écraser l'ancien index)
+            qclient.recreate_collection(
+                collection_name=col_name,
+                vectors_config=qdrant_models.VectorParams(size=dim, distance=qdrant_models.Distance.COSINE)
+            )
+            
+            points = []
+            for i, chunk in enumerate(chunks_to_index):
+                points.append(qdrant_models.PointStruct(
+                    id=i,
+                    vector=embeddings[i],
+                    payload=chunk
+                ))
+            
+            qclient.upload_points(collection_name=col_name, points=points)
+            logger.info("Succes: %s points synchronises dans Qdrant (Collection: %s).", len(points), col_name)
+            manifest["backend"] = "qdrant"
+        except Exception as e:
+            logger.error("Erreur lors de la synchronisation Qdrant : %s", e)
+            manifest["backend"] = "faiss_only"
+    else:
+        manifest["backend"] = "faiss_only"
+
     save_index_manifest(manifest)
 
     logger.info(
@@ -361,8 +409,16 @@ def build_index(chunks: List[Dict], corpus: str = "main", ingestion_mode_used: s
 
 
 if __name__ == "__main__":
-    chunks_data = load_chunks(corpus="main")
-    if not chunks_data:
-        logger.error("Aucun chunk trouve !")
+    # 1. Fusionner les corpus 'main' (web) et 'drive' (local docs)
+    all_chunks_data = []
+    for c in ["main", "drive"]:
+        c_data = load_chunks(corpus=c)
+        if c_data:
+            all_chunks_data.extend(c_data)
+
+    if not all_chunks_data:
+        logger.error("Aucun chunk trouve dans main et drive !")
     else:
-        build_index(chunks_data, corpus="main")
+        # 2. Construire l'index global
+        logger.info("Construction de l'index avec %s chunks au total...", len(all_chunks_data))
+        build_index(all_chunks_data, corpus="main_and_drive")

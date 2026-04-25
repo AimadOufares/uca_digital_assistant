@@ -5,10 +5,6 @@ import json
 import hashlib
 import logging
 import string
-from pathlib import Path
-from datetime import datetime, timezone
-from typing import List, Dict, Tuple
-
 import pdfplumber
 import docx
 from bs4 import BeautifulSoup
@@ -27,7 +23,7 @@ except ImportError:  # pragma: no cover
 
 # ===================== CONFIG =====================
 RUNTIME = get_runtime_settings()
-PROCESSING_POLICY_VERSION = "v4_strict_quality_2026_04_05_r3_sourcehash"
+PROCESSING_POLICY_VERSION = "v5_semantic_chunking_drive"
 
 CHUNK_TOKENS = 500
 OVERLAP_TOKENS = 80
@@ -66,6 +62,17 @@ CORPUS_POLICIES = {
         "max_symbol_ratio": 0.28,
         "min_unique_ratio": 0.22,
         "max_urls_per_chunk": 2,
+    },
+    "drive": {
+        "min_words": MIN_WORDS,
+        "min_doc_words": MIN_DOC_WORDS,
+        "min_doc_chars": MIN_DOC_CHARS,
+        "min_quality_score": MIN_QUALITY_SCORE,
+        "min_alpha_ratio": MIN_ALPHA_RATIO,
+        "max_digit_ratio": MAX_DIGIT_RATIO,
+        "max_symbol_ratio": MAX_SYMBOL_RATIO,
+        "min_unique_ratio": MIN_UNIQUE_TOKEN_RATIO,
+        "max_urls_per_chunk": MAX_URLS_PER_CHUNK,
     },
 }
 
@@ -277,6 +284,12 @@ def _corpus_paths(corpus: str) -> Tuple[str, str, str]:
             str(RUNTIME.rag_processed_archive_dir),
             str(RUNTIME.rag_cache_dir / "file_cache_archive.json"),
         )
+    if corpus == "drive":
+        return (
+            str(RUNTIME.rag_raw_dir / "drive"),
+            str(RUNTIME.rag_processed_dir / "drive"),
+            str(RUNTIME.rag_cache_dir / "file_cache_drive.json"),
+        )
     return (
         str(RUNTIME.rag_raw_main_dir),
         str(RUNTIME.rag_processed_main_dir),
@@ -285,7 +298,11 @@ def _corpus_paths(corpus: str) -> Tuple[str, str, str]:
 
 
 def _corpus_policy(corpus: str) -> Dict[str, float]:
-    return CORPUS_POLICIES["archive" if corpus == "archive" else "main"]
+    if corpus == "archive":
+        return CORPUS_POLICIES["archive"]
+    if corpus == "drive":
+        return CORPUS_POLICIES["drive"]
+    return CORPUS_POLICIES["main"]
 
 
 def _load_raw_metadata(corpus: str) -> Dict[str, Dict]:
@@ -363,16 +380,29 @@ def extract_text_html(path: str) -> str:
         with open(path, encoding="utf-8") as f:
             soup = BeautifulSoup(f, "html.parser")
 
-        for tag in soup(["script", "style", "nav", "footer", "header", "aside"]):
+        for tag in soup(["script", "style", "nav", "footer", "header", "aside", "noscript"]):
             tag.decompose()
 
         main = soup.find(["main", "article"]) or soup.body or soup
-        texts = [
-            tag.get_text(" ", strip=True)
-            for tag in main.find_all(["h1", "h2", "h3", "h4", "p", "li", "td"])
-            if tag.get_text(strip=True)
-        ]
-        return "\n\n".join(texts)
+        
+        # Sémantique HTML vers Markdown pour préserver la structure
+        for tag in main.find_all(["h1", "h2", "h3", "h4", "h5", "h6"]):
+            level = int(tag.name[1])
+            tag.insert_before(f"\n\n{'#' * level} ")
+            tag.insert_after("\n\n")
+            
+        for tag in main.find_all("li"):
+            tag.insert_before("\n- ")
+            tag.insert_after("\n")
+            
+        for tag in main.find_all("p"):
+            tag.insert_before("\n\n")
+            tag.insert_after("\n\n")
+
+        text = main.get_text(" ", strip=True)
+        # Nettoyage des espaces multiples
+        text = re.sub(r'\n[ \t]*\n+', '\n\n', text)
+        return text.strip()
     except Exception as e:
         logger.warning("HTML extraction error %s: %s", path, e)
         return ""
@@ -424,7 +454,8 @@ def split_sentences(text: str) -> List[str]:
     return [s.strip() for s in sentences if s.strip() and not _is_noise_line(s)]
 
 
-def recursive_chunk(text: str, corpus: str = "main", chunk_size: int = CHUNK_TOKENS, overlap_tokens: int = OVERLAP_TOKENS) -> List[str]:
+def semantic_chunk(text: str, corpus: str = "main", chunk_size: int = CHUNK_TOKENS, overlap_size: int = OVERLAP_TOKENS) -> List[str]:
+    """Découpage sémantique basé sur les titres Markdown, puis paragraphes, puis phrases."""
     text = clean_text(text)
     if not text:
         return []
@@ -432,57 +463,79 @@ def recursive_chunk(text: str, corpus: str = "main", chunk_size: int = CHUNK_TOK
     if len(ENCODER.encode(text)) <= chunk_size:
         return [text] if is_high_quality_chunk(text, corpus=corpus) else []
 
-    paragraphs = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
+    # Séparation par titres Markdown (H1, H2, etc.)
+    sections = re.split(r"(?=\n#+\s+)", text)
+    if len(sections) == 1:
+        sections = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
 
     chunks: List[str] = []
     current: List[str] = []
     current_tokens = 0
 
-    for para in paragraphs:
-        sentences = split_sentences(para)
-        for sent in sentences:
-            sent_tokens = len(ENCODER.encode(sent))
-
-            # If the sentence itself is huge, split hard by token windows.
-            if sent_tokens > chunk_size:
-                words = sent.split()
-                window = []
-                for word in words:
-                    candidate = " ".join(window + [word])
-                    if len(ENCODER.encode(candidate)) <= chunk_size:
-                        window.append(word)
+    for sec in sections:
+        sec = sec.strip()
+        if not sec: continue
+        
+        sec_len = len(ENCODER.encode(sec))
+        
+        if sec_len > chunk_size:
+            # Si la section est trop grosse, on coupe par paragraphe
+            paragraphs = [p.strip() for p in re.split(r"\n\s*\n", sec) if p.strip()]
+            for para in paragraphs:
+                para_len = len(ENCODER.encode(para))
+                if para_len > chunk_size:
+                    # Si le paragraphe est trop gros, on coupe par phrase
+                    sentences = split_sentences(para)
+                    for sent in sentences:
+                        sent_len = len(ENCODER.encode(sent))
+                        if sent_len > chunk_size:
+                            # Force brute pour la phrase
+                            chunks.append(sent) # Note: idéalement on devrait couper au mot près
+                            continue
+                        
+                        if current_tokens + sent_len > chunk_size and current:
+                            chunk_text = "\n".join(current).strip()
+                            if is_high_quality_chunk(chunk_text, corpus=corpus):
+                                chunks.append(chunk_text)
+                            current = [sent]
+                            current_tokens = sent_len
+                        else:
+                            current.append(sent)
+                            current_tokens += sent_len
+                else:
+                    if current_tokens + para_len > chunk_size and current:
+                        chunk_text = "\n".join(current).strip()
+                        if is_high_quality_chunk(chunk_text, corpus=corpus):
+                            chunks.append(chunk_text)
+                        current = [para]
+                        current_tokens = para_len
                     else:
-                        long_chunk = " ".join(window).strip()
-                        if is_high_quality_chunk(long_chunk, corpus=corpus):
-                            chunks.append(long_chunk)
-                        window = [word]
-                long_chunk = " ".join(window).strip()
-                if is_high_quality_chunk(long_chunk, corpus=corpus):
-                    chunks.append(long_chunk)
-                continue
-
-            if current_tokens + sent_tokens > chunk_size and current:
-                chunk_text = " ".join(current).strip()
+                        current.append(para)
+                        current_tokens += para_len
+        else:
+            if current_tokens + sec_len > chunk_size and current:
+                chunk_text = "\n\n".join(current).strip()
                 if is_high_quality_chunk(chunk_text, corpus=corpus):
                     chunks.append(chunk_text)
-
+                
+                # Ajout de l'overlap (chevauchement)
                 overlap: List[str] = []
                 tokens_acc = 0
                 for s in reversed(current):
-                    t_len = len(ENCODER.encode(s))
-                    if tokens_acc + t_len > overlap_tokens:
+                    tok_len = len(ENCODER.encode(s))
+                    if tokens_acc + tok_len > overlap_size:
                         break
                     overlap.insert(0, s)
-                    tokens_acc += t_len
-
-                current = overlap
-                current_tokens = len(ENCODER.encode(" ".join(current)))
-
-            current.append(sent)
-            current_tokens += sent_tokens
+                    tokens_acc += tok_len
+                
+                current = overlap + [sec]
+                current_tokens = sum(len(ENCODER.encode(s)) for s in current)
+            else:
+                current.append(sec)
+                current_tokens += sec_len
 
     if current:
-        chunk_text = " ".join(current).strip()
+        chunk_text = "\n\n".join(current).strip()
         if is_high_quality_chunk(chunk_text, corpus=corpus):
             chunks.append(chunk_text)
 
@@ -523,7 +576,7 @@ def preprocess_file(file_path: str, corpus: str = "main", raw_metadata: Dict | N
         logger.info("Skip uncertain language document: %s", Path(file_path).name)
         return []
 
-    chunks = recursive_chunk(cleaned_text, corpus=corpus)
+    chunks = semantic_chunk(cleaned_text, corpus=corpus)
     if not chunks:
         return []
 
@@ -747,10 +800,10 @@ def _preprocess_corpus(corpus: str) -> None:
 
 # ===================== MAIN =====================
 def preprocess_all(corpus: str = "all"):
-    if corpus in {"main", "archive"}:
+    if corpus in {"main", "archive", "drive"}:
         _preprocess_corpus(corpus)
         return
-    for selected in ("main", "archive"):
+    for selected in ("main", "archive", "drive"):
         _preprocess_corpus(selected)
 
 
