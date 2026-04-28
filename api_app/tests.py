@@ -9,6 +9,7 @@ from rest_framework import status
 from rest_framework.test import APITestCase
 
 from rag_module.adapters.vector_store import FaissVectorStoreAdapter
+from rag_module.adapters.storage import DocumentStorage
 from rag_module.contracts import AnswerResult
 from rag_module.offline.indexing import load_chunks
 from rag_module.offline.ingestion_utils import (
@@ -419,6 +420,37 @@ class ProcessingAndIndexingTests(APITestCase):
         self.assertEqual(manifest["render_mode_distribution"]["static"], 1)
         self.assertEqual(manifest["actionable_chunk_count"], 1)
         self.assertGreater(manifest["average_student_relevance_score"], 0.8)
+
+    def test_publish_faiss_build_copies_active_files_to_legacy_root(self):
+        root = Path.cwd() / ".tmp_test_publish_faiss_case"
+        if root.exists():
+            shutil.rmtree(root)
+        root.mkdir(exist_ok=True)
+        try:
+            settings = MagicMock()
+            settings.rag_index_dir = root / "index"
+            settings.rag_reports_dir = root / "reports"
+            settings.ensure_directories = MagicMock()
+            storage = DocumentStorage(settings=settings)
+
+            build_id = "build-demo"
+            build_paths = storage.faiss_build_paths(build_id)
+            build_paths["index_file"].write_bytes(b"faiss-index")
+            build_paths["chunks_file"].write_text(json.dumps([{"id": "1"}]), encoding="utf-8")
+            build_paths["manifest_file"].write_text(json.dumps({"chunk_count": 1}), encoding="utf-8")
+            build_paths["bm25_file"].write_text(json.dumps([{"id": "1"}]), encoding="utf-8")
+
+            payload = storage.publish_faiss_build(build_id)
+            legacy_paths = storage.legacy_faiss_paths()
+            self.assertEqual(payload["build_id"], build_id)
+            self.assertIn("legacy_paths", payload)
+            self.assertTrue(legacy_paths["index_file"].exists())
+            self.assertTrue(legacy_paths["chunks_file"].exists())
+            self.assertTrue(legacy_paths["manifest_file"].exists())
+            self.assertTrue(legacy_paths["bm25_file"].exists())
+            self.assertEqual(legacy_paths["index_file"].read_bytes(), b"faiss-index")
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
 
     @patch("rag_module.retrieval.rag_search.RERANK_FALLBACK_MODELS", ["cross-encoder/ms-marco-MiniLM-L-6-v2"])
     @patch("rag_module.retrieval.rag_search.RERANK_MODEL", "BAAI/bge-reranker-v2-m3")

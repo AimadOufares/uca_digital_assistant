@@ -103,13 +103,25 @@ class DocumentStorage:
                 }
         return self.legacy_faiss_paths()
 
+    def _mirror_faiss_build_to_legacy_root(self, build_paths: Dict[str, Path]) -> Dict[str, Path]:
+        legacy_paths = self.legacy_faiss_paths()
+        for key in ("index_file", "chunks_file", "manifest_file", "bm25_file"):
+            source = build_paths.get(key)
+            destination = legacy_paths.get(key)
+            if not source or not destination or not source.exists():
+                raise FileNotFoundError(f"Artefact FAISS manquant pour publication: {key}")
+            self.copy_file(source, destination)
+        return legacy_paths
+
     def publish_faiss_build(self, build_id: str) -> Dict:
-        paths = self.faiss_build_paths(build_id)
+        build_paths = self.faiss_build_paths(build_id)
+        legacy_paths = self._mirror_faiss_build_to_legacy_root(build_paths)
         payload = {
             "backend": "faiss",
             "build_id": build_id,
             "published": True,
-            "paths": {key: str(value) for key, value in paths.items()},
+            "paths": {key: str(value) for key, value in build_paths.items()},
+            "legacy_paths": {key: str(value) for key, value in legacy_paths.items()},
         }
         self.save_active_index_pointer(payload)
         return payload
