@@ -107,6 +107,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(
 logger = logging.getLogger(__name__)
 
 ENCODER = encoding_for_model(LLM_MODEL)
+MOJIBAKE_TOKENS = ("Ã", "â€™", "â€“", "â€œ", "â€", "ðŸ", "Â")
 
 
 def _safe_ratio(numerator: int, denominator: int) -> float:
@@ -115,6 +116,30 @@ def _safe_ratio(numerator: int, denominator: int) -> float:
 
 def _tokenize_words(text: str) -> List[str]:
     return re.findall(r"\b[\w'-]+\b", text.lower(), flags=re.UNICODE)
+
+
+def _mojibake_score(text: str) -> int:
+    return sum(text.count(token) for token in MOJIBAKE_TOKENS)
+
+
+def _repair_mojibake(text: str) -> str:
+    if not text or _mojibake_score(text) == 0:
+        return text
+
+    best_text = text
+    best_score = _mojibake_score(text)
+    for encoding in ("cp1252", "latin-1"):
+        try:
+            candidate = text.encode(encoding, errors="ignore").decode("utf-8", errors="ignore")
+        except Exception:
+            continue
+        if not candidate:
+            continue
+        candidate_score = _mojibake_score(candidate)
+        if candidate_score < best_score and len(candidate.strip()) >= max(10, int(len(text.strip()) * 0.6)):
+            best_text = candidate
+            best_score = candidate_score
+    return best_text
 
 
 def _corpus_policy(corpus: str) -> Dict[str, float]:
@@ -205,6 +230,7 @@ def clean_text(text: str, corpus: str = "main") -> str:
     if not text:
         return ""
 
+    text = _repair_mojibake(text)
     text = unicodedata.normalize("NFKC", text)
     text = unescape(text)
     text = re.sub(r"[\u200b\u200c\u200d\ufeff]+", "", text)

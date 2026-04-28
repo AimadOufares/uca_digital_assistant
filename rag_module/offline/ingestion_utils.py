@@ -94,6 +94,7 @@ URL_PATTERN = re.compile(r"https?://|www\.", flags=re.IGNORECASE)
 MOJIBAKE_PATTERN = re.compile(r"(Ãƒ.|Ã‚.|Ã¢â‚¬Â¦|Ã¢â‚¬â„¢|Ã¢â‚¬Å“|Ã¢â‚¬â€œ|Ã¯Â¿Â½)")
 
 MAIN_CATEGORIES = {
+    "digital_service",
     "inscription",
     "reinscription",
     "admission",
@@ -107,6 +108,7 @@ MAIN_CATEGORIES = {
     "contact",
     "reglement",
     "formation",
+    "vie_etudiante",
 }
 
 STATE_PATH = RUNTIME.rag_ingestion_state_dir / "state.json"

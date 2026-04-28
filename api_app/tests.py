@@ -116,6 +116,21 @@ class ProcessingAndIndexingTests(APITestCase):
 
         self.assertIn("https://pucastaff.uca.ma/", cleaned)
 
+    def test_clean_text_repairs_common_mojibake_sequences(self):
+        text = "UniversitÃ© Cadi Ayyad et prÃ©inscription en ligne"
+
+        cleaned = clean_text(text, corpus="main")
+
+        self.assertIn("Université", cleaned)
+        self.assertIn("préinscription", cleaned)
+
+    def test_default_seeds_include_student_digital_services(self):
+        seeds = set(default_seeds("fast"))
+
+        self.assertIn("https://ucaplat.uca.ma/", seeds)
+        self.assertIn("https://cip.uca.ma/", seeds)
+        self.assertIn("https://diplomes.uca.ma/", seeds)
+
     def test_load_chunks_published_merges_main_and_drive(self):
         root = Path.cwd() / ".tmp_test_chunks_case"
         if root.exists():

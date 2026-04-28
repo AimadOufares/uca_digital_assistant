@@ -31,6 +31,15 @@ TARGET_KEYWORDS = {
     "paiement",
     "frais",
     "reclamation",
+    "mot de passe",
+    "connexion",
+    "plateforme",
+    "compte universitaire",
+    "ucastudent",
+    "pedoc",
+    "ucaplat",
+    "cip",
+    "e-diplome",
     "equivalence",
     "inscription administrative",
     "registration",
@@ -59,6 +68,10 @@ SOURCE_HINT_KEYWORDS = {
     "administratif",
     "administrative",
     "service",
+    "numerique",
+    "plateforme",
+    "compte",
+    "authentification",
     "campus",
     "formation",
     "programme",
@@ -69,7 +82,17 @@ SOURCE_HINT_KEYWORDS = {
     "dossier",
 }
 
-HIGH_SIGNAL_DOCUMENT_TYPES = {"admission", "inscription", "bourse", "calendrier", "resultats", "formation"}
+HIGH_SIGNAL_DOCUMENT_TYPES = {
+    "admission",
+    "inscription",
+    "bourse",
+    "calendrier",
+    "resultats",
+    "formation",
+    "scolarite",
+    "pedagogie_numerique",
+    "digital_service",
+}
 MIN_CHUNK_RELEVANCE_SCORE = 1
 
 NORMALIZED_TARGET_KEYWORDS = {normalize_text(keyword) for keyword in TARGET_KEYWORDS}

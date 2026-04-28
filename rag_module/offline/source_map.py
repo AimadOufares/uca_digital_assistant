@@ -16,23 +16,37 @@ class SourceRule:
 PRIORITY_LEVELS = {"A": 100, "B": 70, "C": 40}
 
 RULES: tuple[SourceRule, ...] = (
+    SourceRule(
+        "uca-core-student",
+        ("www.uca.ma", "uca.ma"),
+        ("inscription", "reinscription", "candidature", "attestation", "bourse", "resultat", "calendrier"),
+        "A",
+        "scolarite",
+        "main",
+        True,
+    ),
+    SourceRule("pole-digitalisation", ("pole-digitalisation.uca.ma",), ("",), "A", "digital_service", "main", True),
     SourceRule("ucastudent", ("ucastudent.uca.ma",), ("",), "A", "scolarite", "main", True),
-    SourceRule("reins", ("reins.uca.ma",), ("",), "A", "reinscription", "main", True),
-    SourceRule("e-candidature", ("e-candidature.uca.ma",), ("",), "A", "candidature", "main", True),
-    SourceRule("onousc-student", ("onousc.ma", "www.onousc.ma"), ("bourse", "restaurant", "logement", "etudiant", "centres-medicaux"), "A", "bourse", "main"),
-    SourceRule("uca-admin", ("uca.ma", "www.uca.ma", "fsjes.uca.ma", "flsh.uca.ma", "ensa-marrakech.uca.ma", "fmpm.uca.ma", "fps.uca.ma", "ensas.uca.ma", "ests.uca.ma", "estk.uca.ma", "fstg-marrakech.ac.ma"), ("scolarite", "admission", "inscription", "candidature", "contact", "attestation", "note", "releve", "emploi-du-temps", "calendrier", "reglement"), "A", "scolarite", "main"),
-    SourceRule("uca-formation", ("uca.ma", "www.uca.ma", "fsjes.uca.ma", "flsh.uca.ma", "ensa-marrakech.uca.ma", "fmpm.uca.ma", "fps.uca.ma", "ensas.uca.ma", "ests.uca.ma", "estk.uca.ma", "fstg-marrakech.ac.ma"), ("master", "licence", "doctorat", "filiere", "programme", "orientation"), "B", "formation", "archive"),
-    SourceRule("enssup-student", ("enssup.gov.ma", "www.enssup.gov.ma"), ("etudiant", "student"), "B", "formation", "archive"),
-    SourceRule("institutionnel", ("uca.ma", "www.uca.ma", "fsjes.uca.ma", "flsh.uca.ma", "ensa-marrakech.uca.ma", "fmpm.uca.ma", "fps.uca.ma", "ensas.uca.ma", "ests.uca.ma", "estk.uca.ma", "fstg-marrakech.ac.ma"), ("recherche", "laboratoire", "laboratoires", "colloque", "conference", "partenariat", "gouvernance", "presidence"), "C", "recherche", "archive"),
+    SourceRule("pedoc", ("pedoc.uca.ma",), ("",), "A", "scolarite", "main", True),
+    SourceRule("ucaplat", ("ucaplat.uca.ma",), ("",), "A", "digital_service", "main", True),
+    SourceRule("cip", ("cip.uca.ma",), ("",), "A", "digital_service", "main", True),
+    SourceRule("diplomes", ("diplomes.uca.ma",), ("",), "A", "attestation", "main", True),
+    SourceRule("pucastaff", ("pucastaff.uca.ma",), ("",), "A", "rh", "main", True),
+    SourceRule("reins", ("reins.uca.ma",), ("",), "B", "reinscription", "main", True),
+    SourceRule("e-candidature", ("e-candidature.uca.ma",), ("",), "B", "candidature", "main", True),
+    SourceRule("mobilite", ("mobilite.uca.ma",), ("",), "B", "bourse", "main", True),
+    SourceRule("clubs", ("clubs.uca.ma",), ("",), "B", "vie_etudiante", "main", True),
 )
 
 PREMIUM_URLS: tuple[str, ...] = (
+    "https://pole-digitalisation.uca.ma/",
     "https://ucastudent.uca.ma/",
-    "https://reins.uca.ma/",
-    "https://e-candidature.uca.ma/",
-    "https://www.onousc.ma/Bourses",
-    "https://www.onousc.ma/Acces-aux-restaurants-universitaires",
-    "https://www.onousc.ma/Centres-medicaux",
+    "https://pedoc.uca.ma/",
+    "https://ucaplat.uca.ma/",
+    "https://cip.uca.ma/",
+    "https://diplomes.uca.ma/",
+    "https://mobilite.uca.ma/",
+    "https://pucastaff.uca.ma/",
 )
 
 FAST_PROFILE = {
