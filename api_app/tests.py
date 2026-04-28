@@ -1,6 +1,7 @@
 import json
-from pathlib import Path
 import shutil
+from pathlib import Path
+from threading import Lock
 from unittest.mock import MagicMock, patch
 
 from django.urls import reverse
@@ -9,8 +10,14 @@ from rest_framework.test import APITestCase
 
 from rag_module.contracts import AnswerResult
 from rag_module.offline.indexing import load_chunks
-from rag_module.offline.ingestion_utils import decide_document, default_seeds
+from rag_module.offline.ingestion_utils import (
+    _download_document,
+    compute_download_quality,
+    decide_document,
+    default_seeds,
+)
 from rag_module.offline.processing import clean_text
+from rag_module.shared.metadata_policy import prepare_chunk_metadata
 from rag_module.services.offline import run_indexing
 
 
@@ -130,6 +137,86 @@ class ProcessingAndIndexingTests(APITestCase):
         self.assertIn("https://ucaplat.uca.ma/", seeds)
         self.assertIn("https://cip.uca.ma/", seeds)
         self.assertIn("https://diplomes.uca.ma/", seeds)
+
+    def test_static_html_quality_stays_in_static_mode(self):
+        html = (
+            b"<html><body><main><h1>Attestation UC@Student</h1><p>Guide pour demander une attestation."
+            b"</p><p>Connectez-vous puis choisissez le service.</p></main></body></html>"
+        )
+
+        quality = compute_download_quality("https://ucastudent.uca.ma/attestation", 0, html, "text/html", ".html")
+
+        self.assertFalse(quality["js_dependent"])
+        self.assertEqual(quality["page_kind"], "guide")
+        self.assertIn("attestation", quality["intent"])
+
+    def test_sparse_spa_html_is_detected_as_js_dependent(self):
+        html = (
+            b'<html><body><div id="root"></div><script src="/app.js"></script>'
+            b"<script>window.__NEXT_DATA__={};</script><script src=\"/chunk.js\"></script>"
+            b"<script src=\"/vendor.js\"></script><script src=\"/runtime.js\"></script>"
+            b"<script src=\"/boot.js\"></script></body></html>"
+        )
+
+        quality = compute_download_quality("https://ucaplat.uca.ma/dashboard", 0, html, "text/html", ".html")
+
+        self.assertTrue(quality["js_dependent"])
+
+    @patch("rag_module.offline.ingestion_utils.render_url")
+    def test_download_document_uses_playwright_fallback_when_needed(self, mocked_render):
+        mocked_response = MagicMock()
+        mocked_response.status_code = 200
+        mocked_response.content = (
+            b'<html><body><div id="root"></div><script src="/app.js"></script>'
+            b"<script>window.__NEXT_DATA__={};</script><script src=\"/chunk.js\"></script>"
+            b"<script src=\"/vendor.js\"></script><script src=\"/runtime.js\"></script>"
+            b"<script src=\"/boot.js\"></script></body></html>"
+        )
+        mocked_response.headers = {"Content-Type": "text/html; charset=utf-8"}
+        mocked_render.return_value = MagicMock(
+            ok=True,
+            html="<html><body><main><h1>UCAPLAT</h1><p>Cours en ligne et devoir.</p></main></body></html>",
+            error="",
+            final_url="https://ucaplat.uca.ma/dashboard",
+            selector_used="main",
+        )
+
+        with patch("rag_module.offline.ingestion_utils.requests.get", return_value=mocked_response), patch(
+            "rag_module.offline.ingestion_utils.RUNTIME"
+        ) as mocked_runtime:
+            mocked_runtime.rag_js_fallback_enabled = True
+            mocked_runtime.rag_js_max_pages_per_run = 5
+            mocked_runtime.rag_js_render_timeout_ms = 12000
+            mocked_runtime.rag_js_allowed_domains = ["ucaplat.uca.ma"]
+            download = _download_document(
+                "https://ucaplat.uca.ma/dashboard",
+                0,
+                js_usage={"count": 0},
+                js_lock=Lock(),
+            )
+
+        self.assertIsNotNone(download)
+        self.assertEqual(download["render_mode"], "playwright")
+        self.assertTrue(download["render_success"])
+        self.assertIn("cours", download["quality"]["intent"])
+
+    def test_prepare_chunk_metadata_adds_page_kind_and_intent(self):
+        chunk = {
+            "text": "Guide UCAPLAT pour suivre les cours et deposer les devoirs en ligne.",
+            "metadata": {
+                "language": "fr",
+                "file_type": "html",
+                "url": "https://ucaplat.uca.ma/guide",
+                "last_modified": "Tue, 01 Apr 2025 10:00:00 GMT",
+            },
+        }
+
+        enriched = prepare_chunk_metadata(chunk, "https://ucaplat.uca.ma/guide")
+
+        self.assertIsNotNone(enriched)
+        self.assertEqual(enriched["metadata"]["page_kind"], "guide")
+        self.assertIn("cours", enriched["metadata"]["intent"])
+        self.assertEqual(enriched["metadata"]["service_type"], "pedagogie_numerique")
 
     def test_load_chunks_published_merges_main_and_drive(self):
         root = Path.cwd() / ".tmp_test_chunks_case"

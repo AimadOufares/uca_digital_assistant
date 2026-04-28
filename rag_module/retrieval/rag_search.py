@@ -140,7 +140,7 @@ QUERY_TOPIC_RULES: Dict[str, Dict[str, Any]] = {
             "scolarite",
             "registration",
         },
-        "allowed_document_types": {"inscription", "admission", "general"},
+        "allowed_document_types": {"inscription", "admission", "scolarite", "digital_service", "general"},
         "conflicts": {"bourse", "resultats"},
     },
     "admission": {
@@ -154,7 +154,7 @@ QUERY_TOPIC_RULES: Dict[str, Dict[str, Any]] = {
             "appel a candidatures",
             "application",
         },
-        "allowed_document_types": {"admission", "inscription", "formation", "general"},
+        "allowed_document_types": {"admission", "inscription", "formation", "scolarite", "general"},
         "conflicts": {"bourse", "stage"},
     },
     "bourse": {
@@ -181,7 +181,7 @@ QUERY_TOPIC_RULES: Dict[str, Dict[str, Any]] = {
             "deadline",
             "schedule",
         },
-        "allowed_document_types": {"calendrier", "resultats", "inscription", "general"},
+        "allowed_document_types": {"calendrier", "resultats", "inscription", "scolarite", "general"},
         "conflicts": {"bourse"},
     },
     "resultats": {
@@ -213,7 +213,7 @@ QUERY_TOPIC_RULES: Dict[str, Dict[str, Any]] = {
             "modules",
             "cours",
         },
-        "allowed_document_types": {"formation", "admission", "general"},
+        "allowed_document_types": {"formation", "admission", "pedagogie_numerique", "general"},
         "conflicts": set(),
     },
     "contact": {
@@ -227,7 +227,7 @@ QUERY_TOPIC_RULES: Dict[str, Dict[str, Any]] = {
             "service",
             "scolarite",
         },
-        "allowed_document_types": {"contact", "inscription", "general"},
+        "allowed_document_types": {"contact", "inscription", "digital_service", "scolarite", "general"},
         "conflicts": set(),
     },
     "reglement": {
@@ -241,7 +241,7 @@ QUERY_TOPIC_RULES: Dict[str, Dict[str, Any]] = {
             "modalite",
             "modalites",
         },
-        "allowed_document_types": {"reglement", "formation", "general"},
+        "allowed_document_types": {"reglement", "formation", "pedagogie_numerique", "general"},
         "conflicts": set(),
     },
 }

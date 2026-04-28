@@ -1,13 +1,11 @@
 from __future__ import annotations
 
 import logging
-import re
 from pathlib import Path
 from typing import Callable, Dict, List
 
 import docx
 import pdfplumber
-from bs4 import BeautifulSoup
 from docx.document import Document as DocxDocument
 from docx.oxml.table import CT_Tbl
 from docx.oxml.text.paragraph import CT_P
@@ -20,8 +18,10 @@ except ImportError:  # pragma: no cover
     fitz = None
 
 try:
+    from .structured_parser import extract_main_text
     from ..shared.runtime import RuntimeSettings, get_runtime_settings
 except ImportError:  # pragma: no cover
+    from rag_module.offline.structured_parser import extract_main_text
     from rag_module.shared.runtime import RuntimeSettings, get_runtime_settings
 
 
@@ -31,28 +31,8 @@ logger = logging.getLogger(__name__)
 def extract_text_html(path: str) -> str:
     try:
         with open(path, encoding="utf-8") as handle:
-            soup = BeautifulSoup(handle, "html.parser")
-
-        for tag in soup(["script", "style", "nav", "footer", "header", "aside", "noscript"]):
-            tag.decompose()
-
-        main = soup.find(["main", "article"]) or soup.body or soup
-
-        for tag in main.find_all(["h1", "h2", "h3", "h4", "h5", "h6"]):
-            level = int(tag.name[1])
-            tag.insert_before(f"\n\n{'#' * level} ")
-            tag.insert_after("\n\n")
-
-        for tag in main.find_all("li"):
-            tag.insert_before("\n- ")
-            tag.insert_after("\n")
-
-        for tag in main.find_all("p"):
-            tag.insert_before("\n\n")
-            tag.insert_after("\n\n")
-
-        text = main.get_text(" ", strip=True)
-        return re.sub(r"\n[ \t]*\n+", "\n\n", text).strip()
+            parsed = extract_main_text(handle.read())
+        return str(parsed.get("text") or "").strip()
     except Exception as exc:
         logger.warning("HTML extraction error %s: %s", path, exc)
         return ""

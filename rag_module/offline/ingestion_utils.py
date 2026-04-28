@@ -18,6 +18,7 @@ from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
 import requests
 from bs4 import BeautifulSoup
 
+from ..adapters.dynamic_renderer import render_url
 from ..contracts import IngestedDocumentDecision, IngestionJobConfig
 from ..shared.runtime import get_runtime_settings
 from .source_map import default_seeds_for_mode, get_profile, match_source_rule
@@ -91,6 +92,25 @@ EXCLUDE_PATHS = [
 
 WORD_PATTERN = re.compile(r"\b[\w'-]+\b", flags=re.UNICODE)
 URL_PATTERN = re.compile(r"https?://|www\.", flags=re.IGNORECASE)
+JS_APP_MARKERS = ("__next", "data-reactroot", "react", "vue", "ng-app", 'id="app"', 'id="root"')
+PAGE_KIND_PATTERNS = {
+    "calendrier": ("calendrier", "planning", "emploi du temps", "schedule", "date limite", "deadline"),
+    "resultats": ("resultat", "resultats", "notes", "deliberation", "rattrapage"),
+    "faq": ("faq", "foire aux questions", "questions frequentes"),
+    "formulaire": ("formulaire", "deposer", "soumettre", "postuler", "candidature en ligne"),
+    "procedure": ("procedure", "etape", "demarche", "pieces a fournir", "comment", "instructions"),
+    "guide": ("guide", "manuel", "mode d'emploi", "accompagnement"),
+}
+INTENT_KEYWORDS = {
+    "connexion": ("connexion", "se connecter", "login", "authentification", "acceder"),
+    "mot_de_passe": ("mot de passe", "password", "reinitialiser", "oubli"),
+    "attestation": ("attestation", "certificat", "e-diplome", "diplome"),
+    "notes": ("notes", "resultats", "releve", "deliberation"),
+    "reinscription": ("reinscription", "reinscrire", "inscription administrative"),
+    "candidature": ("candidature", "postuler", "depot dossier", "preinscription"),
+    "cours": ("cours", "module", "examen en ligne", "devoir", "classe virtuelle"),
+    "depot_document": ("depot", "televerser", "soumettre", "upload", "piece jointe"),
+}
 MOJIBAKE_PATTERN = re.compile(r"(Ãƒ.|Ã‚.|Ã¢â‚¬Â¦|Ã¢â‚¬â„¢|Ã¢â‚¬Å“|Ã¢â‚¬â€œ|Ã¯Â¿Â½)")
 
 MAIN_CATEGORIES = {
@@ -296,6 +316,19 @@ def extract_text_preview(content: bytes, ext: str) -> str:
     return ""
 
 
+def extract_structured_preview(content: bytes, ext: str) -> Dict[str, object]:
+    if not content:
+        return {"text": "", "title": "", "headings": [], "links": [], "lists": 0, "tables": 0}
+    if ext in {".html", ".htm"}:
+        try:
+            html = content[:2_000_000].decode("utf-8", errors="replace")
+            return extract_main_text(html)
+        except Exception:
+            return {"text": "", "title": "", "headings": [], "links": [], "lists": 0, "tables": 0}
+    preview = extract_text_preview(content, ext)
+    return {"text": preview, "title": "", "headings": [], "links": [], "lists": 0, "tables": 0}
+
+
 def score_text_quality(text: str) -> Dict:
     cleaned = unescape(text or "")
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
@@ -322,6 +355,73 @@ def score_text_quality(text: str) -> Dict:
         "url_density": url_density,
         "mojibake_ratio": mojibake_ratio,
     }
+
+
+def detect_page_kind(url: str, preview_text: str, title: str = "") -> str:
+    haystack = normalize_quality_text(f"{url} {title} {preview_text[:4000]}")
+    for page_kind, keywords in PAGE_KIND_PATTERNS.items():
+        if any(normalize_quality_text(keyword) in haystack for keyword in keywords):
+            return page_kind
+    return "landing"
+
+
+def detect_intents(url: str, preview_text: str, title: str = "") -> List[str]:
+    haystack = normalize_quality_text(f"{url} {title} {preview_text[:6000]}")
+    intents = [
+        intent
+        for intent, keywords in INTENT_KEYWORDS.items()
+        if any(normalize_quality_text(keyword) in haystack for keyword in keywords)
+    ]
+    return intents
+
+
+def compute_freshness_score(last_modified: str, preview_text: str) -> float:
+    dates = re.findall(r"\b(?:19|20)\d{2}\b", preview_text[:5000])
+    score = 0.45
+    if last_modified:
+        score += 0.2
+    if dates:
+        latest_year = max(int(year) for year in dates)
+        if latest_year >= datetime.now().year:
+            score += 0.3
+        elif latest_year >= datetime.now().year - 1:
+            score += 0.2
+        elif latest_year >= 2024:
+            score += 0.1
+    return max(0.0, min(1.0, round(score, 4)))
+
+
+def detect_quality_issue(metrics: Dict, page_kind: str, render_mode: str, render_success: bool) -> str:
+    if render_mode == "playwright" and not render_success:
+        return "empty_after_playwright"
+    if metrics.get("chars", 0) < 120:
+        return "empty_after_static"
+    if metrics.get("mojibake_ratio", 0.0) > 0.01:
+        return "encoding_suspect"
+    lowered = str(metrics.get("text", "") or "").lower()
+    if any(token in lowered for token in ("se connecter", "login", "mot de passe", "authentification")) and metrics.get("words", 0) < 70:
+        return "login_wall"
+    if page_kind == "landing" and metrics.get("words", 0) < 140:
+        return "too_generic"
+    return ""
+
+
+def should_use_js_fallback(html_text: str, structured: Dict[str, object], metrics: Dict[str, object]) -> bool:
+    lowered_html = (html_text or "").lower()
+    text = str(structured.get("text") or "")
+    heading_count = len(structured.get("headings", []) or [])
+    list_count = int(structured.get("lists", 0) or 0)
+    if int(metrics.get("words", 0) or 0) < 45 and any(marker in lowered_html for marker in JS_APP_MARKERS):
+        return True
+    if int(metrics.get("chars", 0) or 0) < 250 and lowered_html.count("<script") >= 6:
+        return True
+    if heading_count == 0 and list_count == 0 and int(metrics.get("words", 0) or 0) < 35:
+        return True
+    if "<iframe" in lowered_html and int(metrics.get("words", 0) or 0) < 80:
+        return True
+    if text.strip().lower() in {"", "connexion", "login"}:
+        return True
+    return False
 
 
 def compute_download_quality(url: str, depth: int, content: bytes, content_type: str, ext: str) -> Dict:
@@ -384,10 +484,23 @@ def compute_download_quality(url: str, depth: int, content: bytes, content_type:
             "metrics": {"bytes": content_size},
             "preview_text": "",
             "text_content_hash": "",
+            "page_kind": "landing",
+            "intent": [],
+            "freshness_score": 0.45,
+            "quality_issue": "",
+            "title": "",
+            "headings": [],
+            "links": [],
+            "js_dependent": False,
         }
 
-    preview = extract_text_preview(content, ext)
+    structured = extract_structured_preview(content, ext)
+    preview = str(structured.get("text") or "")
+    title = str(structured.get("title") or "")
     metrics = score_text_quality(preview)
+    page_kind = detect_page_kind(url, preview, title=title)
+    intents = detect_intents(url, preview, title=title)
+    freshness_score = compute_freshness_score("", preview)
     score = 100.0
     if metrics["words"] < 90:
         score -= min(35.0, (90 - metrics["words"]) * 0.5)
@@ -405,9 +518,16 @@ def compute_download_quality(url: str, depth: int, content: bytes, content_type:
         score += min(16.0, len(keyword_hits) * 4.0)
     elif depth >= 2:
         score -= 12.0
+    if intents:
+        score += min(14.0, len(intents) * 3.0)
+    if page_kind in {"procedure", "guide", "faq", "formulaire"}:
+        score += 8.0
+    elif page_kind == "landing":
+        score -= 10.0
     if "404" in metrics["text"] and metrics["words"] < 140:
         score -= 20.0
     score = max(0, min(100, int(round(score))))
+    quality_issue = detect_quality_issue(metrics, page_kind, render_mode="static", render_success=True)
     return {
         "keep": score >= 52,
         "score": score,
@@ -424,6 +544,18 @@ def compute_download_quality(url: str, depth: int, content: bytes, content_type:
         },
         "preview_text": metrics["text"][:12000],
         "text_content_hash": compute_text_hash(metrics["text"][:12000]),
+        "page_kind": page_kind,
+        "intent": intents,
+        "freshness_score": freshness_score,
+        "quality_issue": quality_issue,
+        "title": title,
+        "headings": structured.get("headings", []),
+        "links": structured.get("links", []),
+        "js_dependent": should_use_js_fallback(
+            content[:200000].decode("utf-8", errors="replace") if ext in {".html", ".htm"} else "",
+            structured,
+            metrics,
+        ),
     }
 
 
@@ -560,7 +692,12 @@ def _is_due_for_refresh(entry: Dict, refresh_days: int) -> bool:
     return datetime.now(timezone.utc) - last_checked >= timedelta(days=refresh_days)
 
 
-def _download_document(url: str, depth: int) -> Optional[Dict]:
+def _download_document(
+    url: str,
+    depth: int,
+    js_usage: Optional[Dict[str, int]] = None,
+    js_lock: Optional[threading.Lock] = None,
+) -> Optional[Dict]:
     for _ in range(RETRIES):
         try:
             timeout = TIMEOUT if depth < 2 else 10
@@ -576,8 +713,42 @@ def _download_document(url: str, depth: int) -> Optional[Dict]:
                 content_disposition=response.headers.get("Content-Disposition", ""),
             )
             quality = compute_download_quality(url, depth, content, content_type, ext)
+            render_mode = "static"
+            render_success = False
+            render_error = ""
+            final_url = url
+            selector_used = ""
+
+            if (
+                ext in {".html", ".htm"}
+                and bool(quality.get("js_dependent"))
+                and RUNTIME.rag_js_fallback_enabled
+            ):
+                allowed = False
+                if js_usage is not None and js_lock is not None:
+                    with js_lock:
+                        if js_usage.get("count", 0) < RUNTIME.rag_js_max_pages_per_run:
+                            js_usage["count"] = js_usage.get("count", 0) + 1
+                            allowed = True
+                if allowed:
+                    render_result = render_url(url, settings=RUNTIME)
+                    render_mode = "playwright"
+                    render_success = render_result.ok
+                    render_error = render_result.error
+                    selector_used = render_result.selector_used
+                    final_url = render_result.final_url or url
+                    if render_result.ok and render_result.html.strip():
+                        content = render_result.html.encode("utf-8", errors="ignore")
+                        content_type = "text/html; charset=utf-8"
+                        ext = ".html"
+                        quality = compute_download_quality(final_url, depth, content, content_type, ext)
+                    elif not quality.get("quality_issue"):
+                        quality["quality_issue"] = "empty_after_playwright"
+                elif not quality.get("quality_issue"):
+                    quality["quality_issue"] = quality.get("quality_issue") or "empty_after_static"
+
             return {
-                "url": url,
+                "url": final_url,
                 "depth": depth,
                 "content": content,
                 "content_type": content_type,
@@ -585,6 +756,10 @@ def _download_document(url: str, depth: int) -> Optional[Dict]:
                 "headers": dict(response.headers),
                 "quality": quality,
                 "content_hash": compute_hash(content),
+                "render_mode": render_mode,
+                "render_success": render_success,
+                "render_error": render_error,
+                "selector_used": selector_used,
             }
         except Exception as exc:
             logger.warning("Download failed for %s: %s", url, exc)
@@ -622,6 +797,11 @@ def crawl(config: IngestionJobConfig) -> Dict:
         "skipped": 0,
         "categories": Counter(),
         "priorities": Counter(),
+        "services": Counter(),
+        "intents": Counter(),
+        "page_kinds": Counter(),
+        "quality_issues": Counter(),
+        "render_modes": Counter(),
         "documents": [],
     }
 
@@ -630,6 +810,8 @@ def crawl(config: IngestionJobConfig) -> Dict:
     domain_counts = defaultdict(int)
     subdomain_counts = defaultdict(int)
     condition = threading.Condition()
+    js_lock = threading.Lock()
+    js_usage = {"count": 0}
     active_workers = 0
     done = False
 
@@ -650,7 +832,26 @@ def crawl(config: IngestionJobConfig) -> Dict:
         if info["is_premium"]:
             base -= 15
         path = url.lower()
-        if any(token in path for token in ("inscription", "reinscription", "candidature", "resultat", "calendrier", "bourse", "scolarite", "contact")):
+        if any(
+            token in path
+            for token in (
+                "inscription",
+                "reinscription",
+                "candidature",
+                "resultat",
+                "calendrier",
+                "bourse",
+                "scolarite",
+                "contact",
+                "attestation",
+                "note",
+                "connexion",
+                "password",
+                "login",
+                "cours",
+                "module",
+            )
+        ):
             base -= 10
         if path.endswith(".pdf"):
             base += 8
@@ -704,9 +905,18 @@ def crawl(config: IngestionJobConfig) -> Dict:
                     metrics["unchanged"] += 1
                     continue
 
-                download = _download_document(current_url, depth)
+                download = _download_document(current_url, depth, js_usage=js_usage, js_lock=js_lock)
                 if not download:
                     metrics["reject"] += 1
+                    report_rows.append(
+                        {
+                            "url": current_url,
+                            "status": "rejected",
+                            "decision_reason": "download_failed",
+                            "quality_issue": "empty_after_static",
+                            "saved_at": now_iso(),
+                        }
+                    )
                     state_items[current_url] = {
                         **previous,
                         "url": current_url,
@@ -725,6 +935,7 @@ def crawl(config: IngestionJobConfig) -> Dict:
                     extension=str(download["extension"]),
                     mode=config.mode,
                 )
+                source_rule = match_source_rule(current_url)
                 text_hash = str(quality.get("text_content_hash") or "")
                 previous_hash = str(previous.get("content_hash") or "")
                 status = "new" if not previous else "updated"
@@ -761,17 +972,53 @@ def crawl(config: IngestionJobConfig) -> Dict:
                         "last_modified": download["headers"].get("Last-Modified", ""),
                         "ingestion_mode": config.mode,
                         "saved_at": now_iso(),
+                        "render_mode": download.get("render_mode", "static"),
+                        "js_dependent": bool(quality.get("js_dependent", False)),
+                        "render_success": bool(download.get("render_success", False)),
+                        "render_error": str(download.get("render_error", "") or ""),
+                        "render_selector": str(download.get("selector_used", "") or ""),
+                        "page_kind": str(quality.get("page_kind", "landing") or "landing"),
+                        "intent": list(quality.get("intent", [])),
+                        "freshness_score": float(quality.get("freshness_score", 0.0) or 0.0),
+                        "quality_issue": str(quality.get("quality_issue", "") or ""),
+                        "source_rule_name": str(source_rule.get("rule_name", "")),
+                        "title": str(quality.get("title", "") or ""),
+                        "headings": list(quality.get("headings", [])),
+                        "official_links": list(quality.get("links", [])),
                     }
                     _save_document_metadata(decision.corpus_target, file_path, metadata_payload)
                     metrics["downloaded"] += 1
                     metrics[decision.corpus_target] += 1
                     metrics["categories"][decision.document_category] += 1
                     metrics["priorities"][decision.source_priority] += 1
+                    metrics["services"][metadata_payload["source_rule_name"] or "unknown"] += 1
+                    metrics["page_kinds"][metadata_payload["page_kind"]] += 1
+                    metrics["render_modes"][metadata_payload["render_mode"]] += 1
+                    for intent in metadata_payload["intent"]:
+                        metrics["intents"][intent] += 1
+                    if metadata_payload["quality_issue"]:
+                        metrics["quality_issues"][metadata_payload["quality_issue"]] += 1
                     metrics["documents"].append(metadata_payload)
                     report_rows.append(metadata_payload)
                 else:
+                    report_rows.append(
+                        {
+                            "url": current_url,
+                            "status": "rejected" if decision.corpus_target == "reject" else "skipped",
+                            "decision_reason": decision.decision_reason,
+                            "quality_issue": str(quality.get("quality_issue", "") or ""),
+                            "page_kind": str(quality.get("page_kind", "landing") or "landing"),
+                            "intent": list(quality.get("intent", [])),
+                            "render_mode": download.get("render_mode", "static"),
+                            "render_success": bool(download.get("render_success", False)),
+                            "render_error": str(download.get("render_error", "") or ""),
+                            "saved_at": now_iso(),
+                        }
+                    )
                     if decision.corpus_target == "reject":
                         metrics["reject"] += 1
+                        if quality.get("quality_issue"):
+                            metrics["quality_issues"][str(quality.get("quality_issue"))] += 1
                     else:
                         metrics["skipped"] += 1
 
@@ -815,7 +1062,7 @@ def crawl(config: IngestionJobConfig) -> Dict:
         "metrics": {
             key: value
             for key, value in metrics.items()
-            if key not in {"documents", "categories", "priorities"}
+            if key not in {"documents", "categories", "priorities", "services", "intents", "page_kinds", "quality_issues", "render_modes"}
         },
     }
     _save_state(state)
@@ -834,7 +1081,14 @@ def crawl(config: IngestionJobConfig) -> Dict:
         "downloaded_count": metrics["downloaded"],
         "category_distribution": dict(metrics["categories"]),
         "priority_distribution": dict(metrics["priorities"]),
+        "service_coverage": dict(metrics["services"]),
+        "intent_coverage": dict(metrics["intents"]),
+        "page_kind_distribution": dict(metrics["page_kinds"]),
+        "quality_issue_distribution": dict(metrics["quality_issues"]),
+        "render_mode_distribution": dict(metrics["render_modes"]),
+        "js_render_count": js_usage.get("count", 0),
         "documents": metrics["documents"],
+        "audit_documents": report_rows,
     }
     report_path = RUNTIME.rag_reports_dir / f"ingestion_run_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
     _save_json_atomic(report_path, report)
@@ -851,6 +1105,7 @@ def crawl(config: IngestionJobConfig) -> Dict:
         "reject_count": metrics["reject"],
         "unchanged_count": metrics["unchanged"],
         "skipped_count": metrics["skipped"],
+        "js_render_count": js_usage.get("count", 0),
         "documents": metrics["documents"],
         "report_path": str(report_path),
     }

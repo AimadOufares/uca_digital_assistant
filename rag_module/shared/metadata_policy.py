@@ -1,6 +1,7 @@
 import os
 import re
 import unicodedata
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -83,6 +84,24 @@ SERVICE_WORKFLOW_STEPS = {
     "UCAPLAT": ["1. Connexion", "2. Accès au cours", "3. Dépôt ou évaluation"],
     "CIP": ["1. Connexion", "2. Choix du service", "3. Validation de la demande"],
 }
+PAGE_KIND_RULES = {
+    "guide": ["guide", "manuel", "mode d'emploi", "tutoriel"],
+    "procedure": ["procedure", "etape", "demarche", "instruction", "pieces a fournir"],
+    "faq": ["faq", "foire aux questions", "questions frequentes"],
+    "calendrier": ["calendrier", "planning", "emploi du temps", "date limite", "deadline"],
+    "resultats": ["resultat", "resultats", "notes", "deliberation"],
+    "formulaire": ["formulaire", "soumettre", "deposer", "postuler", "candidature en ligne"],
+}
+INTENT_RULES = {
+    "connexion": ["connexion", "se connecter", "login", "authentification"],
+    "mot_de_passe": ["mot de passe", "password", "reinitialiser", "oubli"],
+    "attestation": ["attestation", "certificat", "e-diplome", "diplome"],
+    "notes": ["notes", "resultats", "releve"],
+    "reinscription": ["reinscription", "inscription administrative"],
+    "candidature": ["candidature", "preinscription", "postuler", "dossier"],
+    "cours": ["cours", "module", "devoir", "examen en ligne", "classe virtuelle"],
+    "depot_document": ["depot", "televerser", "soumettre", "upload"],
+}
 
 
 def normalize_text(value: str) -> str:
@@ -138,6 +157,41 @@ def detect_year(source_path: str, text: str) -> Optional[int]:
     return year_values[-1]
 
 
+def detect_page_kind(source_path: str, text: str) -> str:
+    haystack = normalize_text(f"{source_path} {text}")
+    for page_kind, keywords in PAGE_KIND_RULES.items():
+        if any(normalize_text(keyword) in haystack for keyword in keywords):
+            return page_kind
+    return "landing"
+
+
+def detect_intents(source_path: str, text: str) -> List[str]:
+    haystack = normalize_text(f"{source_path} {text}")
+    return [
+        intent
+        for intent, keywords in INTENT_RULES.items()
+        if any(normalize_text(keyword) in haystack for keyword in keywords)
+    ]
+
+
+def compute_freshness_score(metadata: Dict, year: Optional[int]) -> float:
+    score = float(metadata.get("freshness_score", 0.0) or 0.0)
+    if score > 0:
+        return round(max(0.0, min(1.0, score)), 4)
+    score = 0.45
+    if metadata.get("last_modified"):
+        score += 0.2
+    if isinstance(year, int):
+        current_year = datetime.now().year
+        if year >= current_year:
+            score += 0.3
+        elif year >= current_year - 1:
+            score += 0.2
+        elif year >= 2024:
+            score += 0.1
+    return round(max(0.0, min(1.0, score)), 4)
+
+
 def prepare_chunk_metadata(chunk: Dict, source_path: str) -> Optional[Dict]:
     text = (chunk.get("text", "") or "").strip()
     if not text:
@@ -153,6 +207,8 @@ def prepare_chunk_metadata(chunk: Dict, source_path: str) -> Optional[Dict]:
     service_type = detect_service_type(source_path, text)
     service_name = detect_service_name(source_path, text)
     year = detect_year(source_path, text)
+    page_kind = detect_page_kind(source_path, text)
+    intents = detect_intents(source_path, text)
 
     metadata["file_type"] = file_type
     metadata["target_audience"] = audience
@@ -161,6 +217,9 @@ def prepare_chunk_metadata(chunk: Dict, source_path: str) -> Optional[Dict]:
     metadata["official_url"] = SERVICE_OFFICIAL_URLS.get(service_name, "")
     metadata["main_actions"] = SERVICE_MAIN_ACTIONS.get(service_name, [])
     metadata["workflow_steps"] = SERVICE_WORKFLOW_STEPS.get(service_name, [])
+    metadata["page_kind"] = page_kind
+    metadata["intent"] = intents
+    metadata["freshness_score"] = compute_freshness_score(metadata, year)
     # Map document_type and faculty to defaults to avoid breaking older pipeline logic
     metadata["document_type"] = service_type
     metadata["faculty"] = "UCA"

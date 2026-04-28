@@ -166,6 +166,8 @@ def compute_metadata_boost(metadata: Dict, query: str) -> float:
 
     document_type = normalize_text(str(metadata.get("document_type") or ""))
     faculty = normalize_text(str(metadata.get("faculty") or ""))
+    page_kind = normalize_text(str(metadata.get("page_kind") or ""))
+    intents = [normalize_text(str(item)) for item in metadata.get("intent", []) or []]
     year = metadata.get("year")
 
     if document_type and document_type in normalized_query:
@@ -175,6 +177,11 @@ def compute_metadata_boost(metadata: Dict, query: str) -> float:
             boost += 0.04
 
     if faculty and faculty != "unknown" and faculty in normalized_query:
+        boost += 0.05
+
+    if page_kind and page_kind in normalized_query:
+        boost += 0.04
+    if intents and any(intent and intent in normalized_query for intent in intents):
         boost += 0.05
 
     if isinstance(year, int) and any(token in normalized_query for token in ("calendrier", "resultat", "resultats", "inscription")):
