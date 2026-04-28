@@ -45,6 +45,14 @@ MANIFEST_PATH = "data_storage/index/index_manifest.json"
 BM25_CORPUS_PATH = "data_storage/index/bm25_corpus.json"
 
 RERANK_MODEL = os.getenv("RAG_RERANK_MODEL", "BAAI/bge-reranker-v2-m3")
+RERANK_FALLBACK_MODELS = [
+    model.strip()
+    for model in os.getenv(
+        "RAG_RERANK_FALLBACK_MODELS",
+        "cross-encoder/ms-marco-MiniLM-L-6-v2",
+    ).split(",")
+    if model.strip()
+]
 
 TOP_K_RETRIEVE = 20
 TOP_K_FINAL = 5
@@ -357,6 +365,18 @@ def get_runtime_embedding_model_name() -> str:
     return manifest_model or configured or DEFAULT_EMBEDDING_MODEL
 
 
+def get_candidate_reranker_names() -> List[str]:
+    candidates = [RERANK_MODEL, *RERANK_FALLBACK_MODELS]
+    unique: List[str] = []
+    seen: Set[str] = set()
+    for candidate in candidates:
+        value = (candidate or "").strip()
+        if value and value not in seen:
+            seen.add(value)
+            unique.append(value)
+    return unique
+
+
 def is_e5_model(model_name: str) -> bool:
     return "e5" in (model_name or "").lower()
 
@@ -382,22 +402,28 @@ def get_embedding_model():
 def get_reranker():
     global _reranker
     if _reranker is None and USE_RERANK:
-        logger.info("Chargement du reranker: %s", RERANK_MODEL)
-        try:
-            _reranker = CrossEncoder(
-                RERANK_MODEL,
-                device="cpu",
-                local_files_only=True,
-            )
-        except TypeError:
+        errors: List[str] = []
+        for model_name in get_candidate_reranker_names():
+            logger.info("Chargement du reranker: %s", model_name)
             try:
-                _reranker = CrossEncoder(RERANK_MODEL, device="cpu")
+                _reranker = CrossEncoder(
+                    model_name,
+                    device="cpu",
+                    local_files_only=True,
+                )
+                break
+            except TypeError:
+                try:
+                    _reranker = CrossEncoder(model_name, device="cpu")
+                    break
+                except Exception as exc:
+                    errors.append(f"{model_name}: {exc}")
+                    _reranker = None
             except Exception as exc:
-                logger.warning("Reranker indisponible, fallback sans rerank: %s", exc)
+                errors.append(f"{model_name}: {exc}")
                 _reranker = None
-        except Exception as exc:
-            logger.warning("Reranker indisponible, fallback sans rerank: %s", exc)
-            _reranker = None
+        if _reranker is None and errors:
+            logger.warning("Reranker indisponible, fallback sans rerank: %s", " | ".join(errors[:3]))
     return _reranker
 
 

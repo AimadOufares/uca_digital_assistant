@@ -58,6 +58,61 @@ def _corpus_distribution(chunks: List[Dict]) -> Dict[str, int]:
     return dict(sorted(distribution.items(), key=lambda item: item[0]))
 
 
+def _average_numeric_metadata(chunks: List[Dict], field_name: str) -> float:
+    values: List[float] = []
+    for chunk in chunks:
+        metadata = chunk.get("metadata", {}) or {}
+        raw_value = metadata.get(field_name)
+        try:
+            value = float(raw_value)
+        except (TypeError, ValueError):
+            continue
+        values.append(value)
+    if not values:
+        return 0.0
+    return round(sum(values) / len(values), 4)
+
+
+def _count_truthy_metadata(chunks: List[Dict], field_name: str) -> int:
+    return sum(
+        1
+        for chunk in chunks
+        if bool((chunk.get("metadata", {}) or {}).get(field_name))
+    )
+
+
+def _ingestion_mode(chunks: List[Dict]) -> str:
+    return str(
+        next(
+            (
+                chunk.get("metadata", {}).get("ingestion_mode")
+                for chunk in chunks
+                if chunk.get("metadata", {}).get("ingestion_mode")
+            ),
+            "fast",
+        )
+    )
+
+
+def _enrich_manifest(manifest: Dict, chunks: List[Dict], corpus: str) -> Dict:
+    manifest["corpus"] = corpus
+    manifest["corpus_distribution"] = _corpus_distribution(chunks)
+    manifest["document_count"] = _document_count(chunks)
+    manifest["category_distribution"] = _chunk_metadata_distribution(chunks, "document_category")
+    manifest["source_priority_distribution"] = _chunk_metadata_distribution(chunks, "source_priority")
+    manifest["service_name_distribution"] = _chunk_metadata_distribution(chunks, "service_name")
+    manifest["service_type_distribution"] = _chunk_metadata_distribution(chunks, "service_type")
+    manifest["page_kind_distribution"] = _chunk_metadata_distribution(chunks, "page_kind")
+    manifest["intent_distribution"] = _chunk_metadata_distribution(chunks, "intent")
+    manifest["render_mode_distribution"] = _chunk_metadata_distribution(chunks, "render_mode")
+    manifest["quality_issue_distribution"] = _chunk_metadata_distribution(chunks, "quality_issue")
+    manifest["actionable_chunk_count"] = _count_truthy_metadata(chunks, "is_actionable")
+    manifest["average_student_relevance_score"] = _average_numeric_metadata(chunks, "student_relevance_score")
+    manifest["average_freshness_score"] = _average_numeric_metadata(chunks, "freshness_score")
+    manifest["ingestion_mode_used"] = _ingestion_mode(chunks)
+    return manifest
+
+
 def _stable_point_id(chunk: Dict) -> str:
     chunk_id = str(chunk.get("id") or "")
     if chunk_id:
@@ -145,21 +200,7 @@ class FaissVectorStoreAdapter(VectorStoreAdapter):
         manifest["requested_model_name"] = get_model_name()
         manifest["build_id"] = build_id
         manifest["backend"] = "faiss"
-        manifest["corpus"] = corpus
-        manifest["corpus_distribution"] = _corpus_distribution(chunks)
-        manifest["document_count"] = _document_count(chunks)
-        manifest["category_distribution"] = _chunk_metadata_distribution(chunks, "document_category")
-        manifest["source_priority_distribution"] = _chunk_metadata_distribution(chunks, "source_priority")
-        manifest["ingestion_mode_used"] = str(
-            next(
-                (
-                    chunk.get("metadata", {}).get("ingestion_mode")
-                    for chunk in chunks
-                    if chunk.get("metadata", {}).get("ingestion_mode")
-                ),
-                "fast",
-            )
-        )
+        manifest = _enrich_manifest(manifest, chunks, corpus)
         save_manifest(str(paths["manifest_file"]), manifest)
 
         if publish:
@@ -256,21 +297,7 @@ class QdrantVectorStoreAdapter(VectorStoreAdapter):
         manifest["build_id"] = build_id
         manifest["backend"] = "qdrant"
         manifest["collection_name"] = collection_name
-        manifest["corpus"] = corpus
-        manifest["corpus_distribution"] = _corpus_distribution(chunks)
-        manifest["document_count"] = _document_count(chunks)
-        manifest["category_distribution"] = _chunk_metadata_distribution(chunks, "document_category")
-        manifest["source_priority_distribution"] = _chunk_metadata_distribution(chunks, "source_priority")
-        manifest["ingestion_mode_used"] = str(
-            next(
-                (
-                    chunk.get("metadata", {}).get("ingestion_mode")
-                    for chunk in chunks
-                    if chunk.get("metadata", {}).get("ingestion_mode")
-                ),
-                "fast",
-            )
-        )
+        manifest = _enrich_manifest(manifest, chunks, corpus)
         manifest_path = build_dir / "index_manifest.json"
         save_manifest(str(manifest_path), manifest)
         with (build_dir / "chunks.json").open("w", encoding="utf-8") as handle:

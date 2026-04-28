@@ -8,6 +8,7 @@ from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APITestCase
 
+from rag_module.adapters.vector_store import FaissVectorStoreAdapter
 from rag_module.contracts import AnswerResult
 from rag_module.offline.indexing import load_chunks
 from rag_module.offline.ingestion_utils import (
@@ -17,6 +18,7 @@ from rag_module.offline.ingestion_utils import (
     default_seeds,
 )
 from rag_module.offline.processing import clean_text
+from rag_module.retrieval.rag_search import get_candidate_reranker_names, get_reranker
 from rag_module.shared.metadata_policy import prepare_chunk_metadata
 from rag_module.services.offline import run_indexing
 
@@ -234,8 +236,19 @@ class ProcessingAndIndexingTests(APITestCase):
             (main_dir / "main_chunk.json").write_text(
                 json.dumps(
                     {
-                        "text": "Informations inscription universite Cadi Ayyad",
-                        "metadata": {"chunk_hash": "main-1", "source": "main-source", "corpus": "main"},
+                        "text": (
+                            "Informations d inscription administrative pour les etudiants de l Universite Cadi Ayyad "
+                            "avec calendrier, procedure et pieces a fournir."
+                        ),
+                        "metadata": {
+                            "chunk_hash": "main-1",
+                            "source": "main-source",
+                            "corpus": "main",
+                            "page_kind": "procedure",
+                            "intent": ["reinscription"],
+                            "chunk_relevance_score": 2,
+                            "service_type": "scolarite",
+                        },
                     }
                 ),
                 encoding="utf-8",
@@ -243,8 +256,19 @@ class ProcessingAndIndexingTests(APITestCase):
             (drive_dir / "drive_chunk.json").write_text(
                 json.dumps(
                     {
-                        "text": "PUCAStaff plateforme officielle gestion administrative du personnel",
-                        "metadata": {"chunk_hash": "drive-1", "source": "drive-source", "corpus": "drive"},
+                        "text": (
+                            "PUCAStaff plateforme officielle pour la gestion administrative avec guide de connexion "
+                            "et demarches numeriques pour les utilisateurs concernes."
+                        ),
+                        "metadata": {
+                            "chunk_hash": "drive-1",
+                            "source": "drive-source",
+                            "corpus": "drive",
+                            "page_kind": "guide",
+                            "intent": ["connexion"],
+                            "chunk_relevance_score": 2,
+                            "service_type": "digital_service",
+                        },
                     }
                 ),
                 encoding="utf-8",
@@ -262,6 +286,167 @@ class ProcessingAndIndexingTests(APITestCase):
 
         self.assertEqual(len(chunks), 2)
         self.assertEqual({chunk["metadata"]["corpus"] for chunk in chunks}, {"main", "drive"})
+
+    def test_load_chunks_filters_generic_landing_and_enriches_retrieval_metadata(self):
+        root = Path.cwd() / ".tmp_test_indexing_filter_case"
+        if root.exists():
+            shutil.rmtree(root)
+        root.mkdir(exist_ok=True)
+        try:
+            main_dir = root / "main"
+            drive_dir = root / "drive"
+            archive_dir = root / "archive"
+            main_dir.mkdir()
+            drive_dir.mkdir()
+            archive_dir.mkdir()
+
+            (main_dir / "landing.json").write_text(
+                json.dumps(
+                    {
+                        "text": "Bienvenue sur la plateforme UCA. Decouvrez nos actualites et notre univers.",
+                        "metadata": {
+                            "chunk_hash": "landing-1",
+                            "source": "landing-source",
+                            "page_kind": "landing",
+                            "intent": [],
+                            "chunk_relevance_score": 0,
+                            "service_name": "uca",
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (main_dir / "student_service.json").write_text(
+                json.dumps(
+                    {
+                        "text": (
+                            "Guide UC@Student pour demander une attestation de scolarite et consulter les notes. "
+                            "Connectez-vous, ouvrez le service numerique puis telechargez votre document."
+                        ),
+                        "metadata": {
+                            "chunk_hash": "student-1",
+                            "source": "student-source",
+                            "page_kind": "guide",
+                            "intent": ["attestation", "notes"],
+                            "service_name": "ucastudent",
+                            "service_type": "digital_service",
+                            "document_type": "digital_service",
+                            "document_category": "digital_service",
+                            "source_priority": "A",
+                            "chunk_relevance_score": 3,
+                            "freshness_score": 0.8,
+                            "main_actions": ["demander attestation", "consulter notes"],
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with patch("rag_module.offline.indexing.RUNTIME") as mocked_runtime:
+                mocked_runtime.rag_processed_main_dir = main_dir
+                mocked_runtime.rag_processed_drive_dir = drive_dir
+                mocked_runtime.rag_processed_archive_dir = archive_dir
+                mocked_runtime.rag_index_published_corpora = ["main"]
+
+                chunks = load_chunks(corpus="main")
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+        self.assertEqual(len(chunks), 1)
+        metadata = chunks[0]["metadata"]
+        self.assertTrue(metadata["is_actionable"])
+        self.assertGreater(metadata["student_relevance_score"], 0.5)
+        self.assertIn("attestation", metadata["retrieval_keywords"])
+        self.assertIn("ucastudent", metadata["retrieval_haystack"].lower())
+
+    def test_faiss_manifest_exposes_student_service_distributions(self):
+        root = Path.cwd() / ".tmp_test_faiss_manifest_case"
+        if root.exists():
+            shutil.rmtree(root)
+        root.mkdir(exist_ok=True)
+        try:
+            build_root = root / "build"
+            faiss_root = build_root / "faiss"
+            faiss_root.mkdir(parents=True)
+            paths = {
+                "root": faiss_root,
+                "index_file": faiss_root / "index.faiss",
+                "chunks_file": faiss_root / "chunks.json",
+                "manifest_file": faiss_root / "index_manifest.json",
+                "bm25_file": faiss_root / "bm25_corpus.json",
+            }
+            storage = MagicMock()
+            storage.faiss_build_paths.return_value = paths
+
+            chunks = [
+                {
+                    "id": "chunk-1",
+                    "text": "UC@Student attestation et notes",
+                    "metadata": {
+                        "service_name": "ucastudent",
+                        "service_type": "digital_service",
+                        "document_type": "digital_service",
+                        "document_category": "digital_service",
+                        "page_kind": "guide",
+                        "intent": ["attestation", "notes"],
+                        "render_mode": "static",
+                        "is_actionable": True,
+                        "student_relevance_score": 0.91,
+                        "freshness_score": 0.8,
+                        "source_priority": "A",
+                        "processing_policy_version": "v-test",
+                        "corpus": "main",
+                    },
+                }
+            ]
+
+            adapter = FaissVectorStoreAdapter(storage=storage)
+            with patch("rag_module.offline.indexing.load_cache", return_value={"version": 2, "models": {}}), patch(
+                "rag_module.offline.indexing.embed", return_value=[[0.1, 0.2]]
+            ), patch("rag_module.offline.indexing.get_active_model_name", return_value="test-model"), patch(
+                "rag_module.offline.indexing.get_model_name", return_value="test-model"
+            ):
+                result = adapter.build_index(chunks, corpus="published", build_id="build-test", publish=False)
+
+            manifest = json.loads(paths["manifest_file"].read_text(encoding="utf-8"))
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+        self.assertEqual(result.chunk_count, 1)
+        self.assertEqual(manifest["service_name_distribution"]["ucastudent"], 1)
+        self.assertEqual(manifest["page_kind_distribution"]["guide"], 1)
+        self.assertEqual(manifest["intent_distribution"]["attestation"], 1)
+        self.assertEqual(manifest["render_mode_distribution"]["static"], 1)
+        self.assertEqual(manifest["actionable_chunk_count"], 1)
+        self.assertGreater(manifest["average_student_relevance_score"], 0.8)
+
+    @patch("rag_module.retrieval.rag_search.RERANK_FALLBACK_MODELS", ["cross-encoder/ms-marco-MiniLM-L-6-v2"])
+    @patch("rag_module.retrieval.rag_search.RERANK_MODEL", "BAAI/bge-reranker-v2-m3")
+    def test_get_candidate_reranker_names_prioritizes_primary_model(self):
+        candidates = get_candidate_reranker_names()
+
+        self.assertEqual(candidates[0], "BAAI/bge-reranker-v2-m3")
+        self.assertIn("cross-encoder/ms-marco-MiniLM-L-6-v2", candidates)
+
+    @patch("rag_module.retrieval.rag_search.USE_RERANK", True)
+    @patch("rag_module.retrieval.rag_search._reranker", None)
+    @patch("rag_module.retrieval.rag_search.RERANK_FALLBACK_MODELS", ["cross-encoder/ms-marco-MiniLM-L-6-v2"])
+    @patch("rag_module.retrieval.rag_search.RERANK_MODEL", "BAAI/bge-reranker-v2-m3")
+    @patch("rag_module.retrieval.rag_search.CrossEncoder")
+    def test_get_reranker_falls_back_to_ms_marco_when_primary_fails(self, mocked_cross_encoder):
+        mocked_cross_encoder.side_effect = [
+            RuntimeError("primary unavailable"),
+            MagicMock(name="fallback-reranker"),
+        ]
+
+        reranker = get_reranker()
+
+        self.assertIsNotNone(reranker)
+        self.assertEqual(mocked_cross_encoder.call_args_list[0].args[0], "BAAI/bge-reranker-v2-m3")
+        self.assertEqual(
+            mocked_cross_encoder.call_args_list[1].args[0],
+            "cross-encoder/ms-marco-MiniLM-L-6-v2",
+        )
 
     @patch("rag_module.services.offline.invalidate_search_cache")
     @patch("rag_module.services.offline.get_vector_store_adapter")
