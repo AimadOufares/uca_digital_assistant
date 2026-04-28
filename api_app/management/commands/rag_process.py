@@ -9,7 +9,7 @@ class Command(BaseCommand):
     def add_arguments(self, parser):
         parser.add_argument(
             "--corpus",
-            choices=["main", "archive", "all"],
+            choices=["main", "archive", "drive", "all"],
             default="all",
             help="Corpus a traiter.",
         )

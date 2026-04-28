@@ -9,9 +9,9 @@ class Command(BaseCommand):
     def add_arguments(self, parser):
         parser.add_argument(
             "--corpus",
-            choices=["main"],
-            default="main",
-            help="Corpus a indexer. L'index principal reste limite a main.",
+            choices=["main", "drive", "main_and_drive", "published"],
+            default="published",
+            help="Portee a indexer. 'published' suit la configuration active.",
         )
         parser.add_argument("--publish", action="store_true", help="Publie l'index construit comme index actif.")
         parser.add_argument("--build-id", default="", help="Identifiant de build explicite.")

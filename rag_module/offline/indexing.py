@@ -6,47 +6,30 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List
 
-import faiss
-import numpy as np
 from sentence_transformers import SentenceTransformer
 
 try:
-    from qdrant_client import QdrantClient
-    from qdrant_client.http import models as qdrant_models
-    HAS_QDRANT = True
-except ImportError:
-    HAS_QDRANT = False
-
-try:
     from ..shared.env_loader import load_env_file
-    from ..shared.index_manifest import build_manifest, load_manifest, save_manifest
     from ..shared.runtime import get_runtime_settings
 except ImportError:  # pragma: no cover
     from rag_module.shared.env_loader import load_env_file
-    from rag_module.shared.index_manifest import build_manifest, load_manifest, save_manifest
     from rag_module.shared.runtime import get_runtime_settings
+
 
 load_env_file()
 RUNTIME = get_runtime_settings()
 
-
-PROCESSED_PATH = str(RUNTIME.rag_processed_main_dir)
-INDEX_PATH = str(RUNTIME.rag_index_dir)
 CACHE_PATH = str(RUNTIME.rag_cache_dir / "embeddings_cache.json")
-INDEX_MANIFEST_PATH = os.path.join(INDEX_PATH, "index_manifest.json")
-BM25_CORPUS_PATH = os.path.join(INDEX_PATH, "bm25_corpus.json")
-
-DEFAULT_EMBEDDING_MODEL = "intfloat/multilingual-e5-base"
+DEFAULT_EMBEDDING_MODEL = "BAAI/bge-m3"
 FALLBACK_EMBEDDING_MODELS = [
     "sentence-transformers/all-MiniLM-L6-v2",
     "all-MiniLM-L6-v2",
 ]
-BATCH_SIZE = 128 # Augmenté pour un meilleur rendement CPU (au lieu de 32)
+BATCH_SIZE = 128
 HNSW_M = 32
 HNSW_EF_CONSTRUCTION = 200
 HNSW_EF_SEARCH = 64
 
-os.makedirs(INDEX_PATH, exist_ok=True)
 os.makedirs(os.path.dirname(CACHE_PATH), exist_ok=True)
 
 logging.basicConfig(level=logging.INFO)
@@ -99,11 +82,7 @@ def load_sentence_transformer_offline(model_names: List[str]) -> tuple[SentenceT
     errors: List[str] = []
     for model_name in model_names:
         try:
-            model = SentenceTransformer(
-                model_name,
-                device="cpu",
-                local_files_only=True,
-            )
+            model = SentenceTransformer(model_name, device="cpu", local_files_only=True)
             return model, model_name
         except Exception as exc:
             errors.append(f"{model_name}: {exc}")
@@ -149,7 +128,6 @@ def load_cache() -> Dict[str, Dict[str, List[float]]]:
         return {"version": 2, "models": raw["models"]}
 
     if isinstance(raw, dict):
-        # Backward compatibility with flat hash -> embedding cache.
         legacy_model = get_cache_namespace(get_model_name())
         return {"version": 2, "models": {legacy_model: raw}}
 
@@ -161,23 +139,46 @@ def save_cache(cache: Dict[str, Dict[str, List[float]]]) -> None:
         json.dump(cache, handle, ensure_ascii=False)
 
 
-def load_chunks(corpus: str = "main") -> List[Dict]:
+def _processed_dir_for_corpus(corpus: str) -> Path:
     if corpus == "archive":
-        processed_path = Path(RUNTIME.rag_processed_archive_dir)
-    elif corpus == "drive":
-        processed_path = Path(RUNTIME.rag_processed_dir / "drive")
-    else:
-        processed_path = Path(RUNTIME.rag_processed_main_dir)
-        
-    files = sorted(processed_path.glob("*.json"))
+        return Path(RUNTIME.rag_processed_archive_dir)
+    if corpus == "drive":
+        return Path(RUNTIME.rag_processed_drive_dir)
+    return Path(RUNTIME.rag_processed_main_dir)
+
+
+def get_published_corpora() -> List[str]:
+    configured = []
+    for corpus in RUNTIME.rag_index_published_corpora:
+        value = (corpus or "").strip().lower()
+        if value in {"main", "drive"} and value not in configured:
+            configured.append(value)
+    return configured or ["main", "drive"]
+
+
+def resolve_index_corpora(corpus: str = "published") -> List[str]:
+    if corpus in {"main", "drive", "archive"}:
+        return [corpus]
+    if corpus in {"main_and_drive", "published"}:
+        return get_published_corpora()
+    return ["main"]
+
+
+def load_chunks(corpus: str = "main") -> List[Dict]:
+    corpora = resolve_index_corpora(corpus)
     chunks: List[Dict] = []
     seen_ids = set()
     seen_text_hashes = set()
 
-    for file in files:
-        try:
-            with open(file, "r", encoding="utf-8") as handle:
-                data = json.load(handle)
+    for corpus_name in corpora:
+        processed_path = _processed_dir_for_corpus(corpus_name)
+        for file_path in sorted(processed_path.glob("*.json")):
+            try:
+                with file_path.open("r", encoding="utf-8") as handle:
+                    data = json.load(handle)
+            except Exception as exc:
+                logger.warning("Erreur fichier %s: %s", file_path, exc)
+                continue
 
             text = normalize(data.get("text", ""))
             if len(text) < 30:
@@ -203,7 +204,7 @@ def load_chunks(corpus: str = "main") -> List[Dict]:
             seen_ids.add(chunk_id)
             seen_text_hashes.add(text_hash)
 
-            source_path = metadata.get("source", str(file))
+            source_path = metadata.get("source", str(file_path))
             source_name = metadata.get("file_name") or Path(source_path).name
             merged_metadata = dict(metadata)
             merged_metadata.update(
@@ -212,67 +213,25 @@ def load_chunks(corpus: str = "main") -> List[Dict]:
                     "file_name": source_name,
                     "hash": chunk_id,
                     "date_indexed": datetime.now(timezone.utc).isoformat(),
+                    "corpus": corpus_name,
                 }
             )
 
-            merged_metadata["corpus"] = corpus
             chunks.append({"id": chunk_id, "text": text, "metadata": merged_metadata})
-        except Exception as exc:
-            logger.warning("Erreur fichier %s: %s", file, exc)
 
-    logger.info("%s chunks charges", len(chunks))
+    logger.info("%s chunks charges pour %s", len(chunks), ",".join(corpora))
     return chunks
-
-
-def _metadata_distribution(chunks: List[Dict], field_name: str) -> Dict[str, int]:
-    distribution: Dict[str, int] = {}
-    for chunk in chunks:
-        metadata = chunk.get("metadata", {}) or {}
-        value = str(metadata.get(field_name) or "unknown")
-        distribution[value] = distribution.get(value, 0) + 1
-    return distribution
-
-
-def load_index_manifest() -> Dict:
-    try:
-        return load_manifest(INDEX_MANIFEST_PATH)
-    except Exception as exc:
-        logger.warning("Manifest illisible, regeneration demandee: %s", exc)
-        return {}
-
-
-def save_index_manifest(manifest: Dict) -> None:
-    save_manifest(INDEX_MANIFEST_PATH, manifest)
 
 
 def build_bm25_corpus(chunks: List[Dict]) -> List[Dict]:
-    corpus: List[Dict] = []
-    for chunk in chunks:
-        corpus.append(
-            {
-                "id": chunk.get("id"),
-                "text": chunk.get("text", ""),
-                "metadata": chunk.get("metadata", {}) or {},
-            }
-        )
-    return corpus
-
-
-def filter_chunks_for_reindex(chunks: List[Dict], manifest: Dict) -> List[Dict]:
-    previous_model = str(manifest.get("model_name") or "").strip()
-    current_model = get_model_name()
-    if previous_model != current_model:
-        return chunks
-    return chunks
-
-
-def _extract_processing_policy_version(chunks: List[Dict]) -> str:
-    for chunk in chunks:
-        metadata = chunk.get("metadata", {}) or {}
-        candidate = metadata.get("processing_policy_version")
-        if candidate:
-            return str(candidate)
-    return "unknown"
+    return [
+        {
+            "id": chunk.get("id"),
+            "text": chunk.get("text", ""),
+            "metadata": chunk.get("metadata", {}) or {},
+        }
+        for chunk in chunks
+    ]
 
 
 def embed(texts: List[str], cache: Dict[str, Dict[str, List[float]]]) -> List[List[float]]:
@@ -284,141 +243,37 @@ def embed(texts: List[str], cache: Dict[str, Dict[str, List[float]]]) -> List[Li
     embeddings: List[List[float]] = []
     new_cache = False
 
-    for i in range(0, len(texts), BATCH_SIZE):
-        batch = texts[i : i + BATCH_SIZE]
-
-        batch_emb: List[List[float]] = []
+    for index in range(0, len(texts), BATCH_SIZE):
+        batch = texts[index : index + BATCH_SIZE]
+        batch_embeddings: List[List[float]] = []
         to_compute: List[str] = []
         idx_map: List[int] = []
 
-        for j, text in enumerate(batch):
-            prepared_text = prepare_passage_text(text, model_name)
-            h = get_hash(prepared_text)
-            cached = model_cache.get(h)
+        for position, text in enumerate(batch):
+            prepared = prepare_passage_text(text, model_name)
+            digest = get_hash(prepared)
+            cached = model_cache.get(digest)
             if cached is not None:
-                batch_emb.append(cached)
+                batch_embeddings.append(cached)
             else:
-                batch_emb.append([])
-                to_compute.append(prepared_text)
-                idx_map.append(j)
+                batch_embeddings.append([])
+                to_compute.append(prepared)
+                idx_map.append(position)
 
         if to_compute:
             computed = model.encode(to_compute, normalize_embeddings=True)
-            for k, emb in enumerate(computed):
-                j = idx_map[k]
-                prepared_text = to_compute[k]
-                h = get_hash(prepared_text)
-                emb_list = emb.tolist()
-                batch_emb[j] = emb_list
-                model_cache[h] = emb_list
+            for position, embedding in enumerate(computed):
+                batch_index = idx_map[position]
+                prepared = to_compute[position]
+                digest = get_hash(prepared)
+                embedding_list = embedding.tolist()
+                batch_embeddings[batch_index] = embedding_list
+                model_cache[digest] = embedding_list
                 new_cache = True
 
-        embeddings.extend(batch_emb)
-        logger.info("Progress embeddings: %s/%s", i + len(batch), len(texts))
+        embeddings.extend(batch_embeddings)
+        logger.info("Progress embeddings: %s/%s", index + len(batch), len(texts))
 
     if new_cache:
         save_cache(cache)
-
     return embeddings
-
-
-def build_index(chunks: List[Dict], corpus: str = "main", ingestion_mode_used: str = "fast") -> None:
-    chunks_to_index = filter_chunks_for_reindex(chunks, load_index_manifest())
-    texts = [c["text"] for c in chunks_to_index]
-    if not texts:
-        raise RuntimeError("Aucun texte disponible pour l'indexation.")
-
-    cache = load_cache()
-    embeddings = embed(texts, cache)
-    vectors = np.array(embeddings, dtype="float32")
-    if vectors.ndim != 2 or vectors.shape[0] == 0:
-        raise RuntimeError("Aucun vecteur genere pour construire l'index.")
-
-    dim = int(vectors.shape[1])
-    index = faiss.IndexHNSWFlat(dim, HNSW_M)
-    index.hnsw.efConstruction = HNSW_EF_CONSTRUCTION
-    index.hnsw.efSearch = HNSW_EF_SEARCH
-    index.add(vectors)
-
-    faiss.write_index(index, os.path.join(INDEX_PATH, "index.faiss"))
-    with open(os.path.join(INDEX_PATH, "chunks.json"), "w", encoding="utf-8") as handle:
-        json.dump(chunks_to_index, handle, ensure_ascii=False, indent=2)
-
-    bm25_corpus = build_bm25_corpus(chunks_to_index)
-    with open(BM25_CORPUS_PATH, "w", encoding="utf-8") as handle:
-        json.dump(bm25_corpus, handle, ensure_ascii=False, indent=2)
-
-    manifest = build_manifest(
-        model_name=get_active_model_name(),
-        dim=dim,
-        chunk_count=len(chunks_to_index),
-        policy_version=_extract_processing_policy_version(chunks_to_index),
-        index_type="faiss_hnsw_dense_plus_bm25",
-    )
-    manifest["requested_model_name"] = get_model_name()
-    manifest["corpus"] = corpus
-    manifest["document_count"] = len({str((chunk.get("metadata", {}) or {}).get("source_hash") or chunk.get("id")) for chunk in chunks_to_index})
-    manifest["category_distribution"] = _metadata_distribution(chunks_to_index, "document_category")
-    manifest["source_priority_distribution"] = _metadata_distribution(chunks_to_index, "source_priority")
-    manifest["ingestion_mode_used"] = ingestion_mode_used
-    if get_active_model_name() != get_model_name():
-        manifest["fallback_model_name"] = get_active_model_name()
-        
-    # Synchronisation Qdrant Automatique
-    if HAS_QDRANT and RUNTIME.rag_qdrant_url:
-        try:
-            logger.info("Synchronisation vers Qdrant (%s)...", RUNTIME.rag_qdrant_url)
-            kwargs = {"url": RUNTIME.rag_qdrant_url}
-            if getattr(RUNTIME, "rag_qdrant_api_key", None):
-                kwargs["api_key"] = RUNTIME.rag_qdrant_api_key
-                
-            qclient = QdrantClient(**kwargs)
-            col_name = getattr(RUNTIME, "rag_qdrant_collection_prefix", "uca_kb")
-            
-            # Recréer la collection (écraser l'ancien index)
-            qclient.recreate_collection(
-                collection_name=col_name,
-                vectors_config=qdrant_models.VectorParams(size=dim, distance=qdrant_models.Distance.COSINE)
-            )
-            
-            points = []
-            for i, chunk in enumerate(chunks_to_index):
-                points.append(qdrant_models.PointStruct(
-                    id=i,
-                    vector=embeddings[i],
-                    payload=chunk
-                ))
-            
-            qclient.upload_points(collection_name=col_name, points=points)
-            logger.info("Succes: %s points synchronises dans Qdrant (Collection: %s).", len(points), col_name)
-            manifest["backend"] = "qdrant"
-        except Exception as e:
-            logger.error("Erreur lors de la synchronisation Qdrant : %s", e)
-            manifest["backend"] = "faiss_only"
-    else:
-        manifest["backend"] = "faiss_only"
-
-    save_index_manifest(manifest)
-
-    logger.info(
-        "INDEX CREE AVEC SUCCES | modele=%s | dim=%s | chunks=%s",
-        get_active_model_name(),
-        dim,
-        len(chunks_to_index),
-    )
-
-
-if __name__ == "__main__":
-    # 1. Fusionner les corpus 'main' (web) et 'drive' (local docs)
-    all_chunks_data = []
-    for c in ["main", "drive"]:
-        c_data = load_chunks(corpus=c)
-        if c_data:
-            all_chunks_data.extend(c_data)
-
-    if not all_chunks_data:
-        logger.error("Aucun chunk trouve dans main et drive !")
-    else:
-        # 2. Construire l'index global
-        logger.info("Construction de l'index avec %s chunks au total...", len(all_chunks_data))
-        build_index(all_chunks_data, corpus="main_and_drive")

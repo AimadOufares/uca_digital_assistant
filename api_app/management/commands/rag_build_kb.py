@@ -25,7 +25,7 @@ class Command(BaseCommand):
             "--target-corpus",
             choices=["main", "archive", "all"],
             default="all",
-            help="Corpus a ingerer et traiter.",
+            help="Corpus a ingerer et traiter. L'index publie suit ensuite la configuration des corpus publies.",
         )
         parser.add_argument(
             "--premium-only",

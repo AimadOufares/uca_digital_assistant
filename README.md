@@ -17,7 +17,7 @@
 - **Parsing & Cleaning** avancé avec structuration des données
 - **Semantic Chunking** pour une meilleure compréhension contextuelle
 - **Embeddings** avec des modèles Sentence-Transformers
-- **Vector Database** : Qdrant (recherche sémantique rapide)
+- **Recherche hybride locale** : FAISS + BM25 + reranking
 - **Retriever + LLM** pour générer des réponses contextualisées
 - **API REST** avec Django & Django REST Framework
 - **Interface Chat** simple et responsive (HTML + CSS + JavaScript)
@@ -50,7 +50,7 @@ Semantic Chunking
 Embeddings (Sentence-Transformers)
         │
         ▼
-Vector DB (Qdrant)
+FAISS + BM25
         │
         ▼
 Retriever
@@ -141,8 +141,8 @@ python manage.py runserver
 
 ### 2. Accéder à l’application
 
-* **Interface Chat** : [http://127.0.0.1:8000/chat/](http://127.0.0.1:8000/chat/)
-* **Endpoint API Test** : [http://127.0.0.1:8000/api/test/](http://127.0.0.1:8000/api/test/)
+- **Interface Chat** : [http://127.0.0.1:8000/chat/](http://127.0.0.1:8000/chat/)
+- **Endpoint API Test** : [http://127.0.0.1:8000/api/test/](http://127.0.0.1:8000/api/test/)
 
 ### 3. Alimenter le RAG
 
@@ -157,9 +157,10 @@ python rag_module/pipeline.py
 
 ## ⚙️ Configuration
 
-* **Qdrant** : Mode local par défaut (port 6333) ou Qdrant Cloud
-* **LLM** : Le module RAG peut utiliser LM Studio via l'API compatible OpenAI (`http://127.0.0.1:1234/v1`)
-* **Embeddings** : Modèle recommandé `all-MiniLM-L6-v2`
+- **Index principal** : FAISS hybride local, avec possibilité de backend Qdrant si besoin
+- **LLM** : Le module RAG peut utiliser LM Studio via l'API compatible OpenAI (`http://127.0.0.1:1234/v1`)
+- **Embeddings** : Modèle recommandé `BAAI/bge-m3`
+- **Corpus `drive`** : `data_storage/raw/drive` est traité puis inclus dans l'index publié par défaut
 
 ### Configuration LM Studio
 
@@ -179,23 +180,23 @@ Le projet charge maintenant automatiquement `.env` au démarrage Django et dans 
 
 ## 🔐 Sécurité
 
-* Validation et nettoyage des entrées utilisateur
-* Protection contre les injections (prompt injection, XSS)
-* Isolation des données sensibles
-* Possibilité d'intégrer une authentification sécurisée
+- Validation et nettoyage des entrées utilisateur
+- Protection contre les injections (prompt injection, XSS)
+- Isolation des données sensibles
+- Possibilité d'intégrer une authentification sécurisée
 
 ---
 
 ## 📝 Notes importantes
 
-* Dossiers ignorés par Git :
+- Dossiers ignorés par Git :
 
-  * `env/`
-  * `db.sqlite3`
-  * `data_storage/`
-  * `__pycache__/`
+  - `env/`
+  - `db.sqlite3`
+  - `data_storage/`
+  - `__pycache__/`
 
-* Le module `rag_module` est **modulaire** et facilement extensible
+- Le module `rag_module` est **modulaire** et facilement extensible
 
 ---
 
@@ -214,32 +215,32 @@ Les **issues** sont également bienvenues pour signaler bugs ou idées.
 
 ## 🛣️ Roadmap
 
-* [ ] Interface utilisateur avancée (React ou HTMX)
-* [ ] Support multi-langues (Arabe, Français, Anglais)
-* [ ] Authentification des utilisateurs (étudiants / enseignants)
-* [ ] Historique des conversations
-* [ ] Amélioration du chunking sémantique
-* [ ] Ajout de citations des sources dans les réponses (RAG avancé)
-* [ ] Optimisation des performances (indexation + retrieval)
-* [ ] Déploiement Docker + Docker Compose
+- [ ] Interface utilisateur avancée (React ou HTMX)
+- [ ] Support multi-langues (Arabe, Français, Anglais)
+- [ ] Authentification des utilisateurs (étudiants / enseignants)
+- [ ] Historique des conversations
+- [ ] Amélioration du chunking sémantique
+- [ ] Ajout de citations des sources dans les réponses (RAG avancé)
+- [ ] Optimisation des performances (indexation + retrieval)
+- [ ] Déploiement Docker + Docker Compose
 
 ---
 
 ## 🧪 Tests (à venir)
 
-* Tests unitaires du module RAG
-* Tests API avec Django REST Framework
-* Évaluation des performances du retriever
+- Tests unitaires du module RAG
+- Tests API avec Django REST Framework
+- Évaluation des performances du retriever
 
 ---
 
 ## 🛠️ Technologies utilisées
 
-* **Backend** : Python 3.10+, Django 4.x, Django REST Framework
-* **RAG** : LangChain, Sentence-Transformers, Qdrant
-* **Parsing** : BeautifulSoup4, pdfplumber, python-docx, lxml
-* **Frontend** : HTML5, CSS3, JavaScript (vanilla)
-* **Vector Store** : Qdrant
+- **Backend** : Python 3.10+, Django 4.x, Django REST Framework
+- **RAG** : LangChain, Sentence-Transformers, Qdrant
+- **Parsing** : BeautifulSoup4, pdfplumber, python-docx, lxml
+- **Frontend** : HTML5, CSS3, JavaScript (vanilla)
+- **Vector Store** : Qdrant
 
 ---
 

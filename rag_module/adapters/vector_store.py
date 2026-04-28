@@ -49,6 +49,15 @@ def _document_count(chunks: List[Dict]) -> int:
     return len({source for source in sources if source})
 
 
+def _corpus_distribution(chunks: List[Dict]) -> Dict[str, int]:
+    distribution: Dict[str, int] = {}
+    for chunk in chunks:
+        metadata = chunk.get("metadata", {}) or {}
+        corpus = str(metadata.get("corpus") or "unknown").strip() or "unknown"
+        distribution[corpus] = distribution.get(corpus, 0) + 1
+    return dict(sorted(distribution.items(), key=lambda item: item[0]))
+
+
 def _stable_point_id(chunk: Dict) -> str:
     chunk_id = str(chunk.get("id") or "")
     if chunk_id:
@@ -63,7 +72,13 @@ class VectorStoreAdapter(ABC):
         self.storage = storage or DocumentStorage(self.settings)
 
     @abstractmethod
-    def build_index(self, chunks: List[Dict], build_id: str | None = None, publish: bool = False) -> IndexBuildResult:
+    def build_index(
+        self,
+        chunks: List[Dict],
+        corpus: str = "main",
+        build_id: str | None = None,
+        publish: bool = False,
+    ) -> IndexBuildResult:
         raise NotImplementedError
 
     @abstractmethod
@@ -76,7 +91,13 @@ class VectorStoreAdapter(ABC):
 
 
 class FaissVectorStoreAdapter(VectorStoreAdapter):
-    def build_index(self, chunks: List[Dict], build_id: str | None = None, publish: bool = False) -> IndexBuildResult:
+    def build_index(
+        self,
+        chunks: List[Dict],
+        corpus: str = "main",
+        build_id: str | None = None,
+        publish: bool = False,
+    ) -> IndexBuildResult:
         if not chunks:
             raise RuntimeError("Aucun chunk disponible pour l'indexation.")
 
@@ -124,7 +145,8 @@ class FaissVectorStoreAdapter(VectorStoreAdapter):
         manifest["requested_model_name"] = get_model_name()
         manifest["build_id"] = build_id
         manifest["backend"] = "faiss"
-        manifest["corpus"] = "main"
+        manifest["corpus"] = corpus
+        manifest["corpus_distribution"] = _corpus_distribution(chunks)
         manifest["document_count"] = _document_count(chunks)
         manifest["category_distribution"] = _chunk_metadata_distribution(chunks, "document_category")
         manifest["source_priority_distribution"] = _chunk_metadata_distribution(chunks, "source_priority")
@@ -175,7 +197,13 @@ class QdrantVectorStoreAdapter(VectorStoreAdapter):
     def _collection_name(self, build_id: str) -> str:
         return f"{self.settings.rag_qdrant_collection_prefix}_{build_id}"
 
-    def build_index(self, chunks: List[Dict], build_id: str | None = None, publish: bool = False) -> IndexBuildResult:
+    def build_index(
+        self,
+        chunks: List[Dict],
+        corpus: str = "main",
+        build_id: str | None = None,
+        publish: bool = False,
+    ) -> IndexBuildResult:
         if not self.settings.rag_qdrant_url:
             raise RuntimeError("RAG_QDRANT_URL est requis pour l'indexation Qdrant.")
         if not chunks:
@@ -228,7 +256,8 @@ class QdrantVectorStoreAdapter(VectorStoreAdapter):
         manifest["build_id"] = build_id
         manifest["backend"] = "qdrant"
         manifest["collection_name"] = collection_name
-        manifest["corpus"] = "main"
+        manifest["corpus"] = corpus
+        manifest["corpus_distribution"] = _corpus_distribution(chunks)
         manifest["document_count"] = _document_count(chunks)
         manifest["category_distribution"] = _chunk_metadata_distribution(chunks, "document_category")
         manifest["source_priority_distribution"] = _chunk_metadata_distribution(chunks, "source_priority")

@@ -21,7 +21,7 @@ try:
     from ..retrieval.bm25_search import build_bm25_index, load_bm25_corpus, search_bm25
     from ..shared.env_loader import load_env_file
     from ..shared.index_manifest import load_manifest, validate_manifest
-    from ..shared.metadata_policy import FACULTY_RULES, normalize_text
+    from ..shared.metadata_policy import normalize_text
     from ..shared.relevance_policy import boost_results_with_metadata
     from ..shared.runtime import get_runtime_settings
 except ImportError:  # pragma: no cover
@@ -30,7 +30,7 @@ except ImportError:  # pragma: no cover
     from rag_module.retrieval.bm25_search import build_bm25_index, load_bm25_corpus, search_bm25
     from rag_module.shared.env_loader import load_env_file
     from rag_module.shared.index_manifest import load_manifest, validate_manifest
-    from rag_module.shared.metadata_policy import FACULTY_RULES, normalize_text
+    from rag_module.shared.metadata_policy import normalize_text
     from rag_module.shared.relevance_policy import boost_results_with_metadata
     from rag_module.shared.runtime import get_runtime_settings
 
@@ -44,7 +44,7 @@ CHUNKS_PATH = "data_storage/index/chunks.json"
 MANIFEST_PATH = "data_storage/index/index_manifest.json"
 BM25_CORPUS_PATH = "data_storage/index/bm25_corpus.json"
 
-RERANK_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+RERANK_MODEL = os.getenv("RAG_RERANK_MODEL", "BAAI/bge-reranker-v2-m3")
 
 TOP_K_RETRIEVE = 20
 TOP_K_FINAL = 5
@@ -54,7 +54,7 @@ BM25_WEIGHT = 0.35
 
 USE_RERANK = True
 USE_SPELLCHECK = False
-USE_MULTI_QUERY = True
+USE_MULTI_QUERY = False
 USE_ASCII_NORMALIZATION = False
 
 MIN_GUARDRAIL_SCORE = 0.24
@@ -267,7 +267,7 @@ NORMALIZED_LEVEL_KEYWORDS = {
     level: {normalize_text(keyword) for keyword in keywords if normalize_text(keyword)}
     for level, keywords in LEVEL_KEYWORDS.items()
 }
-NORMALIZED_FACULTY_RULES = {normalize_text(token): label for token, label in FACULTY_RULES.items()}
+NORMALIZED_FACULTY_RULES = {}
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 logger = logging.getLogger(__name__)
@@ -349,8 +349,10 @@ def get_runtime_embedding_model_name() -> str:
     manifest = load_manifest_or_raise()
     manifest_model = str(manifest.get("model_name") or "").strip()
     if configured and manifest_model and configured != manifest_model:
-        raise ValueError(
-            f"Le modele runtime '{configured}' ne correspond pas au modele de l'index '{manifest_model}'."
+        logger.warning(
+            "Modele runtime '%s' different du modele de l'index '%s'. Utilisation du modele de l'index.",
+            configured,
+            manifest_model,
         )
     return manifest_model or configured or DEFAULT_EMBEDDING_MODEL
 
@@ -408,8 +410,8 @@ def load_manifest_or_raise() -> Dict:
 
     current_mtime = manifest_file.stat().st_mtime
     if _manifest is None or _manifest_mtime != current_mtime:
-        _manifest = load_manifest(MANIFEST_PATH)
-        expected = _configured_embedding_model_name() or str(_manifest.get("model_name") or "").strip()
+        _manifest = load_manifest(str(manifest_file))
+        expected = str(_manifest.get("model_name") or "").strip()
         validate_manifest(_manifest, expected_model=expected)
         _manifest_mtime = current_mtime
     return _manifest
@@ -460,7 +462,7 @@ def get_bm25_resources() -> Tuple[List[Dict], Dict]:
     current_mtime = corpus_file.stat().st_mtime
     if _bm25_corpus is None or _bm25_index is None or _bm25_mtime != current_mtime:
         logger.info("Chargement du corpus BM25...")
-        _bm25_corpus = load_bm25_corpus(BM25_CORPUS_PATH)
+        _bm25_corpus = load_bm25_corpus(str(corpus_file))
         _bm25_index = build_bm25_index(_bm25_corpus)
         _bm25_mtime = current_mtime
 
@@ -610,9 +612,15 @@ def search_qdrant(query_vectors: np.ndarray, top_k: int = TOP_K_RETRIEVE) -> Lis
 
 
 def merge_dense_and_bm25(dense_results: List[Dict], bm25_results: List[Dict], top_k: int) -> List[Dict]:
+    # Algorithme de fusion par rangs: Reciprocal Rank Fusion (RRF)
+    RRF_K = 60
+    
+    dense_sorted = sorted(dense_results, key=lambda x: float(x.get("score", 0.0) or 0.0), reverse=True)
+    bm25_sorted = sorted(bm25_results, key=lambda x: float(x.get("score", 0.0) or 0.0), reverse=True)
+
     merged: Dict[str, Dict] = {}
 
-    for result in dense_results:
+    for rank, result in enumerate(dense_sorted):
         metadata = result.get("metadata", {}) or {}
         chunk_id = result.get("id") or metadata.get("chunk_hash") or metadata.get("hash")
         if not chunk_id:
@@ -624,18 +632,16 @@ def merge_dense_and_bm25(dense_results: List[Dict], bm25_results: List[Dict], to
                 "id": chunk_id,
                 "text": result.get("text", ""),
                 "metadata": metadata,
-                "dense_score": 0.0,
-                "bm25_score": 0.0,
-                "score": 0.0,
-                "score_type": "hybrid",
+                "rrf_score": 0.0,
+                "score_type": "hybrid_rrf",
                 "retrieval_sources": [],
             },
         )
-        entry["dense_score"] = max(float(entry["dense_score"]), float(result.get("score", 0.0) or 0.0))
+        entry["rrf_score"] += 1.0 / (RRF_K + rank + 1)
         if "dense" not in entry["retrieval_sources"]:
             entry["retrieval_sources"].append("dense")
 
-    for result in bm25_results:
+    for rank, result in enumerate(bm25_sorted):
         metadata = result.get("metadata", {}) or {}
         chunk_id = result.get("id") or metadata.get("chunk_hash") or metadata.get("hash")
         if not chunk_id:
@@ -647,25 +653,24 @@ def merge_dense_and_bm25(dense_results: List[Dict], bm25_results: List[Dict], to
                 "id": chunk_id,
                 "text": result.get("text", ""),
                 "metadata": metadata,
-                "dense_score": 0.0,
-                "bm25_score": 0.0,
-                "score": 0.0,
-                "score_type": "hybrid",
+                "rrf_score": 0.0,
+                "score_type": "hybrid_rrf",
                 "retrieval_sources": [],
             },
         )
-        entry["bm25_score"] = max(float(entry["bm25_score"]), float(result.get("score", 0.0) or 0.0))
+        entry["rrf_score"] += 1.0 / (RRF_K + rank + 1)
         if "bm25" not in entry["retrieval_sources"]:
             entry["retrieval_sources"].append("bm25")
 
     merged_results: List[Dict] = []
-    for entry in merged.values():
-        dense_score = float(entry.get("dense_score", 0.0))
-        bm25_score = float(entry.get("bm25_score", 0.0))
-        entry["score"] = max(0.0, min(1.0, (dense_score * DENSE_WEIGHT) + (bm25_score * BM25_WEIGHT)))
-        merged_results.append(entry)
+    
+    if merged:
+        max_rrf = max(entry["rrf_score"] for entry in merged.values())
+        for entry in merged.values():
+            entry["score"] = float(entry["rrf_score"]) / max_rrf if max_rrf > 0 else 0.0
+            merged_results.append(entry)
 
-    merged_results.sort(key=lambda item: float(item.get("score", 0.0)), reverse=True)
+    merged_results.sort(key=lambda item: item.get("score", 0.0), reverse=True)
     return merged_results[: max(top_k, TOP_K_RETRIEVE)]
 
 

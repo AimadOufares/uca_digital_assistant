@@ -56,9 +56,11 @@ class RuntimeSettings:
     rag_raw_dir: Path
     rag_raw_main_dir: Path
     rag_raw_archive_dir: Path
+    rag_raw_drive_dir: Path
     rag_processed_dir: Path
     rag_processed_main_dir: Path
     rag_processed_archive_dir: Path
+    rag_processed_drive_dir: Path
     rag_index_dir: Path
     rag_index_main_dir: Path
     rag_index_archive_dir: Path
@@ -73,6 +75,10 @@ class RuntimeSettings:
     rag_qdrant_api_key: str
     rag_qdrant_collection_prefix: str
     rag_active_index_name: str
+    rag_index_published_corpora: List[str]
+    rag_pdf_extractor: str
+    rag_language_detector: str
+    rag_fasttext_model_path: Path
     rag_llm_provider: str
     lm_studio_base_url: str
     lm_studio_api_key: str
@@ -85,9 +91,11 @@ class RuntimeSettings:
             self.rag_raw_dir,
             self.rag_raw_main_dir,
             self.rag_raw_archive_dir,
+            self.rag_raw_drive_dir,
             self.rag_processed_dir,
             self.rag_processed_main_dir,
             self.rag_processed_archive_dir,
+            self.rag_processed_drive_dir,
             self.rag_index_dir,
             self.rag_index_main_dir,
             self.rag_index_archive_dir,
@@ -97,6 +105,7 @@ class RuntimeSettings:
             self.rag_backups_dir,
             self.rag_locks_dir,
             self.rag_quarantine_dir,
+            self.rag_fasttext_model_path.parent,
         ):
             path.mkdir(parents=True, exist_ok=True)
 
@@ -131,6 +140,11 @@ def get_runtime_settings() -> RuntimeSettings:
         project_root,
         rag_raw_dir / "archive",
     )
+    rag_raw_drive_dir = _resolve_path(
+        os.getenv("RAG_RAW_DRIVE_DIR", ""),
+        project_root,
+        rag_raw_dir / "drive",
+    )
     rag_processed_main_dir = _resolve_path(
         os.getenv("RAG_PROCESSED_MAIN_DIR", ""),
         project_root,
@@ -140,6 +154,11 @@ def get_runtime_settings() -> RuntimeSettings:
         os.getenv("RAG_PROCESSED_ARCHIVE_DIR", ""),
         project_root,
         rag_processed_dir / "archive",
+    )
+    rag_processed_drive_dir = _resolve_path(
+        os.getenv("RAG_PROCESSED_DRIVE_DIR", ""),
+        project_root,
+        rag_processed_dir / "drive",
     )
     rag_index_dir = _resolve_path(
         os.getenv("RAG_INDEX_DIR", ""),
@@ -198,9 +217,11 @@ def get_runtime_settings() -> RuntimeSettings:
         rag_raw_dir=rag_raw_dir,
         rag_raw_main_dir=rag_raw_main_dir,
         rag_raw_archive_dir=rag_raw_archive_dir,
+        rag_raw_drive_dir=rag_raw_drive_dir,
         rag_processed_dir=rag_processed_dir,
         rag_processed_main_dir=rag_processed_main_dir,
         rag_processed_archive_dir=rag_processed_archive_dir,
+        rag_processed_drive_dir=rag_processed_drive_dir,
         rag_index_dir=rag_index_dir,
         rag_index_main_dir=rag_index_main_dir,
         rag_index_archive_dir=rag_index_archive_dir,
@@ -215,6 +236,14 @@ def get_runtime_settings() -> RuntimeSettings:
         rag_qdrant_api_key=_env_str("RAG_QDRANT_API_KEY", ""),
         rag_qdrant_collection_prefix=_env_str("RAG_QDRANT_COLLECTION_PREFIX", "uca_kb"),
         rag_active_index_name=_env_str("RAG_ACTIVE_INDEX_NAME", "uca_kb_active"),
+        rag_index_published_corpora=_env_csv("RAG_INDEX_PUBLISHED_CORPORA", ["main", "drive"]),
+        rag_pdf_extractor=_env_str("RAG_PDF_EXTRACTOR", "pymupdf").lower(),
+        rag_language_detector=_env_str("RAG_LANGUAGE_DETECTOR", "fasttext").lower(),
+        rag_fasttext_model_path=_resolve_path(
+            os.getenv("RAG_FASTTEXT_MODEL_PATH", ""),
+            project_root,
+            rag_data_root / "models" / "lid.176.bin",
+        ),
         rag_llm_provider=_env_str("RAG_LLM_PROVIDER", "lmstudio").lower(),
         lm_studio_base_url=_env_str("LM_STUDIO_BASE_URL", ""),
         lm_studio_api_key=_env_str("LM_STUDIO_API_KEY", "lm-studio"),
