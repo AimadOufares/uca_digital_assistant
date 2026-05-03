@@ -17,11 +17,47 @@ from tiktoken import encoding_for_model
 try:
     from .document_extractors import build_extractors, extract_text_docx
     from .language_detection import detect_language
+    from .processing_cache import (
+        chunk_refcounts as pc_chunk_refcounts,
+        corpus_paths as pc_corpus_paths,
+        delete_chunk_file_if_unreferenced as pc_delete_chunk_file_if_unreferenced,
+        load_cache as pc_load_cache,
+        load_raw_metadata as pc_load_raw_metadata,
+        save_cache as pc_save_cache,
+    )
+    from .text_quality import (
+        clean_text as tq_clean_text,
+        deduplicate_chunk_texts as tq_deduplicate_chunk_texts,
+        is_high_quality_chunk as tq_is_high_quality_chunk,
+        is_high_quality_document as tq_is_high_quality_document,
+        quality_score as tq_quality_score,
+        split_sentences as tq_split_sentences,
+        text_metrics as tq_text_metrics,
+        tokenize_words as tq_tokenize_words,
+    )
     from ..shared.data_quality import create_backup, postprocess_chunks_for_source
     from ..shared.runtime import get_runtime_settings
 except ImportError:  # pragma: no cover
     from rag_module.offline.document_extractors import build_extractors, extract_text_docx
     from rag_module.offline.language_detection import detect_language
+    from rag_module.offline.processing_cache import (
+        chunk_refcounts as pc_chunk_refcounts,
+        corpus_paths as pc_corpus_paths,
+        delete_chunk_file_if_unreferenced as pc_delete_chunk_file_if_unreferenced,
+        load_cache as pc_load_cache,
+        load_raw_metadata as pc_load_raw_metadata,
+        save_cache as pc_save_cache,
+    )
+    from rag_module.offline.text_quality import (
+        clean_text as tq_clean_text,
+        deduplicate_chunk_texts as tq_deduplicate_chunk_texts,
+        is_high_quality_chunk as tq_is_high_quality_chunk,
+        is_high_quality_document as tq_is_high_quality_document,
+        quality_score as tq_quality_score,
+        split_sentences as tq_split_sentences,
+        text_metrics as tq_text_metrics,
+        tokenize_words as tq_tokenize_words,
+    )
     from rag_module.shared.data_quality import create_backup, postprocess_chunks_for_source
     from rag_module.shared.runtime import get_runtime_settings
 
@@ -115,7 +151,7 @@ def _safe_ratio(numerator: int, denominator: int) -> float:
 
 
 def _tokenize_words(text: str) -> List[str]:
-    return re.findall(r"\b[\w'-]+\b", text.lower(), flags=re.UNICODE)
+    return tq_tokenize_words(text)
 
 
 def _mojibake_score(text: str) -> int:
@@ -196,71 +232,11 @@ def _is_noise_line(line: str, corpus: str = "main") -> bool:
 
 
 def _text_metrics(text: str) -> Dict[str, float]:
-    tokens = _tokenize_words(text)
-    words = len(tokens)
-    unique_ratio = _safe_ratio(len(set(tokens)), words)
-
-    non_space_len = sum(1 for ch in text if not ch.isspace())
-    alpha_count = sum(1 for ch in text if ch.isalpha())
-    digit_count = sum(1 for ch in text if ch.isdigit())
-    symbol_count = sum(
-        1
-        for ch in text
-        if ch in string.punctuation or (not ch.isalnum() and not ch.isspace())
-    )
-    sentence_count = len(
-        [s for s in re.split(r"(?<=[.!?])\s+|\n+", text) if len(_tokenize_words(s)) >= 3]
-    )
-    url_count = len(re.findall(r"https?://|www\.", text.lower()))
-    repeated_run = bool(re.search(rf"(.)\1{{{MAX_REPEAT_CHAR_RUN},}}", text))
-
-    return {
-        "words": float(words),
-        "unique_ratio": unique_ratio,
-        "alpha_ratio": _safe_ratio(alpha_count, non_space_len),
-        "digit_ratio": _safe_ratio(digit_count, non_space_len),
-        "symbol_ratio": _safe_ratio(symbol_count, non_space_len),
-        "sentence_count": float(sentence_count),
-        "url_count": float(url_count),
-        "repeated_run": 1.0 if repeated_run else 0.0,
-    }
+    return tq_text_metrics(text)
 
 
 def clean_text(text: str, corpus: str = "main") -> str:
-    if not text:
-        return ""
-
-    text = _repair_mojibake(text)
-    text = unicodedata.normalize("NFKC", text)
-    text = unescape(text)
-    text = re.sub(r"[\u200b\u200c\u200d\ufeff]+", "", text)
-    text = text.replace("\r\n", "\n").replace("\r", "\n")
-
-    cleaned_lines: List[str] = []
-    previous_line = ""
-    seen_line_hashes = set()
-
-    for raw_line in text.split("\n"):
-        line = re.sub(r"[ \t\f\v]+", " ", raw_line).strip(" -|\t")
-        if _is_noise_line(line, corpus=corpus):
-            continue
-
-        lowered = line.lower()
-        line_hash = hashlib.md5(lowered.encode("utf-8")).hexdigest()
-
-        if lowered == previous_line:
-            continue
-        if line_hash in seen_line_hashes and len(line.split()) < 7:
-            continue
-
-        cleaned_lines.append(line)
-        seen_line_hashes.add(line_hash)
-        previous_line = lowered
-
-    normalized = "\n".join(cleaned_lines)
-    normalized = re.sub(r"\n{3,}", "\n\n", normalized)
-    normalized = re.sub(r" {2,}", " ", normalized)
-    return normalized.strip()
+    return tq_clean_text(text, corpus=corpus)
 
 
 def hash_text(text: str) -> str:
@@ -283,106 +259,27 @@ def safe_detect_lang(text: str) -> Tuple[str, float]:
 
 
 def quality_score(text: str) -> int:
-    if not text:
-        return 0
-
-    metrics = _text_metrics(text)
-    score = 0.0
-    score += min(metrics["words"], 180.0) * 0.22
-    score += min(metrics["sentence_count"], 12.0) * 2.8
-    score += min(metrics["unique_ratio"], 1.0) * 24.0
-    score += min(metrics["alpha_ratio"], 1.0) * 20.0
-    score -= metrics["digit_ratio"] * 30.0
-    score -= metrics["symbol_ratio"] * 35.0
-    score -= max(0.0, metrics["url_count"] - 1.0) * 8.0
-    if metrics["repeated_run"] > 0:
-        score -= 15.0
-    return int(max(0.0, min(100.0, round(score))))
+    return tq_quality_score(text)
 
 
 def _corpus_paths(corpus: str) -> Tuple[str, str, str]:
-    if corpus == "archive":
-        return (
-            str(RUNTIME.rag_raw_archive_dir),
-            str(RUNTIME.rag_processed_archive_dir),
-            str(RUNTIME.rag_cache_dir / "file_cache_archive.json"),
-        )
-    if corpus == "drive":
-        return (
-            str(RUNTIME.rag_raw_drive_dir),
-            str(RUNTIME.rag_processed_drive_dir),
-            str(RUNTIME.rag_cache_dir / "file_cache_drive.json"),
-        )
-    return (
-        str(RUNTIME.rag_raw_main_dir),
-        str(RUNTIME.rag_processed_main_dir),
-        str(RUNTIME.rag_cache_dir / "file_cache_main.json"),
-    )
+    return pc_corpus_paths(corpus)
 
 
 def _load_raw_metadata(corpus: str) -> Dict[str, Dict]:
-    raw_dir, _, _ = _corpus_paths(corpus)
-    metadata_path = Path(raw_dir) / ".metadata.json"
-    if not metadata_path.exists():
-        return {}
-    try:
-        with metadata_path.open("r", encoding="utf-8") as handle:
-            payload = json.load(handle)
-        return payload if isinstance(payload, dict) else {}
-    except Exception:
-        return {}
+    return pc_load_raw_metadata(corpus)
 
 
 def is_high_quality_chunk(text: str, corpus: str = "main") -> bool:
-    policy = _corpus_policy(corpus)
-    metrics = _text_metrics(text)
-    if metrics["words"] < policy["min_words"]:
-        return False
-    if metrics["alpha_ratio"] < policy["min_alpha_ratio"]:
-        return False
-    if metrics["digit_ratio"] > policy["max_digit_ratio"]:
-        return False
-    if metrics["symbol_ratio"] > policy["max_symbol_ratio"]:
-        return False
-    if metrics["unique_ratio"] < policy["min_unique_ratio"]:
-        return False
-    if metrics["url_count"] > policy["max_urls_per_chunk"]:
-        return False
-    return quality_score(text) >= policy["min_quality_score"]
+    return tq_is_high_quality_chunk(text, corpus=corpus)
 
 
 def _is_high_quality_document(text: str, corpus: str = "main") -> bool:
-    policy = _corpus_policy(corpus)
-    if len(text) < policy["min_doc_chars"]:
-        return False
-    if len(_tokenize_words(text)) < policy["min_doc_words"]:
-        return False
-
-    metrics = _text_metrics(text[: min(len(text), 6000)])
-    if metrics["alpha_ratio"] < policy["min_alpha_ratio"]:
-        return False
-    if metrics["digit_ratio"] > policy["max_digit_ratio"]:
-        return False
-    if metrics["symbol_ratio"] > policy["max_symbol_ratio"]:
-        return False
-    if metrics["unique_ratio"] < policy["min_unique_ratio"]:
-        return False
-    return quality_score(text[: min(len(text), 6000)]) >= policy["min_quality_score"]
+    return tq_is_high_quality_document(text, corpus=corpus)
 
 
 def _deduplicate_chunk_texts(chunks: List[str]) -> List[str]:
-    unique_chunks: List[str] = []
-    seen = set()
-    for chunk in chunks:
-        normalized = re.sub(r"\s+", " ", chunk.strip().lower())
-        if not normalized:
-            continue
-        digest = hashlib.sha1(normalized.encode("utf-8")).hexdigest()
-        if digest in seen:
-            continue
-        seen.add(digest)
-        unique_chunks.append(chunk)
-    return unique_chunks
+    return tq_deduplicate_chunk_texts(chunks)
 
 
 def extract_text_html(path: str) -> str:
@@ -398,8 +295,7 @@ def extract_text_plain(path: str) -> str:
 
 
 def split_sentences(text: str) -> List[str]:
-    sentences = re.split(r"(?<=[.!?])\s+", text)
-    return [sentence.strip() for sentence in sentences if sentence.strip() and not _is_noise_line(sentence)]
+    return tq_split_sentences(text)
 
 
 def semantic_chunk(
@@ -562,47 +458,15 @@ def preprocess_file(file_path: str, corpus: str = "main", raw_metadata: Dict | N
 
 
 def load_cache(cache_file: str) -> Dict:
-    if not os.path.exists(cache_file):
-        return {"version": 2, "files": {}}
-    try:
-        with open(cache_file, encoding="utf-8") as handle:
-            raw = json.load(handle)
-    except Exception:
-        return {"version": 2, "files": {}}
-
-    if isinstance(raw, dict) and "files" in raw and isinstance(raw["files"], dict):
-        files = {}
-        for path, entry in raw["files"].items():
-            if not isinstance(entry, dict):
-                continue
-            files[path] = {
-                "file_hash": entry.get("file_hash", ""),
-                "chunk_hashes": list(dict.fromkeys(entry.get("chunk_hashes", []))),
-                "policy_version": entry.get("policy_version", ""),
-            }
-        return {"version": 2, "files": files}
-
-    if isinstance(raw, dict):
-        files = {}
-        for path, file_hash in raw.items():
-            if isinstance(path, str) and isinstance(file_hash, str):
-                files[path] = {"file_hash": file_hash, "chunk_hashes": [], "policy_version": ""}
-        return {"version": 2, "files": files}
-    return {"version": 2, "files": {}}
+    return pc_load_cache(cache_file)
 
 
 def save_cache(cache: Dict, cache_file: str) -> None:
-    os.makedirs(os.path.dirname(cache_file), exist_ok=True)
-    with open(cache_file, "w", encoding="utf-8") as handle:
-        json.dump(cache, handle, indent=2, ensure_ascii=False)
+    pc_save_cache(cache, cache_file)
 
 
 def _chunk_refcounts(file_records: Dict[str, Dict]) -> Dict[str, int]:
-    refcounts: Dict[str, int] = {}
-    for record in file_records.values():
-        for chunk_hash in set(record.get("chunk_hashes", [])):
-            refcounts[chunk_hash] = refcounts.get(chunk_hash, 0) + 1
-    return refcounts
+    return pc_chunk_refcounts(file_records)
 
 
 def _delete_chunk_file_if_unreferenced(
@@ -611,16 +475,7 @@ def _delete_chunk_file_if_unreferenced(
     seen_chunks: set,
     processed_path: str,
 ) -> bool:
-    if refcounts.get(chunk_hash, 0) > 0:
-        return False
-    path = os.path.join(processed_path, f"{chunk_hash}.json")
-    if os.path.exists(path):
-        try:
-            os.remove(path)
-        except Exception:
-            return False
-    seen_chunks.discard(chunk_hash)
-    return True
+    return pc_delete_chunk_file_if_unreferenced(chunk_hash, refcounts, seen_chunks, processed_path)
 
 
 def _preprocess_corpus(corpus: str) -> None:

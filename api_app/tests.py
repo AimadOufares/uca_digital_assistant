@@ -10,8 +10,10 @@ from django.core.files.uploadedfile import SimpleUploadedFile
 from rest_framework import status
 from rest_framework.test import APITestCase
 
+from api_app.models import Conversation
 from rag_module.adapters.vector_store import FaissVectorStoreAdapter
 from rag_module.adapters.storage import DocumentStorage
+from rag_module.adapters.llm_provider import LLMProviderAdapter
 from rag_module.contracts import AnswerResult
 from rag_module.offline.indexing import load_chunks
 from rag_module.offline.ingestion_utils import (
@@ -23,10 +25,26 @@ from rag_module.offline.ingestion_utils import (
 from rag_module.offline.processing import clean_text
 from rag_module.retrieval.rag_search import get_candidate_reranker_names, get_reranker
 from rag_module.shared.metadata_policy import prepare_chunk_metadata
+from rag_module.services.health import build_ready_health
 from rag_module.services.offline import run_indexing
 
 
 class ChatApiTests(APITestCase):
+    def setUp(self):
+        super().setUp()
+        self.student_user = get_user_model().objects.create_user(
+            username="etudiant-test",
+            email="etudiant@uca.ac.ma",
+            password="Secret12345!",
+            first_name="Etudiant",
+            last_name="UCA",
+        )
+
+    def test_chat_endpoint_requires_authentication(self):
+        response = self.client.post(reverse("api-chat"), {"message": "Bonjour"}, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
     @patch("api_app.views.answer_question")
     def test_chat_endpoint_returns_answer_payload(self, mocked_answer_question):
         mocked_answer_question.return_value = AnswerResult(
@@ -36,27 +54,179 @@ class ChatApiTests(APITestCase):
             backend="faiss",
             retrieval_meta={},
         )
+        self.client.force_login(self.student_user)
 
         response = self.client.post(reverse("api-chat"), {"message": "Bonjour"}, format="json")
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(
-            response.json(),
-            {
-                "answer": "Reponse test",
-                "sources": [],
-                "confidence": "moyen",
-                "backend": "faiss",
-                "retrieval_meta": {},
-            },
-        )
+        payload = response.json()
+        self.assertEqual(payload["answer"], "Reponse test")
+        self.assertEqual(payload["sources"], [])
+        self.assertEqual(payload["confidence"], "moyen")
+        self.assertEqual(payload["backend"], "faiss")
+        self.assertEqual(payload["retrieval_meta"], {})
+        self.assertIn("conversation_id", payload)
+        conversation = Conversation.objects.get(pk=payload["conversation_id"])
+        self.assertEqual(conversation.user, self.student_user)
+        self.assertEqual(conversation.messages.count(), 2)
         mocked_answer_question.assert_called_once()
 
     def test_chat_endpoint_rejects_empty_message(self):
+        self.client.force_login(self.student_user)
         response = self.client.post(reverse("api-chat"), {"message": ""}, format="json")
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn("detail", response.json())
+
+    @patch("api_app.views.answer_question")
+    def test_chat_history_endpoint_returns_saved_messages(self, mocked_answer_question):
+        mocked_answer_question.return_value = AnswerResult(
+            answer="Historique test",
+            sources=[{"name": "guide.pdf", "score": 0.88}],
+            confidence="eleve",
+            backend="faiss",
+            retrieval_meta={"provider": "lmstudio"},
+        )
+        self.client.force_login(self.student_user)
+        self.client.post(reverse("api-chat"), {"message": "Comment obtenir mon attestation ?"}, format="json")
+
+        response = self.client.get(reverse("api-chat"))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        payload = response.json()
+        self.assertEqual(len(payload["messages"]), 2)
+        self.assertEqual(payload["messages"][0]["role"], "user")
+        self.assertEqual(payload["messages"][1]["role"], "assistant")
+        self.assertEqual(payload["messages"][1]["confidence"], "eleve")
+        self.assertEqual(len(payload["conversations"]), 1)
+
+    def test_chat_get_returns_selected_conversation_only(self):
+        conversation_a = Conversation.objects.create(user=self.student_user, title="Conversation A")
+        conversation_b = Conversation.objects.create(user=self.student_user, title="Conversation B")
+        conversation_a.messages.create(role="user", content="Bonjour A")
+        conversation_b.messages.create(role="user", content="Bonjour B")
+        self.client.force_login(self.student_user)
+
+        response = self.client.get(reverse("api-chat"), {"conversation_id": conversation_b.id})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        payload = response.json()
+        self.assertEqual(payload["conversation_id"], conversation_b.id)
+        self.assertEqual(len(payload["messages"]), 1)
+        self.assertEqual(payload["messages"][0]["content"], "Bonjour B")
+        self.assertEqual(len(payload["conversations"]), 2)
+
+    def test_chat_can_create_new_conversation(self):
+        self.client.force_login(self.student_user)
+
+        response = self.client.post(reverse("api-chat-conversations"), {}, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        payload = response.json()
+        self.assertIn("conversation_id", payload)
+        self.assertEqual(payload["messages"], [])
+        self.assertEqual(Conversation.objects.filter(user=self.student_user).count(), 1)
+
+    @patch("api_app.views.answer_question")
+    def test_chat_post_can_target_specific_conversation(self, mocked_answer_question):
+        mocked_answer_question.return_value = AnswerResult(
+            answer="Reponse ciblee",
+            sources=[],
+            confidence="moyen",
+            backend="faiss",
+            retrieval_meta={},
+        )
+        selected = Conversation.objects.create(user=self.student_user, title="Cible")
+        self.client.force_login(self.student_user)
+
+        response = self.client.post(
+            reverse("api-chat"),
+            {"message": "Question ciblee", "conversation_id": selected.id},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        selected.refresh_from_db()
+        self.assertEqual(selected.messages.count(), 2)
+
+    def test_chat_conversation_can_be_renamed(self):
+        conversation = Conversation.objects.create(user=self.student_user, title="Ancien titre")
+        self.client.force_login(self.student_user)
+
+        response = self.client.patch(
+            reverse("api-chat-conversation-detail", kwargs={"conversation_id": conversation.id}),
+            {"title": "Nouveau titre"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        conversation.refresh_from_db()
+        self.assertEqual(conversation.title, "Nouveau titre")
+
+    def test_chat_conversation_can_be_archived(self):
+        conversation = Conversation.objects.create(user=self.student_user, title="A archiver")
+        self.client.force_login(self.student_user)
+
+        response = self.client.delete(reverse("api-chat-conversation-detail", kwargs={"conversation_id": conversation.id}))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        conversation.refresh_from_db()
+        self.assertTrue(conversation.is_archived)
+
+
+class StudentAuthTests(APITestCase):
+    def test_signup_page_accepts_allowed_uca_email(self):
+        response = self.client.post(
+            reverse("student-signup"),
+            {
+                "first_name": "Sara",
+                "last_name": "UCA",
+                "email": "SARA@UCA.AC.MA",
+                "password1": "Secret12345!",
+                "password2": "Secret12345!",
+            },
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_302_FOUND)
+        self.assertEqual(response.headers["Location"], reverse("chat-page"))
+        created_user = get_user_model().objects.get(email="sara@uca.ac.ma")
+        self.assertTrue(created_user.check_password("Secret12345!"))
+
+    def test_signup_rejects_non_uca_email(self):
+        response = self.client.post(
+            reverse("student-signup"),
+            {
+                "first_name": "Sara",
+                "last_name": "UCA",
+                "email": "sara@gmail.com",
+                "password1": "Secret12345!",
+                "password2": "Secret12345!",
+            },
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertContains(response, "Inscription reservee aux emails UCA autorises")
+
+    def test_login_page_accepts_email_authentication(self):
+        get_user_model().objects.create_user(
+            username="student-email-login",
+            email="student.login@uca.ac.ma",
+            password="Secret12345!",
+        )
+
+        response = self.client.post(
+            reverse("student-login"),
+            {"username": "student.login@uca.ac.ma", "password": "Secret12345!"},
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_302_FOUND)
+        self.assertEqual(response.headers["Location"], reverse("chat-page"))
+
+    def test_chat_page_requires_login(self):
+        response = self.client.get(reverse("chat-page"))
+
+        self.assertEqual(response.status_code, status.HTTP_302_FOUND)
+        self.assertIn("/login/", response.headers["Location"])
 
 
 class HealthApiTests(APITestCase):
@@ -73,13 +243,116 @@ class HealthApiTests(APITestCase):
             "ok": False,
             "database": {"ok": True},
             "vector_store": {"ok": False, "active_index_present": False},
-            "llm": {"state": "degraded"},
+            "llm": {"state": "down", "usable": False},
         }
 
         response = self.client.get(reverse("api-health-ready"))
 
         self.assertEqual(response.status_code, status.HTTP_503_SERVICE_UNAVAILABLE)
         self.assertFalse(response.json()["ready"])
+
+
+class HealthLogicTests(APITestCase):
+    def test_llm_provider_health_is_down_when_single_configured_provider_fails(self):
+        settings = MagicMock()
+        settings.rag_llm_provider = "lmstudio"
+        settings.lm_studio_base_url = ""
+        settings.lm_studio_api_key = "lm-studio"
+        settings.openai_api_key = ""
+
+        payload = LLMProviderAdapter(settings).health()
+
+        self.assertEqual(payload["state"], "down")
+        self.assertFalse(payload["usable"])
+        self.assertEqual(payload["provider_order"], ["lmstudio"])
+
+    @patch("rag_module.adapters.llm_provider.OpenAI")
+    def test_llm_provider_health_is_degraded_when_auto_fallback_is_partially_available(self, mocked_openai):
+        models_response = MagicMock()
+        models_response.data = [MagicMock(id="gpt-4o-mini")]
+        openai_client = MagicMock()
+        openai_client.models.list.return_value = models_response
+        mocked_openai.side_effect = [RuntimeError("lmstudio offline"), openai_client]
+
+        settings = MagicMock()
+        settings.rag_llm_provider = "auto"
+        settings.lm_studio_base_url = "http://127.0.0.1:1234/v1"
+        settings.lm_studio_api_key = "lm-studio"
+        settings.openai_api_key = "sk-test"
+
+        payload = LLMProviderAdapter(settings).health()
+
+        self.assertEqual(payload["state"], "degraded")
+        self.assertTrue(payload["usable"])
+        self.assertEqual(payload["provider_order"], ["lmstudio", "openai"])
+        self.assertFalse(payload["providers"]["lmstudio"]["ok"])
+        self.assertTrue(payload["providers"]["openai"]["ok"])
+
+    @patch("rag_module.services.health.get_runtime_settings")
+    @patch("rag_module.services.health.DocumentStorage")
+    @patch("rag_module.services.health.get_vector_store_adapter")
+    @patch("rag_module.services.health.LLMProviderAdapter")
+    @patch("rag_module.services.health._database_health")
+    def test_build_ready_health_requires_usable_llm(
+        self,
+        mocked_database_health,
+        mocked_llm_adapter,
+        mocked_get_vector_store_adapter,
+        mocked_storage_cls,
+        mocked_get_runtime_settings,
+    ):
+        mocked_get_runtime_settings.return_value = MagicMock(app_env="test")
+        mocked_database_health.return_value = {"ok": True}
+        mocked_storage = MagicMock()
+        mocked_storage.load_active_index_pointer.return_value = {"backend": "faiss", "build_id": "build-1"}
+        mocked_storage_cls.return_value = mocked_storage
+        mocked_vector = MagicMock()
+        mocked_vector.health.return_value = {"ok": True, "active_index_present": True}
+        mocked_get_vector_store_adapter.return_value = mocked_vector
+        mocked_llm_adapter.return_value.health.return_value = {
+            "state": "down",
+            "usable": False,
+            "providers": {"lmstudio": {"ok": False, "reason": "offline"}},
+        }
+
+        payload = build_ready_health()
+
+        self.assertFalse(payload["ready"])
+        self.assertFalse(payload["ok"])
+        self.assertFalse(payload["checks"]["llm_ready"])
+
+    @patch("rag_module.services.health.get_runtime_settings")
+    @patch("rag_module.services.health.DocumentStorage")
+    @patch("rag_module.services.health.get_vector_store_adapter")
+    @patch("rag_module.services.health.LLMProviderAdapter")
+    @patch("rag_module.services.health._database_health")
+    def test_build_ready_health_accepts_degraded_but_usable_llm(
+        self,
+        mocked_database_health,
+        mocked_llm_adapter,
+        mocked_get_vector_store_adapter,
+        mocked_storage_cls,
+        mocked_get_runtime_settings,
+    ):
+        mocked_get_runtime_settings.return_value = MagicMock(app_env="test")
+        mocked_database_health.return_value = {"ok": True}
+        mocked_storage = MagicMock()
+        mocked_storage.load_active_index_pointer.return_value = {"backend": "faiss", "build_id": "build-1"}
+        mocked_storage_cls.return_value = mocked_storage
+        mocked_vector = MagicMock()
+        mocked_vector.health.return_value = {"ok": True, "active_index_present": True}
+        mocked_get_vector_store_adapter.return_value = mocked_vector
+        mocked_llm_adapter.return_value.health.return_value = {
+            "state": "degraded",
+            "usable": True,
+            "providers": {"lmstudio": {"ok": False}, "openai": {"ok": True}},
+        }
+
+        payload = build_ready_health()
+
+        self.assertTrue(payload["ready"])
+        self.assertTrue(payload["ok"])
+        self.assertTrue(payload["checks"]["llm_ready"])
 
 
 class DriveDocumentsApiTests(APITestCase):

@@ -21,6 +21,7 @@ class LLMProviderAdapter:
 
     def health(self) -> Dict:
         provider = self.settings.rag_llm_provider
+        provider_order = self.provider_order()
         statuses: Dict[str, Dict] = {}
 
         if provider in {"lmstudio", "local", "auto"}:
@@ -58,17 +59,23 @@ class LLMProviderAdapter:
                 except Exception as exc:
                     statuses["openai"] = {"ok": False, "reason": str(exc)}
 
-        fallback_allowed = provider in {"lmstudio", "local", "openai", "auto"}
-        all_failed = bool(statuses) and not any(item.get("ok") for item in statuses.values())
-        overall_state = "ok"
-        if all_failed and fallback_allowed:
+        provider_ok = {
+            name: bool(statuses.get(name, {}).get("ok"))
+            for name in provider_order
+        }
+        any_provider_ok = any(provider_ok.values())
+        all_checked_ok = bool(provider_ok) and all(provider_ok.values())
+
+        overall_state = "down"
+        if all_checked_ok:
+            overall_state = "ok"
+        elif any_provider_ok:
             overall_state = "degraded"
-        elif all_failed:
-            overall_state = "down"
 
         return {
             "provider": provider,
             "state": overall_state,
-            "fallback_allowed": fallback_allowed,
+            "provider_order": provider_order,
+            "usable": any_provider_ok,
             "providers": statuses,
         }

@@ -107,3 +107,11 @@ USE_TZ = True
 STATIC_URL = 'static/'
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
+
+LOGIN_URL = "/login/"
+LOGIN_REDIRECT_URL = "/chat/"
+LOGOUT_REDIRECT_URL = "/login/"
+
+AUTHENTICATION_BACKENDS = [
+    "api_app.auth_backends.EmailOrUsernameModelBackend",
+]

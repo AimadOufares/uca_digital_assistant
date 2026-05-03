@@ -7,105 +7,70 @@
 ![Status](https://img.shields.io/badge/Status-Active-success)
 ![License](https://img.shields.io/badge/License-MIT-green)
 
-> 💡 Un assistant intelligent basé sur le RAG permettant aux étudiants d’accéder rapidement aux informations universitaires à partir de documents officiels, avec des réponses fiables, contextuelles et pertinentes.
+Assistant universitaire base sur une architecture RAG pour aider les etudiants de l'UCA a retrouver rapidement des informations fiables a partir de sources officielles.
 
----
+## Fonctionnalites
 
-## ✨ Fonctionnalités
+- Ingestion de contenus HTML, PDF, DOCX, TXT et MD
+- Nettoyage, structuration et chunking semantique
+- Recherche hybride dense + BM25 avec reranking
+- Guardrails de retrieval et abstention
+- API Django REST
+- Interface chat etudiante avec authentification locale UCA
+- Historique persistant des conversations
+- Dashboard admin et health checks
 
-- **Ingestion** de documents : HTML, PDF et DOCX
-- **Parsing & Cleaning** avancé avec structuration des données
-- **Semantic Chunking** pour une meilleure compréhension contextuelle
-- **Embeddings** avec des modèles Sentence-Transformers
-- **Recherche hybride locale** : FAISS + BM25 + reranking
-- **Retriever + LLM** pour générer des réponses contextualisées
-- **API REST** avec Django & Django REST Framework
-- **Interface Chat** simple et responsive (HTML + CSS + JavaScript)
+## Pourquoi ce projet
 
----
+Le systeme vise a:
 
-## 🧠 Pourquoi RAG ?
+- reduire les hallucinations en s'appuyant sur des documents reels
+- exposer les sources et le niveau de confiance
+- fournir une experience utile a un contexte etudiant UCA
+- separer clairement les etapes offline et online du pipeline RAG
 
-Ce projet utilise une architecture **RAG (Retrieval-Augmented Generation)** pour :
-
-- 📚 Exploiter des documents réels (PDF, HTML, DOCX)
-- 🎯 Fournir des réponses précises basées sur des sources fiables
-- ❌ Réduire les hallucinations des modèles LLM
-- 🔍 Améliorer la pertinence contextuelle des réponses
-
----
-
-## 🏗️ Architecture
+## Architecture
 
 ```text
-Raw Data (HTML / PDF / DOCX)
-        │
-        ▼
-Parsing + Cleaning + Structuration
-        │
-        ▼
-Semantic Chunking
-        │
-        ▼
-Embeddings (Sentence-Transformers)
-        │
-        ▼
-FAISS + BM25
-        │
-        ▼
-Retriever
-        │
-        ▼
-LLM (Local ou API)
-        │
-        ▼
-Django Backend (API REST)
-        │
-        ▼
-Frontend Chat Interface
-````
+Seed URLs / documents bruts
+  -> ingestion
+  -> preprocessing / nettoyage / chunking
+  -> indexing / BM25 / embeddings / publication
+  -> retrieval hybride + rerank + guardrails
+  -> generation de reponse
+  -> API Django + interface chat
+```
 
----
+Documentation detaillee:
 
-## 💬 Exemple d’utilisation
+- `docs/RAG_ARCHITECTURE.md`
+- `docs/REFERENCE_VERSION.md`
+- `docs/DEMO_GUIDE.md`
 
-**Question :**
-
-> Quelles sont les conditions d'inscription en master à l'UCA ?
-
-**Réponse :**
-
-> Selon les documents officiels de l’université, l’inscription en master nécessite un diplôme de licence ou équivalent, ainsi que la validation du dossier de candidature selon les critères définis par l’établissement.
-
----
-
-## 📁 Structure du projet
+## Structure du projet
 
 ```text
 uca_digital_assistant/
-├── manage.py
-├── env/                      # Environnement virtuel (ignoré)
-├── core/                     # Configuration Django principale
-├── api_app/                  # Application Django REST
-├── rag_module/               # Module RAG complet (ingestion → réponse)
-├── data_storage/             # Fichiers bruts et traités (ignoré)
-├── requirements.txt
-├── README.md
-└── .gitignore
+|-- manage.py
+|-- core/
+|-- api_app/
+|-- rag_module/
+|-- docs/
+|-- requirements.txt
+|-- README.md
+`-- .env.example
 ```
 
----
+## Installation
 
-## 🚀 Installation
-
-### 1. Cloner le dépôt
+### 1. Cloner le depot
 
 ```bash
 git clone https://github.com/AimadOufares/uca_digital_assistant.git
 cd uca_digital_assistant
 ```
 
-### 2. Créer et activer l’environnement virtuel
+### 2. Creer l'environnement virtuel
 
 ```bash
 python -m venv env
@@ -117,54 +82,86 @@ env\Scripts\activate
 source env/bin/activate
 ```
 
-### 3. Installer les dépendances
+### 3. Installer les dependances
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### 4. Appliquer les migrations Django
+### 4. Preparer l'environnement
+
+```bash
+# Windows
+copy .env.example .env
+
+# Linux / macOS
+cp .env.example .env
+```
+
+Variables importantes:
+
+- `UCA_ALLOWED_EMAIL_DOMAINS`
+- `RAG_LLM_PROVIDER`
+- `LM_STUDIO_BASE_URL`
+- `RAG_LANGUAGE_DETECTOR`
+
+### 5. Appliquer les migrations
 
 ```bash
 python manage.py migrate
 ```
 
----
+## Utilisation
 
-## 🛠️ Utilisation
-
-### 1. Lancer le serveur Django
+### Lancer l'application
 
 ```bash
 python manage.py runserver
 ```
 
-### 2. Accéder à l’application
+Pages principales:
 
-- **Interface Chat** : [http://127.0.0.1:8000/chat/](http://127.0.0.1:8000/chat/)
-- **Endpoint API Test** : [http://127.0.0.1:8000/api/test/](http://127.0.0.1:8000/api/test/)
+- Inscription etudiante: `http://127.0.0.1:8000/signup/`
+- Connexion etudiante: `http://127.0.0.1:8000/login/`
+- Chat: `http://127.0.0.1:8000/chat/`
+- Health ready: `http://127.0.0.1:8000/api/health/ready/`
 
-### 3. Alimenter le RAG
+### Alimenter le RAG
 
-1. Placer vos documents dans `data_storage/raw/`
-2. Exécuter le pipeline d’ingestion :
+Commande la plus simple:
 
 ```bash
-python rag_module/pipeline.py
+python manage.py rag_build_kb --publish
 ```
 
----
+Commandes utiles:
 
-## ⚙️ Configuration
+```bash
+python manage.py check
+python manage.py rag_healthcheck --json
+python manage.py rag_index --corpus published --publish
+```
 
-- **Index principal** : FAISS hybride local, avec possibilité de backend Qdrant si besoin
-- **LLM** : Le module RAG peut utiliser LM Studio via l'API compatible OpenAI (`http://127.0.0.1:1234/v1`)
-- **Embeddings** : Modèle recommandé `BAAI/bge-m3`
-- **Corpus `drive`** : `data_storage/raw/drive` est traité puis inclus dans l'index publié par défaut
+## Espace etudiant
 
-### Configuration LM Studio
+La v1 inclut:
 
-Ajouter ou vérifier dans `.env` :
+- authentification locale Django
+- restriction par email UCA
+- chat protege
+- historique personnel
+- multi-conversations de base
+- affichage des sources et de la confiance
+
+## Configuration RAG
+
+- Backend principal: FAISS hybride local
+- Backend alternatif possible: Qdrant
+- Embeddings recommandes: `BAAI/bge-m3`
+- LLM possible via LM Studio compatible OpenAI
+- Corpus `drive` inclus par defaut dans les builds publies si configure
+
+### Exemple LM Studio
 
 ```bash
 RAG_LLM_PROVIDER=lmstudio
@@ -174,79 +171,68 @@ RAG_LM_STUDIO_MODEL=mistral-7b-instruct-v0.3
 RAG_REQUEST_TIMEOUT=180
 ```
 
-Le projet charge maintenant automatiquement `.env` au démarrage Django et dans les modules RAG standalone.
+## Reproductibilite
 
----
+Le projet utilise notamment:
 
-## 🔐 Sécurité
+- `faiss-cpu`
+- `tiktoken`
+- `langdetect`
+- `Unidecode`
 
-- Validation et nettoyage des entrées utilisateur
-- Protection contre les injections (prompt injection, XSS)
-- Isolation des données sensibles
-- Possibilité d'intégrer une authentification sécurisée
+Verifier l'environnement avec:
 
----
+```bash
+python manage.py check
+python manage.py test api_app.tests.ChatApiTests api_app.tests.StudentAuthTests
+python manage.py test api_app.tests.ProcessingAndIndexingTests api_app.tests.HealthLogicTests
+```
 
-## 📝 Notes importantes
+## Deploiement demo
 
-- Dossiers ignorés par Git :
+```bash
+docker compose up --build
+```
 
-  - `env/`
-  - `db.sqlite3`
-  - `data_storage/`
-  - `__pycache__/`
+Le `docker-compose.yml` fourni est pense pour une demonstration locale et non pour une production durcie.
 
-- Le module `rag_module` est **modulaire** et facilement extensible
+## Tests
 
----
+- API chat et auth: `python manage.py test api_app.tests.ChatApiTests api_app.tests.StudentAuthTests`
+- Offline / indexing / retrieval: `python manage.py test api_app.tests.ProcessingAndIndexingTests`
+- Health: `python manage.py test api_app.tests.HealthLogicTests`
+- Verification globale: `python manage.py check`
 
-## 🤝 Contribution
+## Roadmap
 
-1. Fork le projet
-2. Créer une branche (`git checkout -b feature/amélioration`)
-3. Faire vos modifications
-4. Committer (`git commit -m 'Ajout d'une fonctionnalité'`)
-5. Push (`git push origin feature/amélioration`)
-6. Ouvrir une Pull Request
+- [x] Authentification etudiante UCA locale
+- [x] Historique des conversations
+- [x] Sources et confiance dans l'UI
+- [x] Docker/Compose de demonstration
+- [ ] UI plus avancee
+- [ ] Support multilingue plus pousse
+- [ ] Optimisation supplementaire des performances
+- [ ] Evolution eventuelle vers SSO UCA
 
-Les **issues** sont également bienvenues pour signaler bugs ou idées.
+## Notes
 
----
+Dossiers typiquement ignores:
 
-## 🛣️ Roadmap
+- `env/`
+- `db.sqlite3`
+- `data_storage/`
+- `__pycache__/`
 
-- [ ] Interface utilisateur avancée (React ou HTMX)
-- [ ] Support multi-langues (Arabe, Français, Anglais)
-- [ ] Authentification des utilisateurs (étudiants / enseignants)
-- [ ] Historique des conversations
-- [ ] Amélioration du chunking sémantique
-- [ ] Ajout de citations des sources dans les réponses (RAG avancé)
-- [ ] Optimisation des performances (indexation + retrieval)
-- [ ] Déploiement Docker + Docker Compose
+Le projet a ete fortement refactorise pour separer:
 
----
+- `ingestion_utils.py` et `ingestion_quality.py`
+- `processing.py`, `text_quality.py` et `processing_cache.py`
+- `indexing.py` et `indexing_metadata.py`
+- `rag_search.py` et `query_intelligence.py`
 
-## 🧪 Tests (à venir)
-
-- Tests unitaires du module RAG
-- Tests API avec Django REST Framework
-- Évaluation des performances du retriever
-
----
-
-## 🛠️ Technologies utilisées
-
-- **Backend** : Python 3.10+, Django 4.x, Django REST Framework
-- **RAG** : LangChain, Sentence-Transformers, Qdrant
-- **Parsing** : BeautifulSoup4, pdfplumber, python-docx, lxml
-- **Frontend** : HTML5, CSS3, JavaScript (vanilla)
-- **Vector Store** : Qdrant
-
----
-
-## 👤 Auteur
+## Auteur
 
 **Aimad Oufares**  
-Projet **UCA Digital Assistant**  
-Université Cadi Ayyad (UCA)  
-Faculté Des Sciences Semlalia Marrakech
+Projet UCA Digital Assistant  
+Universite Cadi Ayyad  
+Faculte des Sciences Semlalia Marrakech

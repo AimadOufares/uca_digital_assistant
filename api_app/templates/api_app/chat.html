@@ -23,6 +23,21 @@
             </div>
 
             <div class="sidebar-content">
+                <div class="student-card">
+                    <p class="student-eyebrow">Espace etudiant</p>
+                    <p class="student-name">{{ student_display_name }}</p>
+                    <a class="logout-link" href="{{ student_logout_url }}">Se deconnecter</a>
+                </div>
+                <div class="history-shell">
+                    <div class="history-header">
+                        <div>
+                            <p class="section-title section-title-tight">Historique</p>
+                            <p class="history-subtitle">Vos echanges recents UCA</p>
+                        </div>
+                        <button type="button" id="newConversationButton" class="new-conversation-btn">Nouveau</button>
+                    </div>
+                    <div id="conversationList" class="conversation-list"></div>
+                </div>
                 <p class="section-title">Aide & Suggestions</p>
                 <div class="quick-prompts">
                     <button type="button" class="prompt-btn" data-prompt="Comment obtenir mon attestation sur UC@Student ?">
@@ -47,6 +62,27 @@
                 <div class="logo-circle-small">UCA</div>
                 <h2>Assistant Digital</h2>
             </header>
+            <section class="chat-hero">
+                <div class="hero-copy">
+                    <p class="hero-kicker">Portail etudiant UCA</p>
+                    <h2 id="conversationTitle">Nouvelle conversation</h2>
+                    <p>Un espace guide par les sources institutionnelles pour vous orienter sur les services numeriques, la scolarite et les procedures UCA.</p>
+                </div>
+                <div class="hero-stats">
+                    <article class="hero-stat">
+                        <span>Sources</span>
+                        <strong>UCA</strong>
+                    </article>
+                    <article class="hero-stat">
+                        <span>Acces</span>
+                        <strong>Securise</strong>
+                    </article>
+                    <article class="hero-stat">
+                        <span>Mode</span>
+                        <strong>Etudiant</strong>
+                    </article>
+                </div>
+            </section>
 
             <div class="chat-scroll-area">
                 <div id="chatMessages" class="chat-container" aria-live="polite">

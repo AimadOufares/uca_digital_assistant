@@ -98,6 +98,7 @@ class RuntimeSettings:
     lm_studio_api_key: str
     rag_chat_model: str
     openai_api_key: str
+    uca_allowed_email_domains: List[str]
 
     def ensure_directories(self) -> None:
         for path in (
@@ -277,6 +278,7 @@ def get_runtime_settings() -> RuntimeSettings:
         lm_studio_api_key=_env_str("LM_STUDIO_API_KEY", "lm-studio"),
         rag_chat_model=_env_str("RAG_CHAT_MODEL", "gpt-4o-mini"),
         openai_api_key=_env_str("OPENAI_API_KEY", ""),
+        uca_allowed_email_domains=_env_csv("UCA_ALLOWED_EMAIL_DOMAINS", ["uca.ac.ma"]),
     )
     settings.ensure_directories()
     return settings

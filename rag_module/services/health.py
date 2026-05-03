@@ -35,7 +35,7 @@ def build_ready_health() -> Dict:
     llm_health = LLMProviderAdapter(settings).health()
     pointer = storage.load_active_index_pointer()
 
-    llm_ready = llm_health.get("state") in {"ok", "degraded"}
+    llm_ready = bool(llm_health.get("usable"))
     ready = bool(
         db_health.get("ok")
         and vector_health.get("ok")
@@ -50,5 +50,10 @@ def build_ready_health() -> Dict:
         "database": db_health,
         "vector_store": vector_health,
         "llm": llm_health,
+        "checks": {
+            "database_ready": bool(db_health.get("ok")),
+            "vector_store_ready": bool(vector_health.get("ok") and vector_health.get("active_index_present")),
+            "llm_ready": llm_ready,
+        },
         "active_index": pointer,
     }

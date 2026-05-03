@@ -16,11 +16,20 @@ Including another URLconf
 """
 from django.contrib import admin
 from django.urls import path, include
-from api_app.views import ChatPageView, AdminDashboardPageView
+from api_app.views import (
+    AdminDashboardPageView,
+    ChatPageView,
+    StudentLoginPageView,
+    StudentLogoutView,
+    StudentSignupPageView,
+)
 
 urlpatterns = [
     path('admin/', admin.site.urls),
     path('api/', include('api_app.urls')),
+    path('login/', StudentLoginPageView.as_view(), name='student-login'),
+    path('signup/', StudentSignupPageView.as_view(), name='student-signup'),
+    path('logout/', StudentLogoutView.as_view(), name='student-logout'),
     path('chat/', ChatPageView.as_view(), name='chat-page'),
     path('admin-dashboard/', AdminDashboardPageView.as_view(), name='admin-dashboard'),
 ]
