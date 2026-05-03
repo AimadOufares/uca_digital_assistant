@@ -33,9 +33,12 @@ def create_backup(processed_path: str, cache_file: str, backup_root: str = "data
     resolved_backup_root = Path(backup_root)
     if backup_root == "data_storage/backups":
         resolved_backup_root = runtime.rag_backups_dir
-    target_dir = Path(backup_root) / f"processed_{timestamp}"
-    if backup_root == "data_storage/backups":
-        target_dir = resolved_backup_root / f"processed_{timestamp}"
+    base_dir = resolved_backup_root / f"processed_{timestamp}"
+    target_dir = base_dir
+    suffix = 1
+    while target_dir.exists():
+        target_dir = resolved_backup_root / f"{base_dir.name}_{suffix}"
+        suffix += 1
     target_dir.parent.mkdir(parents=True, exist_ok=True)
 
     shutil.copytree(processed_dir, target_dir)

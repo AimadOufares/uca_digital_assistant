@@ -23,10 +23,17 @@ def answer_question(request: QuestionRequest) -> AnswerResult:
     payload = engine.answer(request.question)
     sources = list(payload.get("sources", []))
     settings = get_runtime_settings()
+    retrieval_meta = dict(payload.get("retrieval_meta", {}) or {})
+    retrieval_meta.update(
+        {
+            "provider": settings.rag_llm_provider,
+            "vector_backend": settings.rag_vector_backend,
+        }
+    )
     return AnswerResult(
         answer=str(payload.get("answer", "") or "").strip(),
         sources=sources,
         confidence=_confidence_from_sources(sources),
         backend=settings.rag_vector_backend,
-        retrieval_meta={"provider": settings.rag_llm_provider},
+        retrieval_meta=retrieval_meta,
     )

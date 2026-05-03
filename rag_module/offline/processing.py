@@ -27,7 +27,7 @@ except ImportError:  # pragma: no cover
 
 
 RUNTIME = get_runtime_settings()
-PROCESSING_POLICY_VERSION = "v7_drive_local_docs"
+PROCESSING_POLICY_VERSION = "v12_drive_service_profiles_v5"
 
 CHUNK_TOKENS = 500
 OVERLAP_TOKENS = 80

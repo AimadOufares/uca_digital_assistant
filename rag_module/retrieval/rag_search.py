@@ -39,6 +39,16 @@ RUNTIME = get_runtime_settings()
 STORAGE = DocumentStorage(RUNTIME)
 
 
+def _env_float(name: str, default: float) -> float:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
 INDEX_PATH = "data_storage/index/index.faiss"
 CHUNKS_PATH = "data_storage/index/chunks.json"
 MANIFEST_PATH = "data_storage/index/index_manifest.json"
@@ -60,17 +70,17 @@ MAX_CONTEXT_CHARS = 2500
 DENSE_WEIGHT = 0.65
 BM25_WEIGHT = 0.35
 
-USE_RERANK = True
+USE_RERANK = os.getenv("RAG_USE_RERANK", "true").strip().lower() in {"1", "true", "yes", "on"}
 USE_SPELLCHECK = False
 USE_MULTI_QUERY = False
 USE_ASCII_NORMALIZATION = False
 
-MIN_GUARDRAIL_SCORE = 0.24
-MIN_THEMATIC_SCORE = 0.18
-MIN_SUPPORT_SCORE = 0.28
-MIN_FINAL_SUPPORT_SCORE = 0.42
-MIN_TOP_RERANK_NORMALIZED = 0.44
-TOPICAL_MISMATCH_DROP_THRESHOLD = 0.45
+MIN_GUARDRAIL_SCORE = _env_float("RAG_MIN_GUARDRAIL_SCORE", 0.24)
+MIN_THEMATIC_SCORE = _env_float("RAG_MIN_THEMATIC_SCORE", 0.18)
+MIN_SUPPORT_SCORE = _env_float("RAG_MIN_SUPPORT_SCORE", 0.28)
+MIN_FINAL_SUPPORT_SCORE = _env_float("RAG_MIN_FINAL_SUPPORT_SCORE", 0.42)
+MIN_TOP_RERANK_NORMALIZED = _env_float("RAG_MIN_TOP_RERANK_NORMALIZED", 0.44)
+TOPICAL_MISMATCH_DROP_THRESHOLD = _env_float("RAG_TOPICAL_MISMATCH_DROP_THRESHOLD", 0.45)
 
 QUERY_STOPWORDS = {
     "a",
@@ -117,6 +127,27 @@ QUERY_CANONICAL_REPLACEMENTS: List[Tuple[str, str]] = [
     (r"\bbours\b", "bourse"),
     (r"\bfac\b", "faculte"),
 ]
+
+SERVICE_ALIAS_RULES: Dict[str, Set[str]] = {
+    "ucastudent": {"uc@student", "ucastudent", "uc student"},
+    "ucaplat": {"ucaplat"},
+    "pedoc": {"pedoc"},
+    "cip": {"cip", "centre d innovation pedagogique", "centre innovation pedagogique"},
+    "e-candidature": {"e-candidature", "e candidature", "ecandidature"},
+    "diplomes": {"espace diplomes", "espace diplomes", "e diplome", "diplomes.uca.ma"},
+    "pucastaff": {"pucastaff"},
+    "hpc": {"hpc", "hpc uca"},
+}
+
+QUERY_INTENT_RULES: Dict[str, Set[str]] = {
+    "connexion": {"connexion", "connecter", "login", "authentification", "acces"},
+    "mot_de_passe": {"mot de passe", "password", "reinitialiser", "oubli", "email academique"},
+    "attestation": {"attestation", "certificat", "attestation d inscription", "attestation de scolarite"},
+    "notes": {"notes", "resultats", "releve"},
+    "candidature": {"candidature", "preinscription", "postuler", "dossier", "suivi"},
+    "cours": {"cours", "devoir", "module", "examen en ligne", "classe virtuelle"},
+}
+STRICT_QUERY_INTENTS = {"mot_de_passe", "attestation"}
 
 QUERY_TOPIC_RULES: Dict[str, Dict[str, Any]] = {
     "stage": {
@@ -174,7 +205,7 @@ QUERY_TOPIC_RULES: Dict[str, Dict[str, Any]] = {
             "allocation",
             "aide financiere",
         },
-        "allowed_document_types": {"bourse", "general"},
+        "allowed_document_types": {"bourse", "vie_etudiante", "scolarite", "digital_service", "general"},
         "conflicts": {"stage", "admission", "inscription", "resultats"},
     },
     "calendrier": {
@@ -205,6 +236,20 @@ QUERY_TOPIC_RULES: Dict[str, Dict[str, Any]] = {
         "allowed_document_types": {"resultats", "admission", "general"},
         "conflicts": {"bourse", "stage"},
     },
+    "diplome": {
+        "keywords": {
+            "diplome",
+            "diplomes",
+            "e diplome",
+            "e-diplome",
+            "duplicata",
+            "suivi du diplome",
+            "etat du diplome",
+            "statut du diplome",
+        },
+        "allowed_document_types": {"scolarite", "digital_service", "general"},
+        "conflicts": set(),
+    },
     "formation": {
         "keywords": {
             "formation",
@@ -222,6 +267,19 @@ QUERY_TOPIC_RULES: Dict[str, Dict[str, Any]] = {
             "cours",
         },
         "allowed_document_types": {"formation", "admission", "pedagogie_numerique", "general"},
+        "conflicts": set(),
+    },
+    "soutien_recherche": {
+        "keywords": {
+            "soutien",
+            "accompagnement",
+            "accompagnement projet",
+            "monter un projet",
+            "monter un projet de recherche",
+            "demande de soutien",
+            "projet de recherche",
+        },
+        "allowed_document_types": {"recherche", "general"},
         "conflicts": set(),
     },
     "contact": {
@@ -274,6 +332,14 @@ NORMALIZED_QUERY_TOPIC_RULES: Dict[str, Dict[str, Any]] = {
 NORMALIZED_LEVEL_KEYWORDS = {
     level: {normalize_text(keyword) for keyword in keywords if normalize_text(keyword)}
     for level, keywords in LEVEL_KEYWORDS.items()
+}
+NORMALIZED_SERVICE_ALIAS_RULES: Dict[str, Set[str]] = {
+    service: {normalize_text(alias) for alias in aliases if normalize_text(alias)}
+    for service, aliases in SERVICE_ALIAS_RULES.items()
+}
+NORMALIZED_QUERY_INTENT_RULES: Dict[str, Set[str]] = {
+    intent: {normalize_text(alias) for alias in aliases if normalize_text(alias)}
+    for intent, aliases in QUERY_INTENT_RULES.items()
 }
 NORMALIZED_FACULTY_RULES = {}
 
@@ -797,12 +863,47 @@ def _extract_query_faculties(normalized_query: str) -> List[str]:
     return faculties
 
 
+def _extract_query_services(normalized_query: str, query_tokens: Set[str]) -> List[str]:
+    services: List[str] = []
+    for service, aliases in NORMALIZED_SERVICE_ALIAS_RULES.items():
+        for alias in aliases:
+            if not alias:
+                continue
+            if (" " in alias and alias in normalized_query) or _tokenize_normalized(alias).issubset(query_tokens):
+                services.append(service)
+                break
+    return services
+
+
+def _extract_query_intents(normalized_query: str, query_tokens: Set[str]) -> List[str]:
+    intents: List[str] = []
+    for intent, aliases in NORMALIZED_QUERY_INTENT_RULES.items():
+        for alias in aliases:
+            if not alias:
+                continue
+            if (" " in alias and alias in normalized_query) or _tokenize_normalized(alias).issubset(query_tokens):
+                intents.append(intent)
+                break
+    return intents
+
+
+def _alias_matches_text(alias: str, normalized_text: str, text_tokens: Set[str]) -> bool:
+    if not alias:
+        return False
+    if " " in alias:
+        return alias in normalized_text
+    alias_tokens = _tokenize_normalized(alias)
+    return bool(alias_tokens) and alias_tokens.issubset(text_tokens)
+
+
 def build_query_profile(query: str) -> Dict[str, Any]:
     normalized_query = normalize_text(query)
     query_tokens = _tokenize_normalized(normalized_query)
     topic_hits = _extract_query_topics(normalized_query, query_tokens)
     levels = _extract_query_levels(normalized_query, query_tokens)
     faculties = _extract_query_faculties(normalized_query)
+    services = _extract_query_services(normalized_query, query_tokens)
+    intents = _extract_query_intents(normalized_query, query_tokens)
     years = sorted({int(year) for year in re.findall(r"\b(?:19|20)\d{2}\b", normalized_query)})
     informative_tokens = sorted(
         token
@@ -821,8 +922,10 @@ def build_query_profile(query: str) -> Dict[str, Any]:
         "primary_topics": sorted(topic_hits.keys()),
         "levels": levels,
         "faculties": faculties,
+        "services": services,
+        "intents": intents,
         "years": years,
-        "has_strong_topic": bool(topic_hits),
+        "has_strong_topic": bool(topic_hits or services),
     }
 
 
@@ -833,6 +936,12 @@ def _chunk_haystack(chunk: Dict) -> str:
         metadata.get("source", ""),
         metadata.get("file_name", ""),
         metadata.get("document_type", ""),
+        metadata.get("service_name", ""),
+        metadata.get("service_type", ""),
+        metadata.get("official_url", ""),
+        metadata.get("page_kind", ""),
+        " ".join(metadata.get("retrieval_keywords", []) or []),
+        metadata.get("retrieval_haystack", ""),
     ]
     return normalize_text(" ".join(str(field or "") for field in fields))
 
@@ -880,22 +989,59 @@ def score_chunk_thematic_match(chunk: Dict, query_profile: Dict[str, Any]) -> Di
     haystack = _chunk_haystack(chunk)
     chunk_topics = _chunk_topics(chunk, haystack)
     chunk_tokens = _tokenize_normalized(haystack)
+    metadata_phrases = [
+        normalize_text(str(item))
+        for item in [
+            *(metadata.get("retrieval_keywords", []) or []),
+            *(metadata.get("main_actions", []) or []),
+        ]
+        if normalize_text(str(item))
+    ]
+    metadata_tokens: Set[str] = set()
+    for phrase in metadata_phrases:
+        metadata_tokens.update(_tokenize_normalized(phrase))
     chunk_levels = _chunk_levels(haystack)
 
     primary_topics = set(query_profile.get("primary_topics", []))
     levels = set(query_profile.get("levels", []))
     faculties = set(query_profile.get("faculties", []))
+    query_services = set(query_profile.get("services", []))
+    query_intents = set(query_profile.get("intents", []))
     years = {int(year) for year in query_profile.get("years", [])}
     informative_tokens = set(query_profile.get("informative_tokens", []))
     topic_query_hits = query_profile.get("topic_hits", {}) or {}
     metadata_doc_type = normalize_text(str(metadata.get("document_type") or ""))
+    metadata_service_name = normalize_text(str(metadata.get("service_name") or ""))
+    metadata_official_url = normalize_text(str(metadata.get("official_url") or ""))
+    metadata_intents = {
+        normalize_text(str(item))
+        for item in metadata.get("intent", []) or []
+        if normalize_text(str(item))
+    }
     metadata_faculty = str(metadata.get("faculty") or "").strip().upper()
     metadata_year = metadata.get("year")
+    chunk_services = {
+        service
+        for service, aliases in NORMALIZED_SERVICE_ALIAS_RULES.items()
+        if service == metadata_service_name
+        or _alias_matches_text(service, haystack, chunk_tokens)
+        or any(alias and (_alias_matches_text(alias, haystack, chunk_tokens) or alias in metadata_official_url) for alias in aliases)
+    }
+    matched_services = sorted(query_services.intersection(chunk_services))
+    matched_intents = sorted(query_intents.intersection(metadata_intents))
 
     matched_topics = sorted(primary_topics.intersection(chunk_topics.keys()))
     anchor_topic_hits: Dict[str, List[str]] = {}
     for topic in matched_topics:
         exact_hits = sorted(set(topic_query_hits.get(topic, [])).intersection(chunk_topics.get(topic, [])))
+        if not exact_hits:
+            exact_hits = sorted(
+                {
+                    hit
+                    for hit in topic_query_hits.get(topic, [])
+                    if any(hit in phrase or phrase in hit for phrase in metadata_phrases)
+                }
+            )
         if exact_hits:
             anchor_topic_hits[topic] = exact_hits
     conflicting_topics: Set[str] = set()
@@ -907,7 +1053,7 @@ def score_chunk_thematic_match(chunk: Dict, query_profile: Dict[str, Any]) -> Di
     for topic in primary_topics:
         allowed_document_types.update(NORMALIZED_QUERY_TOPIC_RULES.get(topic, {}).get("allowed_document_types", set()))
     doc_type_match = bool(metadata_doc_type and metadata_doc_type in allowed_document_types)
-    matched_informative_tokens = sorted(informative_tokens.intersection(chunk_tokens))
+    matched_informative_tokens = sorted(informative_tokens.intersection(chunk_tokens.union(metadata_tokens)))
     informative_coverage = (
         float(len(matched_informative_tokens)) / float(len(informative_tokens))
         if informative_tokens
@@ -928,6 +1074,48 @@ def score_chunk_thematic_match(chunk: Dict, query_profile: Dict[str, Any]) -> Di
         reasons.append("doc_type_match")
     elif primary_topics:
         reasons.append("topic_missing")
+
+    if primary_topics and allowed_document_types and not doc_type_match:
+        score -= 0.14
+        reasons.append("doc_type_mismatch")
+
+    if matched_services:
+        score += 0.42
+        reasons.append("service_match")
+    elif query_services:
+        score -= 0.28
+        reasons.append("service_mismatch")
+
+    is_diploma_tracking_query = (
+        "diplome" in primary_topics
+        and bool({"suivi", "etat", "statut", "avancement"}.intersection(informative_tokens))
+    )
+    if is_diploma_tracking_query:
+        if metadata_service_name == normalize_text("Espace Diplômes"):
+            score += 0.22
+            reasons.append("diploma_tracking_service_boost")
+        elif metadata_service_name == normalize_text("UC@Student"):
+            score -= 0.1
+            reasons.append("diploma_tracking_service_penalty")
+
+    is_research_support_query = (
+        "soutien_recherche" in primary_topics
+        and bool({"soutien", "accompagnement"}.intersection(informative_tokens))
+    )
+    if is_research_support_query:
+        if metadata_service_name == normalize_text("Soutien-Recherche"):
+            score += 0.24
+            reasons.append("research_support_service_boost")
+        elif metadata_service_name == normalize_text("Appels à Projets"):
+            score -= 0.12
+            reasons.append("research_support_service_penalty")
+
+    if matched_intents:
+        score += 0.2 + (0.04 * min(2, len(matched_intents) - 1))
+        reasons.append("intent_match")
+    elif query_intents:
+        score -= 0.18
+        reasons.append("intent_missing")
 
     if doc_type_match and (matched_topics or anchor_topic_hits):
         score += 0.08
@@ -988,6 +1176,8 @@ def score_chunk_thematic_match(chunk: Dict, query_profile: Dict[str, Any]) -> Di
     return {
         "thematic_score": thematic_score,
         "matched_topics": matched_topics,
+        "matched_services": matched_services,
+        "matched_intents": matched_intents,
         "anchor_topic_hits": anchor_topic_hits,
         "matched_informative_tokens": matched_informative_tokens,
         "informative_coverage": round(informative_coverage, 4),
@@ -1017,18 +1207,29 @@ def apply_retrieval_guardrails(query: str, results: List[Dict], top_k: int) -> T
         enriched["support_score"] = round(support_score, 4)
 
         should_drop = False
+        drop_reasons: List[str] = []
         if query_profile["has_strong_topic"] and float(thematic["thematic_score"]) < MIN_THEMATIC_SCORE:
             should_drop = True
+            drop_reasons.append("thematic_score_below_min")
         if support_score < MIN_SUPPORT_SCORE:
             should_drop = True
+            drop_reasons.append("support_score_below_min")
         if query_profile["has_strong_topic"] and not thematic.get("anchor_topic_hits") and float(
             thematic.get("informative_coverage", 0.0) or 0.0
         ) < 0.2:
             should_drop = True
+            drop_reasons.append("anchor_topic_missing")
         if thematic["conflicting_topics"] and float(thematic["thematic_score"]) <= TOPICAL_MISMATCH_DROP_THRESHOLD:
             should_drop = True
+            drop_reasons.append("topic_conflict")
         if not thematic["faculty_match"] or not thematic["year_match"]:
             should_drop = True
+            if not thematic["faculty_match"]:
+                drop_reasons.append("faculty_mismatch")
+            if not thematic["year_match"]:
+                drop_reasons.append("year_mismatch")
+
+        enriched["guardrail_drop_reasons"] = drop_reasons
 
         if should_drop:
             rejected.append(enriched)
@@ -1052,7 +1253,16 @@ def apply_retrieval_guardrails(query: str, results: List[Dict], top_k: int) -> T
         "guarded_count": len(guarded),
         "rejected_count": len(rejected),
         "rejection_reasons_top": [item.get("reasons", []) for item in rejected[:5]],
+        "guardrail_drop_reasons_top": [item.get("guardrail_drop_reasons", []) for item in rejected[:5]],
         "top_k_requested": top_k,
+        "thresholds": {
+            "min_guardrail_score": MIN_GUARDRAIL_SCORE,
+            "min_thematic_score": MIN_THEMATIC_SCORE,
+            "min_support_score": MIN_SUPPORT_SCORE,
+            "min_final_support_score": MIN_FINAL_SUPPORT_SCORE,
+            "min_top_rerank_normalized": MIN_TOP_RERANK_NORMALIZED,
+            "topical_mismatch_drop_threshold": TOPICAL_MISMATCH_DROP_THRESHOLD,
+        },
     }
     return guarded[: max(TOP_K_RETRIEVE, top_k * 4)], diagnostics
 
@@ -1097,9 +1307,13 @@ def decide_retrieval_abstention(results: List[Dict], query_profile: Dict[str, An
     top_final_support = float(top.get("final_support_score", top.get("support_score", 0.0)) or 0.0)
     top_rerank_normalized = float(top.get("rerank_score_normalized", top.get("score", 0.0)) or 0.0)
     top_thematic = float(top.get("thematic_score", 0.0) or 0.0)
+    top_matched_intents = set(top.get("matched_intents", []) or [])
+    required_intents = set(query_profile.get("intents", []) or []).intersection(STRICT_QUERY_INTENTS)
 
     if query_profile.get("has_strong_topic") and top_thematic < MIN_THEMATIC_SCORE:
         return {"abstain": True, "reason": "top_chunk_thematically_weak"}
+    if required_intents and not top_matched_intents.intersection(required_intents):
+        return {"abstain": True, "reason": "top_chunk_missing_required_intent"}
     if top_final_support < MIN_FINAL_SUPPORT_SCORE:
         return {"abstain": True, "reason": "top_chunk_support_too_low"}
     if top_rerank_normalized < MIN_TOP_RERANK_NORMALIZED:
@@ -1156,7 +1370,16 @@ def run_hybrid_search_debug(raw_query: str, top_k: int = TOP_K_FINAL) -> Dict[st
     abstention = decide_retrieval_abstention(final_ranked, guardrail_diagnostics.get("query_profile", {}))
     final_results = [] if abstention["abstain"] else truncate_chunks(final_ranked, MAX_CONTEXT_CHARS)
 
-    logger.info("%s chunks pertinents retournes apres fusion et reranking", len(final_results))
+    logger.info(
+        "Retrieval debug | dense=%s bm25=%s merged=%s guarded=%s final=%s abstain=%s reason=%s",
+        len(dense_results),
+        len(bm25_results),
+        len(retrieved),
+        len(guarded),
+        len(final_results),
+        abstention["abstain"],
+        abstention["reason"] or "none",
+    )
     return {
         "query": query,
         "dense_results": dense_results,
@@ -1170,6 +1393,10 @@ def run_hybrid_search_debug(raw_query: str, top_k: int = TOP_K_FINAL) -> Dict[st
         "query_profile": guardrail_diagnostics.get("query_profile", {}),
         "guardrail_diagnostics": guardrail_diagnostics,
     }
+
+
+def get_relevant_chunks_debug(raw_query: str, top_k: int = TOP_K_FINAL) -> Dict[str, object]:
+    return run_hybrid_search_debug(raw_query, top_k=top_k)
 
 
 def get_relevant_chunks(raw_query: str, top_k: int = TOP_K_FINAL) -> List[Dict]:

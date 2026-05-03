@@ -32,7 +32,7 @@ DEFAULT_LM_STUDIO_BASE_URL = ""
 DEFAULT_LM_STUDIO_MODEL = ""
 DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
 DEFAULT_MAX_TOKENS = 420
-DEFAULT_LM_STUDIO_MAX_TOKENS = 220
+DEFAULT_LM_STUDIO_MAX_TOKENS = 800
 DEFAULT_TEMPERATURE = 0.15
 DEFAULT_REQUEST_TIMEOUT = 120.0
 DEFAULT_RETRIEVAL_K = 4
@@ -207,26 +207,32 @@ def _generate_with_lm_studio(prompt: str) -> str:
     base_url = os.getenv("LM_STUDIO_BASE_URL", runtime.lm_studio_base_url or DEFAULT_LM_STUDIO_BASE_URL).strip()
     configured_model = os.getenv("RAG_LM_STUDIO_MODEL", DEFAULT_LM_STUDIO_MODEL).strip()
     api_key = os.getenv("LM_STUDIO_API_KEY", runtime.lm_studio_api_key or "lm-studio").strip() or "lm-studio"
-    max_tokens = _env_int("RAG_LM_STUDIO_MAX_TOKENS", _env_int("RAG_MAX_TOKENS", DEFAULT_LM_STUDIO_MAX_TOKENS))
+    max_tokens_raw = _env_int("RAG_LM_STUDIO_MAX_TOKENS", _env_int("RAG_MAX_TOKENS", DEFAULT_LM_STUDIO_MAX_TOKENS))
+    # -1 = pas de limite (le LLM genere jusqu'a la fin naturelle)
+    max_tokens = None if max_tokens_raw <= 0 else max_tokens_raw
     temperature = _env_float("RAG_TEMPERATURE", DEFAULT_TEMPERATURE)
     timeout = _env_float("RAG_REQUEST_TIMEOUT", DEFAULT_REQUEST_TIMEOUT)
 
     if not base_url:
         return ""
 
-    client = OpenAI(base_url=base_url, api_key=api_key, timeout=timeout)
+    # max_retries=0 : evite les ré-essais automatiques qui relancent la génération depuis zéro
+    client = OpenAI(base_url=base_url, api_key=api_key, timeout=timeout, max_retries=0)
     model = _resolve_lm_studio_model(client, configured_model)
     if not model:
         logger.warning("Aucun modele LM Studio texte n'a ete trouve.")
         return ""
 
     try:
-        response = client.chat.completions.create(
-            model=model,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=temperature,
-            max_tokens=max_tokens,
-        )
+        kwargs = {
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": temperature,
+        }
+        if max_tokens is not None:
+            kwargs["max_tokens"] = max_tokens
+
+        response = client.chat.completions.create(**kwargs)
         choices = getattr(response, "choices", []) or []
         if not choices:
             return ""
@@ -235,6 +241,46 @@ def _generate_with_lm_studio(prompt: str) -> str:
         return (content or "").strip()
     except Exception as exc:
         logger.warning("LM Studio indisponible (%s).", exc)
+        return ""
+
+
+HYDE_MAX_TOKENS = 75  # Court extrait suffit, evite une generation trop longue
+
+
+def _generate_hyde_doc(prompt: str) -> str:
+    """Génère un document hypothétique court pour HyDE (max 75 tokens)."""
+    if OpenAI is None:
+        return ""
+
+    runtime = get_runtime_settings()
+    base_url = os.getenv("LM_STUDIO_BASE_URL", runtime.lm_studio_base_url or DEFAULT_LM_STUDIO_BASE_URL).strip()
+    configured_model = os.getenv("RAG_LM_STUDIO_MODEL", DEFAULT_LM_STUDIO_MODEL).strip()
+    api_key = os.getenv("LM_STUDIO_API_KEY", runtime.lm_studio_api_key or "lm-studio").strip() or "lm-studio"
+    timeout = _env_float("RAG_REQUEST_TIMEOUT", DEFAULT_REQUEST_TIMEOUT)
+
+    if not base_url:
+        return ""
+
+    client = OpenAI(base_url=base_url, api_key=api_key, timeout=timeout, max_retries=0)
+    model = _resolve_lm_studio_model(client, configured_model)
+    if not model:
+        return ""
+
+    try:
+        response = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.3,
+            max_tokens=HYDE_MAX_TOKENS,  # Limite stricte pour la vitesse
+        )
+        choices = getattr(response, "choices", []) or []
+        if not choices:
+            return ""
+        message = getattr(choices[0], "message", None)
+        content = getattr(message, "content", "") if message is not None else ""
+        return (content or "").strip()
+    except Exception as exc:
+        logger.warning("HyDE generation echouee: %s", exc)
         return ""
 
 
@@ -312,22 +358,71 @@ def _normalize_sources(chunks: List[Dict]) -> List[Dict]:
     return ordered
 
 
+def _reorder_context(chunks: List[Dict]) -> List[Dict]:
+    """Lost in the middle context reordering."""
+    if len(chunks) < 3:
+        return chunks
+    
+    left = chunks[0::2]
+    right = chunks[1::2][::-1]
+    return left + right
+
+
 class RAGEngine:
-    def __init__(self, retrieval_k: int = DEFAULT_RETRIEVAL_K, prompt_style: str = "auto"):
+    def __init__(self, retrieval_k: int = DEFAULT_RETRIEVAL_K, prompt_style: str = "auto", use_hyde: bool = True):
         retrieval_k_from_env = _env_int("RAG_RETRIEVAL_K", retrieval_k)
         self.retrieval_k = max(1, retrieval_k_from_env)
         env_prompt_style = os.getenv("RAG_PROMPT_STYLE", prompt_style).strip().lower()
         self.prompt_style = env_prompt_style if env_prompt_style in {"auto", "standard", "concise", "compact"} else "auto"
+        self.use_hyde = use_hyde
 
-    def retrieve(self, query: str) -> List[Dict]:
+    def _llm_is_available(self) -> bool:
+        """Vérifie rapidement si un LLM est disponible avant de tenter HyDE."""
+        runtime = get_runtime_settings()
+        # Vérifie LM Studio
+        base_url = os.getenv("LM_STUDIO_BASE_URL", runtime.lm_studio_base_url or "").strip()
+        if base_url:
+            try:
+                import urllib.request
+                req = urllib.request.Request(base_url.rstrip("/v1").rstrip("/") + "/v1/models", method="GET")
+                urllib.request.urlopen(req, timeout=2)
+                return True
+            except Exception:
+                pass
+        # Vérifie OpenAI
+        if runtime.openai_api_key or os.getenv("OPENAI_API_KEY", "").strip():
+            return True
+        return False
+
+    def retrieve(self, query: str) -> Dict[str, Any]:
+        search_query = query
+        hyde_used = False
+        if self.use_hyde and self._llm_is_available():
+            try:
+                hyde_prompt = f"En 2-3 phrases maximum, rédigez un extrait administratif répondant à : {query}"
+                hypo_doc = _generate_hyde_doc(hyde_prompt)
+                if hypo_doc:
+                    logger.info("HyDE actif: document hypothetique genere (%d chars)", len(hypo_doc))
+                    search_query = f"{query} {hypo_doc}"
+                    hyde_used = True
+            except Exception as e:
+                logger.warning(f"HyDE error: {e}")
+
         try:
-            from ..retrieval import rag_search
+            from ..retrieval.rag_search import get_relevant_chunks_debug
 
-            index_path = Path(rag_search.INDEX_PATH)
-            chunks_path = Path(rag_search.CHUNKS_PATH)
-            if not index_path.exists() or not chunks_path.exists():
-                raise RAGIndexNotReadyError("Index RAG introuvable. Lancez d'abord l'indexation.")
-            return rag_search.get_relevant_chunks(query, top_k=self.retrieval_k)
+            debug_payload = get_relevant_chunks_debug(search_query, top_k=self.retrieval_k)
+            return {
+                "chunks": list(debug_payload.get("final_results", [])),
+                "meta": {
+                    "search_query": search_query,
+                    "hyde_used": hyde_used,
+                    "abstain": bool(debug_payload.get("abstain", False)),
+                    "abstain_reason": str(debug_payload.get("abstain_reason", "") or ""),
+                    "query_profile": debug_payload.get("query_profile", {}),
+                    "guardrail_diagnostics": debug_payload.get("guardrail_diagnostics", {}),
+                },
+            }
         except FileNotFoundError as exc:
             raise RAGIndexNotReadyError("Index RAG introuvable. Lancez d'abord l'indexation.") from exc
         except RAGIndexNotReadyError:
@@ -355,16 +450,25 @@ class RAGEngine:
         if not cleaned_query:
             raise ValueError("La question ne peut pas etre vide.")
 
-        chunks = self.retrieve(cleaned_query)
+        retrieval_payload = self.retrieve(cleaned_query)
+        chunks = list(retrieval_payload.get("chunks", []))
+        retrieval_meta = dict(retrieval_payload.get("meta", {}) or {})
         if not chunks:
-            return {"answer": _abstention_answer(), "sources": []}
+            return {"answer": _abstention_answer(), "sources": [], "retrieval_meta": retrieval_meta}
+            
+        chunks = _reorder_context(chunks)
+        
         try:
             answer = self.generate(cleaned_query, chunks)
         except Exception as exc:
             raise RAGGenerationError("Erreur lors de la generation de reponse.") from exc
 
-        return {"answer": answer.strip(), "sources": _normalize_sources(chunks)}
-
+        retrieval_meta["context_chunk_count"] = len(chunks)
+        return {
+            "answer": answer.strip(),
+            "sources": _normalize_sources(chunks),
+            "retrieval_meta": retrieval_meta,
+        }
 
 _default_engine = RAGEngine()
 

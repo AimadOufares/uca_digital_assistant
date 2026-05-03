@@ -59,7 +59,7 @@ def build_knowledge_base(
     return run_indexing(corpus="published", publish=publish, build_id=build_id)
 
 
-def run_evaluation(top_k: int = 5, skip_generation: bool = False) -> Dict[str, str]:
-    report = evaluate(top_k=max(1, top_k), run_generation=not skip_generation)
+def run_evaluation(top_k: int = 5, skip_generation: bool = False, benchmark: str = "drive") -> Dict[str, str]:
+    report = evaluate(top_k=max(1, top_k), run_generation=not skip_generation, benchmark=benchmark)
     paths = write_report(report)
     return {key: str(value) for key, value in paths.items()}

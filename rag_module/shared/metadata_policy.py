@@ -31,9 +31,9 @@ SERVICE_TYPE_RULES: List[Tuple[str, List[str]]] = [
 
 SERVICE_NAME_RULES = {
     "UC@Student": ["uc@student", "ucastudent"],
-    "Espace Diplômes": ["espace diplome", "espace diplôme"],
+    "Espace Diplômes": ["espace diplome", "espace diplôme", "espace de suivi des diplomes", "espace de suivi des diplômes"],
     "Clubs des étudiants": ["club étudiant", "clubs étudiants", "club uca"],
-    "Mobilité internationale": ["mobilite internationale", "mobilité internationale"],
+    "Mobilité internationale": ["mobilite internationale", "mobilité internationale", "plateforme mobilite internationale"],
     "PEDOC": ["pedoc"],
     "PUCAStaff": ["pucastaff"],
     "Club UCA": ["club uca", "oeuvre sociale"],
@@ -73,7 +73,7 @@ SERVICE_MAIN_ACTIONS = {
     "HPC UCA": ["demander un accès", "lancer des calculs", "consulter les ressources"],
     "UCAPLAT": ["suivre des cours", "passer des examens", "déposer des devoirs"],
     "Appels à Projets": ["soumettre un projet", "consulter les résultats", "demander un financement"],
-    "Soutien-Recherche": ["demander un soutien", "justifier des dépenses", "suivre l'aide"],
+    "Soutien-Recherche": ["demander un soutien", "demander un accompagnement", "monter un projet de recherche", "justifier des dépenses", "suivre l'aide"],
     "CIP": ["réserver du matériel pédagogique", "demander un accompagnement", "consulter les guides"],
 }
 
@@ -83,6 +83,68 @@ SERVICE_WORKFLOW_STEPS = {
     "UC@Student": ["1. Connexion via compte académique", "2. Choix de la scolarité", "3. Soumission de la demande"],
     "UCAPLAT": ["1. Connexion", "2. Accès au cours", "3. Dépôt ou évaluation"],
     "CIP": ["1. Connexion", "2. Choix du service", "3. Validation de la demande"],
+}
+SERVICE_METADATA_OVERRIDES = {
+    "UC@Student": {
+        "service_type": "scolarite",
+        "document_type": "scolarite",
+        "allowed_intents": {"connexion", "mot_de_passe", "attestation", "notes", "reinscription", "candidature"},
+    },
+    "PEDOC": {
+        "service_type": "scolarite",
+        "document_type": "scolarite",
+        "allowed_intents": {"connexion", "candidature", "depot_document", "reinscription"},
+    },
+    "UCAPLAT": {
+        "service_type": "pedagogie_numerique",
+        "document_type": "pedagogie_numerique",
+        "allowed_intents": {"connexion", "cours", "depot_document", "notes"},
+    },
+    "CIP": {
+        "service_type": "pedagogie_numerique",
+        "document_type": "pedagogie_numerique",
+        "allowed_intents": {"connexion", "cours", "depot_document"},
+    },
+    "Mobilité internationale": {
+        "service_type": "vie_etudiante",
+        "document_type": "vie_etudiante",
+        "allowed_intents": {"candidature", "depot_document", "connexion"},
+    },
+    "PUCAStaff": {
+        "service_type": "rh",
+        "document_type": "rh",
+        "allowed_intents": {"connexion", "mot_de_passe"},
+    },
+    "Espace Diplômes": {
+        "service_type": "scolarite",
+        "document_type": "scolarite",
+        "allowed_intents": {"attestation", "candidature", "notes"},
+    },
+    "HPC UCA": {
+        "service_type": "recherche",
+        "document_type": "recherche",
+        "allowed_intents": {"connexion", "depot_document"},
+    },
+    "Appels à Projets": {
+        "service_type": "recherche",
+        "document_type": "recherche",
+        "allowed_intents": {"candidature", "depot_document", "notes"},
+    },
+    "Soutien-Recherche": {
+        "service_type": "recherche",
+        "document_type": "recherche",
+        "allowed_intents": {"connexion", "depot_document"},
+    },
+    "Clubs des étudiants": {
+        "service_type": "vie_etudiante",
+        "document_type": "vie_etudiante",
+        "allowed_intents": {"connexion"},
+    },
+    "Centre de conférences": {
+        "service_type": "infrastructure",
+        "document_type": "infrastructure",
+        "allowed_intents": set(),
+    },
 }
 PAGE_KIND_RULES = {
     "guide": ["guide", "manuel", "mode d'emploi", "tutoriel"],
@@ -142,6 +204,11 @@ def detect_service_type(source_path: str, text: str) -> str:
     return "general"
 
 def detect_service_name(source_path: str, text: str) -> str:
+    normalized_source = normalize_text(source_path)
+    for name, keywords in SERVICE_NAME_RULES.items():
+        if any(normalize_text(keyword) in normalized_source for keyword in keywords):
+            return name
+
     haystack = normalize_text(f"{source_path} {text}")
     for name, keywords in SERVICE_NAME_RULES.items():
         if any(normalize_text(keyword) in haystack for keyword in keywords):
@@ -172,6 +239,21 @@ def detect_intents(source_path: str, text: str) -> List[str]:
         for intent, keywords in INTENT_RULES.items()
         if any(normalize_text(keyword) in haystack for keyword in keywords)
     ]
+
+
+def apply_service_metadata_overrides(
+    service_name: str,
+    service_type: str,
+    document_type: str,
+    intents: List[str],
+) -> Tuple[str, str, List[str]]:
+    profile = SERVICE_METADATA_OVERRIDES.get(service_name, {})
+    resolved_service_type = str(profile.get("service_type") or service_type or "general")
+    resolved_document_type = str(profile.get("document_type") or document_type or resolved_service_type)
+    allowed_intents = set(profile.get("allowed_intents", set()) or set())
+    if allowed_intents:
+        intents = [intent for intent in intents if intent in allowed_intents]
+    return resolved_service_type, resolved_document_type, intents
 
 
 def compute_freshness_score(metadata: Dict, year: Optional[int]) -> float:
@@ -209,6 +291,12 @@ def prepare_chunk_metadata(chunk: Dict, source_path: str) -> Optional[Dict]:
     year = detect_year(source_path, text)
     page_kind = detect_page_kind(source_path, text)
     intents = detect_intents(source_path, text)
+    service_type, document_type, intents = apply_service_metadata_overrides(
+        service_name=service_name,
+        service_type=service_type,
+        document_type=service_type,
+        intents=intents,
+    )
 
     metadata["file_type"] = file_type
     metadata["target_audience"] = audience
@@ -221,7 +309,7 @@ def prepare_chunk_metadata(chunk: Dict, source_path: str) -> Optional[Dict]:
     metadata["intent"] = intents
     metadata["freshness_score"] = compute_freshness_score(metadata, year)
     # Map document_type and faculty to defaults to avoid breaking older pipeline logic
-    metadata["document_type"] = service_type
+    metadata["document_type"] = document_type
     metadata["faculty"] = "UCA"
     if year is not None:
         metadata["year"] = year

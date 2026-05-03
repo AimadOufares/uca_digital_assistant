@@ -4,7 +4,9 @@ from pathlib import Path
 from threading import Lock
 from unittest.mock import MagicMock, patch
 
+from django.contrib.auth import get_user_model
 from django.urls import reverse
+from django.core.files.uploadedfile import SimpleUploadedFile
 from rest_framework import status
 from rest_framework.test import APITestCase
 
@@ -38,7 +40,16 @@ class ChatApiTests(APITestCase):
         response = self.client.post(reverse("api-chat"), {"message": "Bonjour"}, format="json")
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response.json(), {"answer": "Reponse test"})
+        self.assertEqual(
+            response.json(),
+            {
+                "answer": "Reponse test",
+                "sources": [],
+                "confidence": "moyen",
+                "backend": "faiss",
+                "retrieval_meta": {},
+            },
+        )
         mocked_answer_question.assert_called_once()
 
     def test_chat_endpoint_rejects_empty_message(self):
@@ -69,6 +80,128 @@ class HealthApiTests(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_503_SERVICE_UNAVAILABLE)
         self.assertFalse(response.json()["ready"])
+
+
+class DriveDocumentsApiTests(APITestCase):
+    def setUp(self):
+        super().setUp()
+        self.admin_user = get_user_model().objects.create_user(
+            username="admin_dashboard",
+            password="secret123",
+            is_staff=True,
+            is_superuser=True,
+        )
+
+    def test_admin_dashboard_page_requires_login(self):
+        response = self.client.get(reverse("admin-dashboard"))
+
+        self.assertEqual(response.status_code, status.HTTP_302_FOUND)
+        self.assertIn("/admin/login/", response.headers["Location"])
+
+    def test_dashboard_metrics_requires_admin(self):
+        response = self.client.get(reverse("api-dashboard-metrics"))
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    @patch("api_app.views.build_dashboard_payload")
+    def test_dashboard_metrics_returns_enriched_payload_for_admin(self, mocked_payload):
+        mocked_payload.return_value = {
+            "system_status": {"ready": True},
+            "active_index": {"build_id": "build-1"},
+            "drive_sync_status": {"status": "up_to_date"},
+            "rag_eval": {"benchmark": "drive", "summary": {"service_top1_accuracy": 1.0}},
+        }
+        self.client.force_login(self.admin_user)
+
+        response = self.client.get(reverse("api-dashboard-metrics"))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.json()["active_index"]["build_id"], "build-1")
+        mocked_payload.assert_called_once()
+
+    def test_drive_documents_can_be_uploaded_listed_and_deleted(self):
+        root = Path.cwd() / ".tmp_test_drive_docs_case"
+        if root.exists():
+            shutil.rmtree(root)
+        root.mkdir(exist_ok=True)
+        try:
+            drive_dir = root / "drive"
+            drive_dir.mkdir()
+            uploaded = SimpleUploadedFile(
+                "guide-test.txt",
+                b"Guide de test pour le corpus drive",
+                content_type="text/plain",
+            )
+            with patch("api_app.views.get_runtime_settings") as mocked_runtime:
+                mocked_runtime.return_value.rag_raw_drive_dir = drive_dir
+                self.client.force_login(self.admin_user)
+
+                upload_response = self.client.post(
+                    reverse("api-drive-documents"),
+                    {"file": uploaded},
+                    format="multipart",
+                )
+                self.assertEqual(upload_response.status_code, status.HTTP_201_CREATED)
+                self.assertTrue((drive_dir / "guide-test.txt").exists())
+
+                list_response = self.client.get(reverse("api-drive-documents"))
+                self.assertEqual(list_response.status_code, status.HTTP_200_OK)
+                self.assertEqual(list_response.json()["count"], 1)
+
+                delete_response = self.client.delete(
+                    reverse("api-drive-document-detail", kwargs={"filename": "guide-test.txt"})
+                )
+                self.assertEqual(delete_response.status_code, status.HTTP_200_OK)
+                self.assertFalse((drive_dir / "guide-test.txt").exists())
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_drive_documents_requires_admin(self):
+        response = self.client.get(reverse("api-drive-documents"))
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    @patch("api_app.views.run_indexing")
+    @patch("api_app.views.run_processing")
+    def test_drive_rebuild_endpoint_runs_processing_and_indexing(self, mocked_processing, mocked_indexing):
+        mocked_processing.return_value = {"status": "ok", "step": "processing", "corpus": "drive"}
+        mocked_indexing.return_value = MagicMock(
+            backend="faiss",
+            build_id="build-test",
+            chunk_count=33,
+            published=True,
+        )
+        self.client.force_login(self.admin_user)
+
+        response = self.client.post(reverse("api-drive-rebuild"), {}, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.json()["index"]["build_id"], "build-test")
+        mocked_processing.assert_called_once_with(corpus="drive")
+        mocked_indexing.assert_called_once_with(corpus="published", publish=True)
+
+    @patch("api_app.views.latest_report_payload")
+    @patch("api_app.views.run_evaluation")
+    def test_drive_evaluate_endpoint_runs_drive_benchmark(self, mocked_run_evaluation, mocked_latest_report):
+        mocked_run_evaluation.return_value = {"json": "report.json", "txt": "report.txt"}
+        mocked_latest_report.return_value = {"available": True, "report": {"benchmark": "drive"}}
+        self.client.force_login(self.admin_user)
+
+        response = self.client.post(reverse("api-drive-evaluate"), {}, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.json()["report"]["report"]["benchmark"], "drive")
+        mocked_run_evaluation.assert_called_once_with(top_k=5, skip_generation=True, benchmark="drive")
+
+    @patch("api_app.views.latest_report_payload")
+    def test_latest_report_endpoint_returns_payload_for_admin(self, mocked_latest_report):
+        mocked_latest_report.return_value = {"available": True, "report": {"summary": {}}}
+        self.client.force_login(self.admin_user)
+
+        response = self.client.get(reverse("api-report-latest", kwargs={"kind": "rag_eval"}))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        mocked_latest_report.assert_called_once_with("rag_eval")
 
 
 class IngestionPolicyTests(APITestCase):

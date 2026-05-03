@@ -93,10 +93,24 @@ HIGH_SIGNAL_DOCUMENT_TYPES = {
     "pedagogie_numerique",
     "digital_service",
 }
+SERVICE_ALIASES = {
+    "ucastudent": ["uc@student", "ucastudent", "uc student"],
+    "ucaplat": ["ucaplat"],
+    "pedoc": ["pedoc"],
+    "cip": ["cip", "centre d'innovation pedagogique", "centre innovation pedagogique"],
+    "e-candidature": ["e-candidature", "e candidature", "ecandidature"],
+    "diplomes": ["espace diplomes", "e diplome", "diplomes.uca.ma"],
+    "pucastaff": ["pucastaff"],
+    "hpc": ["hpc", "hpc uca"],
+}
 MIN_CHUNK_RELEVANCE_SCORE = 1
 
 NORMALIZED_TARGET_KEYWORDS = {normalize_text(keyword) for keyword in TARGET_KEYWORDS}
 NORMALIZED_SOURCE_HINTS = {normalize_text(keyword) for keyword in SOURCE_HINT_KEYWORDS}
+NORMALIZED_SERVICE_ALIASES = {
+    key: [normalize_text(alias) for alias in aliases if normalize_text(alias)]
+    for key, aliases in SERVICE_ALIASES.items()
+}
 
 
 def keyword_hits(text: str, keyword_bank: Set[str]) -> Set[str]:
@@ -167,7 +181,10 @@ def compute_metadata_boost(metadata: Dict, query: str) -> float:
     document_type = normalize_text(str(metadata.get("document_type") or ""))
     faculty = normalize_text(str(metadata.get("faculty") or ""))
     page_kind = normalize_text(str(metadata.get("page_kind") or ""))
+    service_name = normalize_text(str(metadata.get("service_name") or ""))
+    official_url = normalize_text(str(metadata.get("official_url") or ""))
     intents = [normalize_text(str(item)) for item in metadata.get("intent", []) or []]
+    retrieval_keywords = [normalize_text(str(item)) for item in metadata.get("retrieval_keywords", []) or []]
     year = metadata.get("year")
 
     if document_type and document_type in normalized_query:
@@ -183,12 +200,25 @@ def compute_metadata_boost(metadata: Dict, query: str) -> float:
         boost += 0.04
     if intents and any(intent and intent in normalized_query for intent in intents):
         boost += 0.05
+    if retrieval_keywords and any(keyword and keyword in normalized_query for keyword in retrieval_keywords):
+        boost += 0.05
+
+    for canonical_service, aliases in NORMALIZED_SERVICE_ALIASES.items():
+        query_mentions_service = any(alias and alias in normalized_query for alias in aliases)
+        if not query_mentions_service:
+            continue
+        if service_name == canonical_service or canonical_service in official_url or any(
+            alias and (alias in service_name or alias in official_url) for alias in aliases
+        ):
+            boost += 0.12
+        else:
+            boost -= 0.04
 
     if isinstance(year, int) and any(token in normalized_query for token in ("calendrier", "resultat", "resultats", "inscription")):
         if year >= 2024:
             boost += 0.03
 
-    return min(boost, 0.15)
+    return max(-0.05, min(boost, 0.22))
 
 
 def boost_results_with_metadata(results: List[Dict], query: str) -> List[Dict]:

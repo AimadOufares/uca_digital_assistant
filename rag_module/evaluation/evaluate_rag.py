@@ -48,6 +48,27 @@ EVAL_SET: List[Dict] = [
     {"question": "Ou trouver les annonces officielles d'admission ?", "keywords": ["annonces", "admission", "officielles"], "expected_doc_types": ["admission"]},
 ]
 
+DRIVE_EVAL_SET: List[Dict] = [
+    {"question": "Comment obtenir mon attestation sur UC@Student ?", "keywords": ["attestation", "ucastudent"], "expected_doc_types": ["scolarite"], "expected_service": "UC@Student"},
+    {"question": "Ou consulter mes notes sur UC@Student ?", "keywords": ["notes", "ucastudent"], "expected_doc_types": ["scolarite"], "expected_service": "UC@Student"},
+    {"question": "Comment candidater sur PEDOC ?", "keywords": ["candidature", "pedoc"], "expected_doc_types": ["scolarite"], "expected_service": "PEDOC"},
+    {"question": "A quoi sert UCAPLAT ?", "keywords": ["ucaplat", "cours", "devoirs"], "expected_doc_types": ["pedagogie_numerique"], "expected_service": "UCAPLAT"},
+    {"question": "Comment deposer des devoirs sur UCAPLAT ?", "keywords": ["ucaplat", "devoirs", "deposer"], "expected_doc_types": ["pedagogie_numerique"], "expected_service": "UCAPLAT"},
+    {"question": "A quoi sert le CIP ?", "keywords": ["cip", "accompagnement", "guides"], "expected_doc_types": ["pedagogie_numerique"], "expected_service": "CIP"},
+    {"question": "Comment demander un conge sur PUCAStaff ?", "keywords": ["pucastaff", "conge"], "expected_doc_types": ["rh"], "expected_service": "PUCAStaff"},
+    {"question": "Comment suivre l etat de mon diplome ?", "keywords": ["diplome", "suivi", "etat"], "expected_doc_types": ["scolarite"], "expected_service": "Espace Diplômes"},
+    {"question": "Comment obtenir un e-diplome ?", "keywords": ["e-diplome", "diplome"], "expected_doc_types": ["scolarite"], "expected_service": "Espace Diplômes"},
+    {"question": "Comment postuler a une bourse via Mobilite internationale ?", "keywords": ["mobilite", "bourse", "postuler"], "expected_doc_types": ["vie_etudiante"], "expected_service": "Mobilité internationale"},
+    {"question": "Comment acceder au calcul haute performance de UCA ?", "keywords": ["hpc", "calcul", "haute performance"], "expected_doc_types": ["recherche"], "expected_service": "HPC UCA"},
+    {"question": "Ou consulter les appels a projets de recherche ?", "keywords": ["appels a projets", "recherche", "projets"], "expected_doc_types": ["recherche"], "expected_service": "Appels à Projets"},
+    {"question": "Ou trouver un accompagnement pour monter un projet de recherche ?", "keywords": ["accompagnement", "projet de recherche", "soutien"], "expected_doc_types": ["recherche"], "expected_service": "Soutien-Recherche"},
+]
+
+BENCHMARK_SETS: Dict[str, List[Dict]] = {
+    "generic": EVAL_SET,
+    "drive": DRIVE_EVAL_SET,
+}
+
 
 def _normalize_text(value: str) -> str:
     text = unicodedata.normalize("NFKD", (value or "").lower())
@@ -85,6 +106,26 @@ def _doc_type_match(chunk: Dict, expected_doc_types: List[str]) -> bool:
     metadata = chunk.get("metadata", {}) or {}
     doc_type = _normalize_text(str(metadata.get("document_type") or ""))
     return bool(doc_type) and doc_type in {_normalize_text(item) for item in expected_doc_types}
+
+
+def _service_match(service_name: str, expected_service: str) -> bool:
+    return bool(expected_service) and _normalize_text(service_name) == _normalize_text(expected_service)
+
+
+def _top_result_metadata(chunks: List[Dict]) -> Dict[str, object]:
+    if not chunks:
+        return {
+            "top1_service": "",
+            "top1_source": "",
+            "top1_doc_type": "",
+        }
+
+    metadata = (chunks[0] or {}).get("metadata", {}) or {}
+    return {
+        "top1_service": str(metadata.get("service_name") or ""),
+        "top1_source": str(metadata.get("file_name") or metadata.get("source") or ""),
+        "top1_doc_type": str(metadata.get("document_type") or ""),
+    }
 
 
 def _chunk_relevance(chunk: Dict, keywords: List[str], expected_doc_types: List[str]) -> Dict[str, object]:
@@ -140,12 +181,22 @@ def _stage_metrics(chunks: List[Dict], keywords: List[str], expected_doc_types: 
     }
 
 
-def _retrieval_metrics(question: str, keywords: List[str], expected_doc_types: List[str], top_k: int) -> Dict:
+def _retrieval_metrics(
+    question: str,
+    keywords: List[str],
+    expected_doc_types: List[str],
+    top_k: int,
+    expected_service: str = "",
+) -> Dict:
     start = time.perf_counter()
     payload = run_hybrid_search_debug(question, top_k=top_k)
     elapsed_ms = (time.perf_counter() - start) * 1000
 
     final_chunks = list(payload.get("final_results", []))
+    top1_metadata = _top_result_metadata(final_chunks)
+    abstained = bool(payload.get("abstain", False))
+    abstain_reason = str(payload.get("abstain_reason") or "")
+    top1_service_match = int(_service_match(str(top1_metadata["top1_service"]), expected_service)) if expected_service else 0
     if not final_chunks:
         return {
             "precision_at_k": 0.0,
@@ -160,6 +211,13 @@ def _retrieval_metrics(question: str, keywords: List[str], expected_doc_types: L
             "best_match_score": 0.0,
             "metadata_boost_gain": 0.0,
             "rerank_gain": 0.0,
+            "expected_service": expected_service,
+            "top1_service": "",
+            "top1_source": "",
+            "top1_doc_type": "",
+            "service_top1_match": 0,
+            "abstained": int(abstained),
+            "abstain_reason": abstain_reason,
         }
 
     final_scores = [_chunk_relevance(chunk, keywords, expected_doc_types) for chunk in final_chunks]
@@ -187,6 +245,13 @@ def _retrieval_metrics(question: str, keywords: List[str], expected_doc_types: L
         "best_match_score": round(best_match, 4),
         "metadata_boost_gain": round(float(boosted_stage["best"]) - float(fusion_stage["best"]), 4),
         "rerank_gain": round(float(final_stage["best"]) - float(boosted_stage["best"]), 4),
+        "expected_service": expected_service,
+        "top1_service": str(top1_metadata["top1_service"]),
+        "top1_source": str(top1_metadata["top1_source"]),
+        "top1_doc_type": str(top1_metadata["top1_doc_type"]),
+        "service_top1_match": top1_service_match,
+        "abstained": int(abstained),
+        "abstain_reason": abstain_reason,
     }
 
 
@@ -217,15 +282,22 @@ def _generation_metrics(question: str, keywords: List[str], expected_doc_types: 
     }
 
 
-def evaluate(top_k: int, run_generation: bool) -> Dict:
+def evaluate(top_k: int, run_generation: bool, benchmark: str = "drive") -> Dict:
+    eval_rows = BENCHMARK_SETS.get(benchmark, DRIVE_EVAL_SET)
     rows = []
-    for case in EVAL_SET:
+    for case in eval_rows:
         question = case["question"]
         keywords = case["keywords"]
         expected_doc_types = case.get("expected_doc_types", [])
-        row = {"question": question, "keywords": keywords, "expected_doc_types": expected_doc_types}
+        expected_service = str(case.get("expected_service") or "")
+        row = {
+            "question": question,
+            "keywords": keywords,
+            "expected_doc_types": expected_doc_types,
+            "expected_service": expected_service,
+        }
         try:
-            row.update(_retrieval_metrics(question, keywords, expected_doc_types, top_k))
+            row.update(_retrieval_metrics(question, keywords, expected_doc_types, top_k, expected_service=expected_service))
         except Exception as exc:
             row.update(
                 {
@@ -241,6 +313,12 @@ def evaluate(top_k: int, run_generation: bool) -> Dict:
                     "best_match_score": 0.0,
                     "metadata_boost_gain": 0.0,
                     "rerank_gain": 0.0,
+                    "top1_service": "",
+                    "top1_source": "",
+                    "top1_doc_type": "",
+                    "service_top1_match": 0,
+                    "abstained": 0,
+                    "abstain_reason": "",
                     "retrieval_error": str(exc),
                 }
             )
@@ -255,6 +333,7 @@ def evaluate(top_k: int, run_generation: bool) -> Dict:
     retrieval_latencies = [r.get("latency_ms", 0.0) for r in rows if r.get("latency_ms", 0.0) > 0]
     report = {
         "generated_at": datetime.now().isoformat(),
+        "benchmark": benchmark,
         "top_k": top_k,
         "questions_evaluated": len(rows),
         "summary": {
@@ -268,6 +347,8 @@ def evaluate(top_k: int, run_generation: bool) -> Dict:
             "metadata_boost_gain_avg": round(mean([r.get("metadata_boost_gain", 0.0) for r in rows]), 4) if rows else 0.0,
             "rerank_gain_avg": round(mean([r.get("rerank_gain", 0.0) for r in rows]), 4) if rows else 0.0,
             "retrieval_latency_ms_avg": round(mean(retrieval_latencies), 2) if retrieval_latencies else 0.0,
+            "service_top1_accuracy": round(mean([r.get("service_top1_match", 0) for r in rows]), 4) if rows and any(r.get("expected_service") for r in rows) else 0.0,
+            "abstention_rate": round(mean([r.get("abstained", 0) for r in rows]), 4) if rows else 0.0,
         },
         "rows": rows,
     }
@@ -284,8 +365,9 @@ def evaluate(top_k: int, run_generation: bool) -> Dict:
 def write_report(report: Dict) -> Dict[str, Path]:
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    json_path = REPORT_DIR / f"rag_eval_{timestamp}.json"
-    txt_path = REPORT_DIR / f"rag_eval_{timestamp}.txt"
+    benchmark = str(report.get("benchmark") or "generic")
+    json_path = REPORT_DIR / f"rag_eval_{benchmark}_{timestamp}.json"
+    txt_path = REPORT_DIR / f"rag_eval_{benchmark}_{timestamp}.txt"
 
     with json_path.open("w", encoding="utf-8") as handle:
         json.dump(report, handle, indent=2, ensure_ascii=False)
@@ -293,6 +375,7 @@ def write_report(report: Dict) -> Dict[str, Path]:
     lines = [
         "RAG EVALUATION",
         f"Generated at: {report['generated_at']}",
+        f"Benchmark: {report.get('benchmark', 'generic')}",
         f"Top-k: {report['top_k']}",
         f"Questions evaluated: {report['questions_evaluated']}",
         "",
@@ -302,6 +385,8 @@ def write_report(report: Dict) -> Dict[str, Path]:
         f"BM25 hit@k rate: {report['summary'].get('bm25_hit_at_k_rate', 0.0)}",
         f"Fusion hit@k rate: {report['summary'].get('fusion_hit_at_k_rate', 0.0)}",
         f"Best match score (avg): {report['summary'].get('best_match_score_avg', 0.0)}",
+        f"Service top1 accuracy: {report['summary'].get('service_top1_accuracy', 0.0)}",
+        f"Abstention rate: {report['summary'].get('abstention_rate', 0.0)}",
         f"Metadata boost gain (avg): {report['summary'].get('metadata_boost_gain_avg', 0.0)}",
         f"Rerank gain (avg): {report['summary'].get('rerank_gain_avg', 0.0)}",
         f"Hit@k rate: {report['summary'].get('hit_at_k_rate', 0.0)}",
@@ -325,10 +410,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Evaluation heuristique hybride du RAG (dense, BM25, fusion et generation).")
     parser.add_argument("--top-k", type=int, default=5, help="Nombre de chunks recuperes pour l'evaluation.")
     parser.add_argument("--skip-generation", action="store_true", help="N'evalue que la retrieval sans generation de reponse.")
+    parser.add_argument("--benchmark", choices=["generic", "drive"], default="drive", help="Jeu d'evaluation a utiliser.")
     args = parser.parse_args()
 
     top_k = max(1, args.top_k)
-    report = evaluate(top_k=top_k, run_generation=not args.skip_generation)
+    report = evaluate(top_k=top_k, run_generation=not args.skip_generation, benchmark=args.benchmark)
     output_paths = write_report(report)
     print(f"Evaluation terminee. JSON: {output_paths['json']}")
     print(f"Evaluation terminee. TXT : {output_paths['txt']}")

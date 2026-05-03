@@ -13,9 +13,11 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 STORAGE = DocumentStorage()
 RAW_DIR = STORAGE.settings.rag_raw_dir
 PROCESSED_DIR = STORAGE.settings.rag_processed_dir
-INDEX_CHUNKS_PATH = STORAGE.settings.rag_index_dir / "chunks.json"
-INDEX_META_PATH = STORAGE.settings.rag_index_dir / "metadata.json"
 REPORT_DIR = STORAGE.report_dir
+
+
+def _active_index_paths() -> Dict[str, Path]:
+    return STORAGE.resolve_active_faiss_paths()
 
 
 def _iter_json_files(folder: Path) -> Iterable[Path]:
@@ -40,32 +42,30 @@ def _raw_stats() -> Dict:
 
 
 def _load_index_metadata() -> Dict:
-    if not INDEX_META_PATH.exists():
-        return {"exists": False, "entries": 0, "domains_top10": [], "file_ext": {}}
+    paths = _active_index_paths()
+    manifest_path = paths["manifest_file"]
+    if not manifest_path.exists():
+        return {"exists": False, "entries": 0, "domains_top10": [], "file_ext": {}, "build_id": "", "model_name": ""}
 
-    with INDEX_META_PATH.open("r", encoding="utf-8") as handle:
-        rows = json.load(handle)
-
-    domains = Counter()
-    ext_counter = Counter()
-    for row in rows:
-        url = row.get("url", "")
-        if "://" in url:
-            domain = url.split("/")[2]
-            domains[domain] += 1
-        ext_counter[(Path(row.get("file", "")).suffix.lower() or "none")] += 1
+    with manifest_path.open("r", encoding="utf-8") as handle:
+        manifest = json.load(handle)
 
     return {
         "exists": True,
-        "entries": len(rows),
-        "domains_top10": domains.most_common(10),
-        "file_ext": dict(ext_counter),
+        "entries": int(manifest.get("chunk_count", 0) or 0),
+        "domains_top10": list((manifest.get("domain_distribution") or {}).items())[:10],
+        "file_ext": dict(manifest.get("file_type_distribution") or {}),
+        "build_id": str(manifest.get("build_id") or ""),
+        "model_name": str(manifest.get("model_name") or ""),
+        "backend": str(manifest.get("backend") or ""),
+        "service_name_distribution": dict(manifest.get("service_name_distribution") or {}),
     }
 
 
 def _load_chunks() -> List[Dict]:
-    if INDEX_CHUNKS_PATH.exists():
-        with INDEX_CHUNKS_PATH.open("r", encoding="utf-8") as handle:
+    chunks_path = _active_index_paths()["chunks_file"]
+    if chunks_path.exists():
+        with chunks_path.open("r", encoding="utf-8") as handle:
             return json.load(handle)
 
     chunks: List[Dict] = []
@@ -144,13 +144,14 @@ def build_report() -> Dict:
     metadata = _load_index_metadata()
     chunks = _load_chunks()
     chunk_stats = _chunk_stats(chunks)
+    active_paths = _active_index_paths()
     return {
         "generated_at": datetime.now().isoformat(),
         "paths": {
             "raw_dir": str(RAW_DIR),
             "processed_dir": str(PROCESSED_DIR),
-            "index_chunks": str(INDEX_CHUNKS_PATH),
-            "index_metadata": str(INDEX_META_PATH),
+            "index_chunks": str(active_paths["chunks_file"]),
+            "index_metadata": str(active_paths["manifest_file"]),
         },
         "raw": raw,
         "index_metadata": metadata,

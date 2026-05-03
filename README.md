@@ -170,7 +170,7 @@ Ajouter ou vérifier dans `.env` :
 RAG_LLM_PROVIDER=lmstudio
 LM_STUDIO_BASE_URL=http://127.0.0.1:1234/v1
 LM_STUDIO_API_KEY=lm-studio
-RAG_LM_STUDIO_MODEL=qwen2.5-1.5b-instruct
+RAG_LM_STUDIO_MODEL=mistral-7b-instruct-v0.3
 RAG_REQUEST_TIMEOUT=180
 ```
 
