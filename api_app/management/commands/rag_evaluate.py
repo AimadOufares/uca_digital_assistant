@@ -10,7 +10,7 @@ class Command(BaseCommand):
         parser.add_argument("--top-k", type=int, default=5, help="Nombre de chunks recuperes pour l'evaluation.")
         parser.add_argument(
             "--benchmark",
-            choices=["generic", "drive"],
+            choices=["generic", "drive", "context"],
             default="drive",
             help="Jeu d'evaluation a utiliser.",
         )

@@ -1,1078 +1,276 @@
+{% load static %}
 <!DOCTYPE html>
 <html lang="fr">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Dashboard Admin RAG - UCA Digital Assistant</title>
+    <title>Dashboard Admin RAG UCA</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@500;700;800&display=swap" rel="stylesheet">
-    <style>
-        :root {
-            --bg: #081321;
-            --panel: rgba(12, 31, 52, 0.78);
-            --panel-strong: rgba(14, 38, 63, 0.92);
-            --line: rgba(154, 180, 204, 0.18);
-            --text: #eef5ff;
-            --muted: #9ab4cc;
-            --cyan: #43d8ff;
-            --gold: #ffbf47;
-            --green: #5ad68f;
-            --red: #ff7d7d;
-            --shadow: 0 24px 60px rgba(0, 0, 0, 0.28);
-            --font-display: "Outfit", sans-serif;
-            --font-body: "Inter", sans-serif;
-        }
-
-        * {
-            box-sizing: border-box;
-        }
-
-        body {
-            margin: 0;
-            min-height: 100vh;
-            font-family: var(--font-body);
-            color: var(--text);
-            background:
-                radial-gradient(circle at top left, rgba(67, 216, 255, 0.16), transparent 26%),
-                radial-gradient(circle at bottom right, rgba(255, 191, 71, 0.14), transparent 24%),
-                linear-gradient(180deg, #07111d 0%, #0a1728 100%);
-        }
-
-        .shell {
-            max-width: 1380px;
-            margin: 0 auto;
-            padding: 32px 20px 48px;
-        }
-
-        .hero {
-            display: grid;
-            grid-template-columns: minmax(0, 1.6fr) minmax(280px, 0.8fr);
-            gap: 22px;
-            margin-bottom: 28px;
-        }
-
-        .hero-card,
-        .panel {
-            background: var(--panel);
-            border: 1px solid var(--line);
-            border-radius: 24px;
-            box-shadow: var(--shadow);
-            backdrop-filter: blur(18px);
-        }
-
-        .hero-card {
-            padding: 30px;
-        }
-
-        .hero-card h1 {
-            margin: 0 0 10px;
-            font-family: var(--font-display);
-            font-size: clamp(2rem, 4vw, 3.4rem);
-            line-height: 1.02;
-            letter-spacing: -0.04em;
-        }
-
-        .hero-card h1 span {
-            color: var(--cyan);
-        }
-
-        .hero-card p {
-            margin: 0;
-            color: var(--muted);
-            max-width: 780px;
-            line-height: 1.7;
-        }
-
-        .hero-meta {
-            display: grid;
-            gap: 14px;
-            padding: 24px;
-        }
-
-        .status-badge {
-            display: inline-flex;
-            align-items: center;
-            gap: 10px;
-            width: fit-content;
-            padding: 10px 14px;
-            border-radius: 999px;
-            border: 1px solid rgba(255, 255, 255, 0.1);
-            font-weight: 600;
-            color: var(--text);
-            background: rgba(255, 255, 255, 0.04);
-        }
-
-        .status-dot {
-            width: 10px;
-            height: 10px;
-            border-radius: 50%;
-            background: var(--muted);
-        }
-
-        .status-ok .status-dot { background: var(--green); box-shadow: 0 0 14px rgba(90, 214, 143, 0.6); }
-        .status-warn .status-dot { background: var(--gold); box-shadow: 0 0 14px rgba(255, 191, 71, 0.6); }
-        .status-bad .status-dot { background: var(--red); box-shadow: 0 0 14px rgba(255, 125, 125, 0.6); }
-
-        .meta-stack {
-            display: grid;
-            gap: 10px;
-        }
-
-        .meta-row {
-            display: flex;
-            justify-content: space-between;
-            gap: 14px;
-            color: var(--muted);
-            font-size: 0.95rem;
-        }
-
-        .meta-row strong {
-            color: var(--text);
-            font-weight: 600;
-        }
-
-        .section {
-            margin-bottom: 26px;
-        }
-
-        .section-head {
-            display: flex;
-            justify-content: space-between;
-            gap: 16px;
-            align-items: end;
-            margin-bottom: 14px;
-        }
-
-        .section-head h2 {
-            margin: 0;
-            font-family: var(--font-display);
-            font-size: 1.4rem;
-        }
-
-        .section-head p {
-            margin: 0;
-            color: var(--muted);
-            font-size: 0.95rem;
-        }
-
-        .grid {
-            display: grid;
-            gap: 16px;
-        }
-
-        .grid.kpi-6 {
-            grid-template-columns: repeat(6, minmax(0, 1fr));
-        }
-
-        .grid.kpi-4 {
-            grid-template-columns: repeat(4, minmax(0, 1fr));
-        }
-
-        .grid.two-col {
-            grid-template-columns: minmax(0, 1.2fr) minmax(320px, 0.8fr);
-        }
-
-        .card {
-            background: var(--panel-strong);
-            border: 1px solid var(--line);
-            border-radius: 20px;
-            padding: 22px;
-            box-shadow: var(--shadow);
-        }
-
-        .kpi-title {
-            margin: 0 0 10px;
-            color: var(--muted);
-            font-size: 0.84rem;
-            text-transform: uppercase;
-            letter-spacing: 0.12em;
-        }
-
-        .kpi-value {
-            margin: 0 0 8px;
-            font-family: var(--font-display);
-            font-size: 2.2rem;
-            line-height: 1;
-            letter-spacing: -0.05em;
-        }
-
-        .kpi-sub {
-            margin: 0;
-            color: var(--muted);
-            line-height: 1.55;
-            font-size: 0.93rem;
-        }
-
-        .accent-cyan { color: var(--cyan); }
-        .accent-gold { color: var(--gold); }
-        .accent-green { color: var(--green); }
-
-        .stack {
-            display: grid;
-            gap: 12px;
-        }
-
-        .notice {
-            border-radius: 16px;
-            border: 1px solid var(--line);
-            background: rgba(255, 255, 255, 0.03);
-            padding: 14px 16px;
-            color: var(--muted);
-            line-height: 1.6;
-        }
-
-        .notice strong {
-            color: var(--text);
-        }
-
-        .actions {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 12px;
-        }
-
-        button,
-        .link-btn,
-        input[type="file"]::file-selector-button {
-            font: inherit;
-        }
-
-        .btn {
-            border: 0;
-            border-radius: 12px;
-            padding: 12px 16px;
-            cursor: pointer;
-            font-weight: 700;
-            transition: transform 0.18s ease, opacity 0.18s ease;
-        }
-
-        .btn:hover {
-            transform: translateY(-1px);
-            opacity: 0.95;
-        }
-
-        .btn-primary {
-            background: var(--cyan);
-            color: #05243a;
-        }
-
-        .btn-secondary {
-            background: rgba(255, 255, 255, 0.08);
-            color: var(--text);
-            border: 1px solid rgba(255, 255, 255, 0.08);
-        }
-
-        .btn-danger {
-            background: rgba(255, 125, 125, 0.12);
-            color: #ffc3c3;
-            border: 1px solid rgba(255, 125, 125, 0.18);
-        }
-
-        .file-row {
-            display: flex;
-            gap: 12px;
-            flex-wrap: wrap;
-            align-items: center;
-        }
-
-        .file-input {
-            flex: 1 1 280px;
-            min-width: 240px;
-            color: var(--muted);
-            border-radius: 12px;
-            border: 1px solid var(--line);
-            background: rgba(255, 255, 255, 0.03);
-            padding: 11px 12px;
-        }
-
-        .file-input::file-selector-button {
-            border: 0;
-            border-radius: 9px;
-            margin-right: 12px;
-            padding: 9px 12px;
-            background: rgba(255, 255, 255, 0.08);
-            color: var(--text);
-            cursor: pointer;
-        }
-
-        table {
-            width: 100%;
-            border-collapse: collapse;
-        }
-
-        th, td {
-            text-align: left;
-            padding: 13px 10px;
-            border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-            vertical-align: top;
-            font-size: 0.94rem;
-        }
-
-        th {
-            color: var(--muted);
-            font-weight: 600;
-        }
-
-        td {
-            color: var(--text);
-        }
-
-        .pill {
-            display: inline-flex;
-            align-items: center;
-            gap: 8px;
-            border-radius: 999px;
-            padding: 7px 11px;
-            font-size: 0.84rem;
-            font-weight: 700;
-            border: 1px solid rgba(255, 255, 255, 0.08);
-            background: rgba(255, 255, 255, 0.05);
-        }
-
-        .pill.ok { color: #c7ffd9; background: rgba(90, 214, 143, 0.12); }
-        .pill.warn { color: #ffe4a8; background: rgba(255, 191, 71, 0.12); }
-        .pill.bad { color: #ffc4c4; background: rgba(255, 125, 125, 0.14); }
-
-        .metrics-list {
-            display: grid;
-            gap: 10px;
-        }
-
-        .metric-row {
-            display: flex;
-            justify-content: space-between;
-            gap: 16px;
-            padding: 10px 0;
-            border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-        }
-
-        .metric-row:last-child {
-            border-bottom: 0;
-        }
-
-        .metric-row span {
-            color: var(--muted);
-        }
-
-        .metric-row strong {
-            color: var(--text);
-        }
-
-        .report-links {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 10px;
-        }
-
-        .report-links a {
-            color: var(--cyan);
-            text-decoration: none;
-            font-weight: 600;
-        }
-
-        .empty {
-            color: var(--muted);
-            padding: 12px 0 4px;
-        }
-
-        #loading {
-            position: fixed;
-            inset: 0;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            background: rgba(6, 13, 22, 0.9);
-            z-index: 1000;
-            transition: opacity 0.25s ease;
-        }
-
-        #loading.hidden {
-            opacity: 0;
-            pointer-events: none;
-        }
-
-        .loader-card {
-            text-align: center;
-            padding: 28px 34px;
-            border-radius: 20px;
-            border: 1px solid var(--line);
-            background: rgba(10, 28, 46, 0.96);
-            box-shadow: var(--shadow);
-        }
-
-        .loader-card h3 {
-            margin: 14px 0 8px;
-            font-family: var(--font-display);
-        }
-
-        .loader-card p {
-            margin: 0;
-            color: var(--muted);
-        }
-
-        .spinner {
-            width: 56px;
-            height: 56px;
-            border-radius: 50%;
-            border: 4px solid rgba(67, 216, 255, 0.14);
-            border-top-color: var(--cyan);
-            margin: 0 auto;
-            animation: spin 0.9s linear infinite;
-        }
-
-        @keyframes spin {
-            to { transform: rotate(360deg); }
-        }
-
-        @media (max-width: 1180px) {
-            .grid.kpi-6 {
-                grid-template-columns: repeat(3, minmax(0, 1fr));
-            }
-
-            .grid.kpi-4,
-            .grid.two-col,
-            .hero {
-                grid-template-columns: 1fr;
-            }
-        }
-
-        @media (max-width: 720px) {
-            .shell {
-                padding: 20px 14px 34px;
-            }
-
-            .grid.kpi-6,
-            .grid.kpi-4 {
-                grid-template-columns: 1fr;
-            }
-
-            .hero-card,
-            .hero-meta,
-            .card {
-                padding: 18px;
-            }
-
-            th, td {
-                font-size: 0.9rem;
-                padding: 11px 8px;
-            }
-        }
-    </style>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="{% static 'api_app/uca.css' %}">
+    <link rel="stylesheet" href="{% static 'api_app/admin_dashboard.css' %}">
 </head>
-<body>
-    <div id="loading">
-        <div class="loader-card">
+<body class="admin-page">
+    <div id="loading" class="loading-panel">
+        <div class="loading-card">
             <div class="spinner"></div>
-            <h3>Chargement du dashboard admin</h3>
-            <p>Supervision du corpus, du benchmark et du build actif.</p>
+            <h2>Chargement du dashboard</h2>
+            <p>Lecture des metriques RAG et du corpus drive.</p>
         </div>
     </div>
 
-    <main class="shell">
-        <section class="hero">
-            <article class="hero-card">
-                <h1>Dashboard Admin <span>RAG UCA</span></h1>
-                <p>
-                    Console de pilotage du PFE : supervision du système, gestion du corpus <code>drive</code>,
-                    qualité documentaire et benchmark métier aligné avec les documents du professeur.
-                </p>
-            </article>
-            <aside class="hero-meta">
-                <div class="status-badge status-warn" id="ready-badge">
-                    <span class="status-dot"></span>
-                    <span id="ready-label">Chargement de l'état système...</span>
-                </div>
-                <div class="meta-stack">
-                    <div class="meta-row"><span>LLM actif</span><strong id="meta-llm">-</strong></div>
-                    <div class="meta-row"><span>Embedding actif</span><strong id="meta-embedding">-</strong></div>
-                    <div class="meta-row"><span>Index publié</span><strong id="meta-build">-</strong></div>
-                    <div class="meta-row"><span>Synchronisation drive</span><strong id="meta-sync">-</strong></div>
-                </div>
-            </aside>
-        </section>
+    <header class="admin-topbar">
+        <div class="uca-brand-lockup">
+            <img src="{% static 'api_app/img/uca-logo.svg' %}" alt="Universite Cadi Ayyad">
+            <div class="uca-brand-text">
+                <h1 class="uca-brand-title">Dashboard Admin RAG</h1>
+                <p class="uca-brand-subtitle">Supervision Assistant Digital UCA</p>
+            </div>
+        </div>
+        <div class="admin-topbar-actions">
+            <span class="status-badge status-warn" id="ready-badge">
+                <span class="status-dot"></span>
+                <span id="ready-label">Chargement...</span>
+            </span>
+            <a class="uca-btn uca-btn-secondary" href="/admin/">Django admin</a>
+        </div>
+    </header>
 
-        <section class="section">
+    <main class="admin-shell">
+        <section class="admin-section system-summary" aria-labelledby="system-title">
             <div class="section-head">
                 <div>
-                    <h2>État du système</h2>
-                    <p>Vue immédiate du build actif, de la disponibilité et de la couverture documentaire.</p>
+                    <p class="section-kicker">Etat global</p>
+                    <h2 id="system-title">Systeme RAG actif</h2>
+                </div>
+                <div class="meta-grid">
+                    <div class="meta-row"><span>LLM</span><strong id="meta-llm">-</strong></div>
+                    <div class="meta-row"><span>Embedding</span><strong id="meta-embedding">-</strong></div>
+                    <div class="meta-row"><span>Build</span><strong id="meta-build">-</strong></div>
+                    <div class="meta-row"><span>Drive</span><strong id="meta-sync">-</strong></div>
                 </div>
             </div>
-            <div class="grid kpi-6">
-                <article class="card">
-                    <p class="kpi-title">Système prêt</p>
-                    <p class="kpi-value accent-cyan" id="kpi-ready">-</p>
-                    <p class="kpi-sub" id="kpi-ready-sub">État global du service RAG.</p>
+            <div class="kpi-grid kpi-grid-6">
+                <article class="kpi-card">
+                    <span class="kpi-label">Systeme pret</span>
+                    <strong id="kpi-ready">-</strong>
+                    <p id="kpi-ready-sub">Etat global du service.</p>
                 </article>
-                <article class="card">
-                    <p class="kpi-title">Build actif</p>
-                    <p class="kpi-value" id="kpi-build">-</p>
-                    <p class="kpi-sub" id="kpi-build-sub">Index publié actuellement utilisé.</p>
+                <article class="kpi-card">
+                    <span class="kpi-label">Build actif</span>
+                    <strong id="kpi-build">-</strong>
+                    <p id="kpi-build-sub">Index publie actuellement utilise.</p>
                 </article>
-                <article class="card">
-                    <p class="kpi-title">Chunks publiés</p>
-                    <p class="kpi-value accent-gold" id="kpi-chunks">-</p>
-                    <p class="kpi-sub">Volume du corpus indexé.</p>
+                <article class="kpi-card">
+                    <span class="kpi-label">Chunks publies</span>
+                    <strong id="kpi-chunks">-</strong>
+                    <p>Volume indexe.</p>
                 </article>
-                <article class="card">
-                    <p class="kpi-title">Sources indexées</p>
-                    <p class="kpi-value" id="kpi-sources">-</p>
-                    <p class="kpi-sub">Documents distincts présents dans l'index.</p>
+                <article class="kpi-card">
+                    <span class="kpi-label">Sources indexees</span>
+                    <strong id="kpi-sources">-</strong>
+                    <p>Documents distincts.</p>
                 </article>
-                <article class="card">
-                    <p class="kpi-title">Documents drive</p>
-                    <p class="kpi-value accent-cyan" id="kpi-drive-docs">-</p>
-                    <p class="kpi-sub">Corpus administrable sans terminal.</p>
+                <article class="kpi-card">
+                    <span class="kpi-label">Documents drive</span>
+                    <strong id="kpi-drive-docs">-</strong>
+                    <p>Corpus administrable.</p>
                 </article>
-                <article class="card">
-                    <p class="kpi-title">Dernier benchmark</p>
-                    <p class="kpi-value accent-green" id="kpi-benchmark">-</p>
-                    <p class="kpi-sub" id="kpi-benchmark-sub">Benchmark métier chargé.</p>
+                <article class="kpi-card">
+                    <span class="kpi-label">Dernier benchmark</span>
+                    <strong id="kpi-benchmark">-</strong>
+                    <p id="kpi-benchmark-sub">Benchmark charge.</p>
                 </article>
             </div>
         </section>
 
-        <section class="section">
+        <section class="admin-section" aria-labelledby="corpus-title">
             <div class="section-head">
                 <div>
-                    <h2>Gestion du corpus drive</h2>
-                    <p>Ajout, suppression et republication de l'index à partir des documents métier.</p>
+                    <p class="section-kicker">Corpus drive</p>
+                    <h2 id="corpus-title">Documents et publication</h2>
                 </div>
             </div>
-            <div class="grid two-col">
-                <article class="card stack">
-                    <div class="notice" id="drive-sync-box">
-                        <strong>État du corpus</strong><br>
-                        Chargement de la synchronisation drive...
-                    </div>
+            <div class="two-col">
+                <article class="panel stack">
+                    <div class="notice" id="drive-sync-box">Chargement de la synchronisation drive...</div>
                     <div class="file-row">
                         <input class="file-input" type="file" id="drive-file-input" accept=".pdf,.doc,.docx,.html,.htm,.txt,.md">
-                        <button class="btn btn-primary" type="button" id="upload-drive-btn">Ajouter un document</button>
+                        <button class="uca-btn uca-btn-primary" type="button" id="upload-drive-btn">Ajouter</button>
                     </div>
                     <div class="actions">
-                        <button class="btn btn-secondary" type="button" id="rebuild-drive-btn">Rebuild drive</button>
-                        <button class="btn btn-secondary" type="button" id="evaluate-drive-btn">Lancer benchmark drive</button>
+                        <button class="uca-btn uca-btn-secondary" type="button" id="rebuild-drive-btn">Rebuild drive</button>
+                        <button class="uca-btn uca-btn-secondary" type="button" id="evaluate-drive-btn">Benchmark drive</button>
                     </div>
-                    <div class="notice" id="drive-action-status">
-                        Aucun traitement en cours.
+                    <div class="notice" id="drive-action-status">Aucun traitement en cours.</div>
+                    <div class="notice processing-summary" id="drive-processing-summary" hidden></div>
+                </article>
+                <article class="panel">
+                    <div class="table-head">
+                        <h3>Documents presents</h3>
+                        <p id="drive-doc-count">0 document</p>
                     </div>
-                </article>
-                <article class="card">
-                    <div class="section-head" style="margin-bottom: 10px;">
-                        <div>
-                            <h2 style="font-size: 1.15rem;">Documents présents</h2>
-                            <p id="drive-doc-count">0 document</p>
-                        </div>
-                    </div>
-                    <table>
-                        <thead>
-                            <tr>
-                                <th>Nom</th>
-                                <th>Taille</th>
-                                <th>Mise à jour</th>
-                                <th>Action</th>
-                            </tr>
-                        </thead>
-                        <tbody id="drive-doc-table-body">
-                            <tr><td colspan="4" class="empty">Chargement...</td></tr>
-                        </tbody>
-                    </table>
-                </article>
-            </div>
-        </section>
-
-        <section class="section">
-            <div class="section-head">
-                <div>
-                    <h2>Qualité du corpus</h2>
-                    <p>Lecture métier des audits : santé documentaire, couverture des services et distribution des sources.</p>
-                </div>
-            </div>
-            <div class="grid kpi-4">
-                <article class="card">
-                    <p class="kpi-title">Documents clean</p>
-                    <p class="kpi-value accent-green" id="quality-clean">-</p>
-                    <p class="kpi-sub">Documents sans signal de bruit bloquant.</p>
-                </article>
-                <article class="card">
-                    <p class="kpi-title">Documents avec flag</p>
-                    <p class="kpi-value accent-gold" id="quality-flagged">-</p>
-                    <p class="kpi-sub">Documents à surveiller ou à curer.</p>
-                </article>
-                <article class="card">
-                    <p class="kpi-title">Fichiers raw</p>
-                    <p class="kpi-value" id="quality-raw-files">-</p>
-                    <p class="kpi-sub" id="quality-raw-size">Volume des fichiers bruts.</p>
-                </article>
-                <article class="card">
-                    <p class="kpi-title">Services couverts</p>
-                    <p class="kpi-value accent-cyan" id="quality-services">-</p>
-                    <p class="kpi-sub">Services détectés dans l'index publié.</p>
-                </article>
-            </div>
-            <div class="grid two-col">
-                <article class="card">
-                    <div class="section-head" style="margin-bottom: 8px;">
-                        <div>
-                            <h2 style="font-size: 1.15rem;">Top services couverts</h2>
-                            <p>Services les plus représentés dans le build actif.</p>
-                        </div>
-                    </div>
-                    <table>
-                        <thead>
-                            <tr>
-                                <th>Service</th>
-                                <th>Chunks</th>
-                            </tr>
-                        </thead>
-                        <tbody id="services-table-body">
-                            <tr><td colspan="2" class="empty">Aucune donnée service.</td></tr>
-                        </tbody>
-                    </table>
-                </article>
-                <article class="card stack">
-                    <div>
-                        <h2 style="font-size: 1.15rem; margin: 0 0 10px;">Résumé des audits</h2>
-                        <div class="metrics-list" id="audit-summary-list">
-                            <div class="metric-row"><span>Audit de données</span><strong>-</strong></div>
-                            <div class="metric-row"><span>Audit raw quality</span><strong>-</strong></div>
-                            <div class="metric-row"><span>Rapport d'évaluation</span><strong>-</strong></div>
-                        </div>
-                    </div>
-                    <div>
-                        <h2 style="font-size: 1.15rem; margin: 0 0 10px;">Consulter les rapports</h2>
-                        <div class="report-links">
-                            <a href="/api/reports/data_audit/latest/" target="_blank" rel="noopener">Voir data audit</a>
-                            <a href="/api/reports/raw_quality_audit/latest/" target="_blank" rel="noopener">Voir audit raw</a>
-                            <a href="/api/reports/rag_eval/latest/" target="_blank" rel="noopener">Voir benchmark drive</a>
-                        </div>
+                    <div class="table-wrap">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>Nom</th>
+                                    <th>Taille</th>
+                                    <th>Mise a jour</th>
+                                    <th>Action</th>
+                                </tr>
+                            </thead>
+                            <tbody id="drive-doc-table-body">
+                                <tr><td colspan="4" class="empty">Chargement...</td></tr>
+                            </tbody>
+                        </table>
                     </div>
                 </article>
             </div>
         </section>
 
-        <section class="section">
+        <section class="admin-section" aria-labelledby="quality-title">
             <div class="section-head">
                 <div>
-                    <h2>Évaluation métier du RAG</h2>
-                    <p>Mesures alignées avec le corpus drive et les services métier du professeur.</p>
+                    <p class="section-kicker">Qualite</p>
+                    <h2 id="quality-title">Couverture documentaire</h2>
                 </div>
             </div>
-            <div class="notice" id="eval-summary-box">
-                Chargement du benchmark métier...
-            </div>
-            <div class="grid kpi-4" style="margin-top: 16px;">
-                <article class="card">
-                    <p class="kpi-title">Précision service top-1</p>
-                    <p class="kpi-value accent-cyan" id="eval-service-accuracy">-</p>
-                    <p class="kpi-sub">Le bon service est retrouvé en premier.</p>
+            <div class="kpi-grid kpi-grid-4">
+                <article class="kpi-card">
+                    <span class="kpi-label">Documents clean</span>
+                    <strong id="quality-clean">-</strong>
+                    <p>Sans signal bloquant.</p>
                 </article>
-                <article class="card">
-                    <p class="kpi-title">Best match moyen</p>
-                    <p class="kpi-value accent-gold" id="eval-best-match">-</p>
-                    <p class="kpi-sub">Qualité moyenne du meilleur chunk.</p>
+                <article class="kpi-card">
+                    <span class="kpi-label">Documents avec flag</span>
+                    <strong id="quality-flagged">-</strong>
+                    <p>A surveiller ou curer.</p>
                 </article>
-                <article class="card">
-                    <p class="kpi-title">Taux d'abstention</p>
-                    <p class="kpi-value" id="eval-abstention">-</p>
-                    <p class="kpi-sub">Questions refusées faute de support.</p>
+                <article class="kpi-card">
+                    <span class="kpi-label">Fichiers raw</span>
+                    <strong id="quality-raw-files">-</strong>
+                    <p id="quality-raw-size">Volume brut.</p>
                 </article>
-                <article class="card">
-                    <p class="kpi-title">Latence retrieval</p>
-                    <p class="kpi-value" id="eval-latency">-</p>
-                    <p class="kpi-sub">Moyenne en millisecondes.</p>
+                <article class="kpi-card">
+                    <span class="kpi-label">Services couverts</span>
+                    <strong id="quality-services">-</strong>
+                    <p>Services detectes.</p>
                 </article>
             </div>
-            <article class="card" style="margin-top: 16px;">
-                <div class="section-head" style="margin-bottom: 10px;">
-                    <div>
-                        <h2 style="font-size: 1.15rem;">Cas testés du benchmark drive</h2>
-                        <p>Question, service attendu, service trouvé, statut et source top-1.</p>
+            <div class="two-col">
+                <article class="panel">
+                    <div class="table-head">
+                        <h3>Services les plus representes</h3>
+                        <p>Distribution dans le build actif</p>
                     </div>
-                </div>
-                <table>
-                    <thead>
-                        <tr>
-                            <th>Question</th>
-                            <th>Service attendu</th>
-                            <th>Service trouvé</th>
-                            <th>Statut</th>
-                            <th>Source top-1</th>
-                        </tr>
-                    </thead>
-                    <tbody id="eval-table-body">
-                        <tr><td colspan="5" class="empty">Aucun benchmark chargé.</td></tr>
-                    </tbody>
-                </table>
-            </article>
-        </section>
-
-        <section class="section">
-            <div class="section-head">
-                <div>
-                    <h2>Actions administrateur</h2>
-                    <p>Actions rapides de maintenance et de publication pour la démonstration PFE.</p>
-                </div>
-            </div>
-            <div class="grid kpi-4">
-                <article class="card stack">
-                    <p class="kpi-title">Rebuild</p>
-                    <p class="kpi-sub">Rejoue processing + indexation publiée pour le corpus drive.</p>
-                    <button class="btn btn-secondary" type="button" id="rebuild-drive-btn-bottom">Relancer rebuild drive</button>
+                    <div class="table-wrap">
+                        <table>
+                            <thead>
+                                <tr><th>Service</th><th>Chunks</th></tr>
+                            </thead>
+                            <tbody id="services-table-body">
+                                <tr><td colspan="2" class="empty">Chargement...</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
                 </article>
-                <article class="card stack">
-                    <p class="kpi-title">Benchmark drive</p>
-                    <p class="kpi-sub">Régénère le dernier rapport d'évaluation métier.</p>
-                    <button class="btn btn-secondary" type="button" id="evaluate-drive-btn-bottom">Relancer benchmark drive</button>
-                </article>
-                <article class="card stack">
-                    <p class="kpi-title">Rapports</p>
-                    <p class="kpi-sub">Ouvre les derniers rapports JSON pour audit et démonstration.</p>
+                <article class="panel">
+                    <div class="table-head">
+                        <h3>Rapports disponibles</h3>
+                        <p>Dernieres generations</p>
+                    </div>
+                    <div class="metrics-list" id="audit-summary-list"></div>
                     <div class="report-links">
                         <a href="/api/reports/data_audit/latest/" target="_blank" rel="noopener">Data audit</a>
                         <a href="/api/reports/raw_quality_audit/latest/" target="_blank" rel="noopener">Audit raw</a>
                         <a href="/api/reports/rag_eval/latest/" target="_blank" rel="noopener">Benchmark drive</a>
                     </div>
                 </article>
-                <article class="card stack">
-                    <p class="kpi-title">Index actif</p>
-                    <p class="kpi-sub" id="admin-index-note">Chargement du build actif...</p>
+            </div>
+        </section>
+
+        <section class="admin-section" aria-labelledby="benchmark-title">
+            <div class="section-head">
+                <div>
+                    <p class="section-kicker">Benchmark</p>
+                    <h2 id="benchmark-title">Evaluation metier drive</h2>
+                </div>
+            </div>
+            <div class="notice" id="eval-summary-box">Aucun benchmark drive disponible.</div>
+            <div class="kpi-grid kpi-grid-4">
+                <article class="kpi-card">
+                    <span class="kpi-label">Service top-1</span>
+                    <strong id="eval-service-accuracy">-</strong>
+                    <p>Precision service.</p>
+                </article>
+                <article class="kpi-card">
+                    <span class="kpi-label">Best match</span>
+                    <strong id="eval-best-match">-</strong>
+                    <p>Qualite du meilleur chunk.</p>
+                </article>
+                <article class="kpi-card">
+                    <span class="kpi-label">Abstention</span>
+                    <strong id="eval-abstention">-</strong>
+                    <p>Refus faute de support.</p>
+                </article>
+                <article class="kpi-card">
+                    <span class="kpi-label">Latence retrieval</span>
+                    <strong id="eval-latency">-</strong>
+                    <p>Moyenne en ms.</p>
+                </article>
+            </div>
+            <article class="panel">
+                <div class="table-head">
+                    <h3>Cas testes</h3>
+                    <p>Question, service attendu, service trouve et source top-1</p>
+                </div>
+                <div class="table-wrap">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Question</th>
+                                <th>Service attendu</th>
+                                <th>Service trouve</th>
+                                <th>Statut</th>
+                                <th>Source top-1</th>
+                            </tr>
+                        </thead>
+                        <tbody id="eval-table-body">
+                            <tr><td colspan="5" class="empty">Aucun benchmark charge.</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </article>
+        </section>
+
+        <section class="admin-section" aria-labelledby="actions-title">
+            <div class="section-head">
+                <div>
+                    <p class="section-kicker">Maintenance</p>
+                    <h2 id="actions-title">Actions administrateur</h2>
+                </div>
+            </div>
+            <div class="action-grid">
+                <article class="panel stack">
+                    <h3>Rebuild</h3>
+                    <p>Traite seulement les documents nouveaux ou modifies, puis publie l'index.</p>
+                    <button class="uca-btn uca-btn-secondary" type="button" id="rebuild-drive-btn-bottom">Relancer rebuild drive</button>
+                </article>
+                <article class="panel stack">
+                    <h3>Benchmark</h3>
+                    <p>Regenerer le dernier rapport d'evaluation metier.</p>
+                    <button class="uca-btn uca-btn-secondary" type="button" id="evaluate-drive-btn-bottom">Relancer benchmark drive</button>
+                </article>
+                <article class="panel stack">
+                    <h3>Index actif</h3>
+                    <p id="admin-index-note">Chargement du build actif...</p>
                 </article>
             </div>
         </section>
     </main>
 
-    <script>
-        function getCookie(name) {
-            const cookies = document.cookie ? document.cookie.split("; ") : [];
-            for (const cookie of cookies) {
-                const [key, ...rest] = cookie.split("=");
-                if (key === name) return decodeURIComponent(rest.join("="));
-            }
-            return "";
-        }
-
-        function setText(id, value) {
-            const node = document.getElementById(id);
-            if (node) node.textContent = value;
-        }
-
-        function percent(value) {
-            return `${(Number(value || 0) * 100).toFixed(1)}%`;
-        }
-
-        function fixed(value, digits=2) {
-            return Number(value || 0).toFixed(digits);
-        }
-
-        function formatDate(value) {
-            if (!value) return "-";
-            const date = new Date(value);
-            if (Number.isNaN(date.getTime())) return "-";
-            return date.toLocaleString("fr-FR");
-        }
-
-        function formatSizeKb(value) {
-            return `${Number(value || 0).toFixed(2)} KB`;
-        }
-
-        function badgeClassFromStatus(value) {
-            if (value === "up_to_date" || value === "ok") return "ok";
-            if (value === "rebuild_required" || value === "degraded") return "warn";
-            return "bad";
-        }
-
-        function readyBadgeClass(payload) {
-            if (payload?.ready) return "status-badge status-ok";
-            if (payload?.llm?.state === "degraded") return "status-badge status-warn";
-            return "status-badge status-bad";
-        }
-
-        function setActionStatus(message, isError=false) {
-            const box = document.getElementById("drive-action-status");
-            box.textContent = message;
-            box.style.color = isError ? "#ffc4c4" : "var(--muted)";
-        }
-
-        async function loadDashboard() {
-            try {
-                const response = await fetch("/api/dashboard-metrics/");
-                if (response.status === 403) {
-                    throw new Error("Accès réservé à un administrateur connecté.");
-                }
-                if (!response.ok) {
-                    throw new Error("Impossible de charger les métriques.");
-                }
-                const payload = await response.json();
-                renderDashboard(payload);
-                await loadDriveDocuments();
-                hideLoader();
-            } catch (error) {
-                document.getElementById("loading").innerHTML = `
-                    <div class="loader-card">
-                        <h3>Chargement impossible</h3>
-                        <p>${error.message}</p>
-                    </div>
-                `;
-            }
-        }
-
-        function hideLoader() {
-            const loading = document.getElementById("loading");
-            loading.classList.add("hidden");
-            setTimeout(() => { loading.style.display = "none"; }, 260);
-        }
-
-        function renderDashboard(payload) {
-            const system = payload.system_status || {};
-            const activeIndex = payload.active_index || {};
-            const driveSync = payload.drive_sync_status || {};
-            const llmConfig = payload.llm_config || {};
-            const audit = payload.data_audit || {};
-            const quality = payload.raw_quality_audit || {};
-            const evaluation = payload.rag_eval || {};
-            const latestReports = payload.latest_reports || {};
-
-            const readyBadge = document.getElementById("ready-badge");
-            readyBadge.className = readyBadgeClass(system);
-            setText("ready-label", system.ready ? "Système RAG prêt" : "Système à surveiller");
-            setText("meta-llm", llmConfig.chat_model || "-");
-            setText("meta-embedding", activeIndex.embedding_model || "-");
-            setText("meta-build", activeIndex.build_id || "-");
-            setText("meta-sync", driveSync.status || "-");
-
-            setText("kpi-ready", system.ready ? "Oui" : "Non");
-            setText("kpi-ready-sub", system.ready ? "Service prêt pour les réponses." : "Au moins un composant demande une vérification.");
-            setText("kpi-build", activeIndex.build_id || "-");
-            setText("kpi-build-sub", activeIndex.manifest_updated_at ? `Publié le ${formatDate(activeIndex.manifest_updated_at)}` : "Aucun build publié détecté.");
-            setText("kpi-chunks", String(activeIndex.chunk_count || 0));
-            setText("kpi-sources", String(activeIndex.source_count || 0));
-            setText("kpi-drive-docs", String(driveSync.document_count || 0));
-            setText("kpi-benchmark", evaluation.benchmark || "drive");
-            setText("kpi-benchmark-sub", `${evaluation.questions_evaluated || 0} questions évaluées`);
-            setText("admin-index-note", activeIndex.build_id ? `Build ${activeIndex.build_id} · ${activeIndex.embedding_model || "-"}` : "Aucun index publié détecté.");
-
-            const syncClass = badgeClassFromStatus(driveSync.status);
-            document.getElementById("drive-sync-box").innerHTML = `
-                <strong>Synchronisation du corpus</strong><br>
-                <span class="pill ${syncClass}">${driveSync.status || "unknown"}</span>
-                ${driveSync.latest_document_name ? ` Dernier document modifié : ${driveSync.latest_document_name}` : ""}
-                <br>
-                Dernier document : ${formatDate(driveSync.latest_document_updated_at)}<br>
-                Index actif : ${formatDate(driveSync.active_index_updated_at)}
-            `;
-
-            setText("quality-clean", String(quality.quality?.documents_without_flags || 0));
-            setText("quality-flagged", String(quality.quality?.documents_with_any_flag || 0));
-            setText("quality-raw-files", String(audit.raw?.files || 0));
-            setText("quality-raw-size", `${audit.raw?.size_mb || 0} MB de fichiers bruts`);
-
-            const serviceDistribution = activeIndex && payload.data_audit?.index_metadata?.service_name_distribution
-                ? payload.data_audit.index_metadata.service_name_distribution
-                : {};
-            const rankedServices = Object.entries(serviceDistribution).sort((a, b) => b[1] - a[1]).filter(item => item[0] && item[0] !== "unknown");
-            setText("quality-services", String(rankedServices.length));
-            renderServicesTable(rankedServices);
-
-            renderAuditSummary(latestReports);
-            renderEvaluation(evaluation);
-        }
-
-        function renderServicesTable(items) {
-            const body = document.getElementById("services-table-body");
-            if (!items.length) {
-                body.innerHTML = '<tr><td colspan="2" class="empty">Aucune distribution service disponible.</td></tr>';
-                return;
-            }
-            body.innerHTML = items.slice(0, 8).map(([name, count]) => `
-                <tr>
-                    <td>${name}</td>
-                    <td>${count}</td>
-                </tr>
-            `).join("");
-        }
-
-        function renderAuditSummary(latestReports) {
-            const list = document.getElementById("audit-summary-list");
-            const rows = [
-                ["Audit de données", latestReports.data_audit],
-                ["Audit raw quality", latestReports.raw_quality_audit],
-                ["Benchmark drive", latestReports.rag_eval],
-            ];
-            list.innerHTML = rows.map(([label, bundle]) => `
-                <div class="metric-row">
-                    <span>${label}</span>
-                    <strong>${bundle?.available ? formatDate(bundle.updated_at) : "Non disponible"}</strong>
-                </div>
-            `).join("");
-        }
-
-        function renderEvaluation(evaluation) {
-            if (!evaluation || !evaluation.summary) {
-                setText("eval-summary-box", "Aucun benchmark drive disponible.");
-                return;
-            }
-            const summary = evaluation.summary;
-            setText(
-                "eval-summary-box",
-                `Benchmark ${evaluation.benchmark || "drive"} · ${evaluation.questions_evaluated || 0} questions · aligné avec le corpus métier du professeur`
-            );
-            setText("eval-service-accuracy", percent(summary.service_top1_accuracy));
-            setText("eval-best-match", percent(summary.best_match_score_avg));
-            setText("eval-abstention", percent(summary.abstention_rate));
-            setText("eval-latency", `${fixed(summary.retrieval_latency_ms_avg, 0)} ms`);
-
-            const body = document.getElementById("eval-table-body");
-            const rows = evaluation.rows || [];
-            if (!rows.length) {
-                body.innerHTML = '<tr><td colspan="5" class="empty">Aucun cas évalué.</td></tr>';
-                return;
-            }
-            body.innerHTML = rows.map((row) => {
-                const match = Number(row.service_top1_match || 0) === 1;
-                const abstained = Number(row.abstained || 0) === 1;
-                const status = abstained ? "Abstention" : (match ? "OK" : "À corriger");
-                const klass = abstained ? "warn" : (match ? "ok" : "bad");
-                return `
-                    <tr>
-                        <td>${row.question || "-"}</td>
-                        <td>${row.expected_service || "-"}</td>
-                        <td>${row.top1_service || "-"}</td>
-                        <td><span class="pill ${klass}">${status}</span></td>
-                        <td>${row.top1_source || "-"}</td>
-                    </tr>
-                `;
-            }).join("");
-        }
-
-        async function loadDriveDocuments() {
-            const body = document.getElementById("drive-doc-table-body");
-            try {
-                const response = await fetch("/api/drive-documents/");
-                if (response.status === 403) {
-                    body.innerHTML = '<tr><td colspan="4" class="empty">Accès refusé.</td></tr>';
-                    return;
-                }
-                const payload = await response.json();
-                const documents = payload.documents || [];
-                setText("drive-doc-count", `${payload.count || 0} document(s)`);
-                if (!documents.length) {
-                    body.innerHTML = '<tr><td colspan="4" class="empty">Aucun document dans le corpus drive.</td></tr>';
-                    return;
-                }
-                body.innerHTML = documents.map((doc) => `
-                    <tr>
-                        <td>${doc.name}</td>
-                        <td>${formatSizeKb(doc.size_kb)}</td>
-                        <td>${formatDate(doc.updated_at * 1000)}</td>
-                        <td><button class="btn btn-danger" type="button" onclick="deleteDriveDocument('${encodeURIComponent(doc.name)}')">Supprimer</button></td>
-                    </tr>
-                `).join("");
-            } catch (error) {
-                body.innerHTML = '<tr><td colspan="4" class="empty">Erreur de chargement des documents.</td></tr>';
-            }
-        }
-
-        async function uploadDriveDocument() {
-            const input = document.getElementById("drive-file-input");
-            const file = input.files[0];
-            if (!file) {
-                setActionStatus("Sélectionne un document avant l'ajout.", true);
-                return;
-            }
-            const formData = new FormData();
-            formData.append("file", file);
-            setActionStatus("Ajout du document en cours...");
-            try {
-                const response = await fetch("/api/drive-documents/", {
-                    method: "POST",
-                    headers: { "X-CSRFToken": getCookie("csrftoken") },
-                    body: formData,
-                });
-                const payload = await response.json();
-                if (!response.ok) throw new Error(payload.detail || "Échec de l'ajout.");
-                input.value = "";
-                setActionStatus(`${payload.detail} Rebuild requis pour publier le nouvel index.`);
-                await refreshDashboard();
-            } catch (error) {
-                setActionStatus(error.message, true);
-            }
-        }
-
-        async function deleteDriveDocument(encodedName) {
-            const filename = decodeURIComponent(encodedName);
-            if (!confirm(`Supprimer ${filename} du corpus drive ?`)) return;
-            setActionStatus(`Suppression de ${filename}...`);
-            try {
-                const response = await fetch(`/api/drive-documents/${encodedName}/`, {
-                    method: "DELETE",
-                    headers: { "X-CSRFToken": getCookie("csrftoken") },
-                });
-                const payload = await response.json();
-                if (!response.ok) throw new Error(payload.detail || "Suppression impossible.");
-                setActionStatus(`${payload.detail} Rebuild requis pour mettre à jour l'index.`);
-                await refreshDashboard();
-            } catch (error) {
-                setActionStatus(error.message, true);
-            }
-        }
-
-        async function rebuildDrive() {
-            setActionStatus("Rebuild drive en cours : processing + indexation publiée...");
-            try {
-                const response = await fetch("/api/drive-rebuild/", {
-                    method: "POST",
-                    headers: {
-                        "Content-Type": "application/json",
-                        "X-CSRFToken": getCookie("csrftoken"),
-                    },
-                    body: JSON.stringify({}),
-                });
-                const payload = await response.json();
-                if (!response.ok) throw new Error(payload.detail || "Échec du rebuild drive.");
-                setActionStatus(`Rebuild terminé. Build publié : ${payload.index?.build_id || "-"}.`);
-                await refreshDashboard();
-            } catch (error) {
-                setActionStatus(error.message, true);
-            }
-        }
-
-        async function evaluateDrive() {
-            setActionStatus("Benchmark drive en cours...");
-            try {
-                const response = await fetch("/api/drive-evaluate/", {
-                    method: "POST",
-                    headers: {
-                        "Content-Type": "application/json",
-                        "X-CSRFToken": getCookie("csrftoken"),
-                    },
-                    body: JSON.stringify({}),
-                });
-                const payload = await response.json();
-                if (!response.ok) throw new Error(payload.detail || "Échec du benchmark drive.");
-                setActionStatus(payload.detail || "Benchmark drive régénéré.");
-                await refreshDashboard();
-            } catch (error) {
-                setActionStatus(error.message, true);
-            }
-        }
-
-        async function refreshDashboard() {
-            const response = await fetch("/api/dashboard-metrics/");
-            const payload = await response.json();
-            renderDashboard(payload);
-            await loadDriveDocuments();
-        }
-
-        document.getElementById("upload-drive-btn").addEventListener("click", uploadDriveDocument);
-        document.getElementById("rebuild-drive-btn").addEventListener("click", rebuildDrive);
-        document.getElementById("rebuild-drive-btn-bottom").addEventListener("click", rebuildDrive);
-        document.getElementById("evaluate-drive-btn").addEventListener("click", evaluateDrive);
-        document.getElementById("evaluate-drive-btn-bottom").addEventListener("click", evaluateDrive);
-
-        loadDashboard();
-        window.deleteDriveDocument = deleteDriveDocument;
-    </script>
+    <script src="{% static 'api_app/admin_dashboard.js' %}?v=20260508-processing-summary" defer></script>
 </body>
 </html>

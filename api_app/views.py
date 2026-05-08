@@ -1,5 +1,7 @@
 import logging
 from pathlib import Path
+import re
+from urllib.parse import urlparse
 
 from django.contrib.auth import login
 from django.contrib.auth.mixins import LoginRequiredMixin, UserPassesTestMixin
@@ -19,6 +21,7 @@ from rest_framework.views import APIView
 
 from api_app.forms import StudentLoginForm, StudentSignupForm
 from api_app.models import Conversation, Message
+from api_app.services.conversation_context import build_conversation_context, update_conversation_context
 from api_app.services.identity import allowed_uca_email_domains
 from rag_module.contracts import QuestionRequest
 from rag_module.generation.rag_engine import RAGGenerationError, RAGIndexNotReadyError
@@ -30,6 +33,22 @@ from rag_module.shared.runtime import get_runtime_settings
 
 logger = logging.getLogger(__name__)
 ALLOWED_DRIVE_EXTENSIONS = {".pdf", ".docx", ".doc", ".html", ".htm", ".txt", ".md"}
+SERVICE_LABELS = {
+    "ucastudent": "UC@Student",
+    "ucaplat": "UCAPLAT",
+    "pedoc": "PEDOC",
+    "cip": "CIP",
+    "e-candidature": "E-Candidature",
+    "espace diplomes": "Espace Diplomes",
+    "soutien-recherche": "Soutien-Recherche",
+}
+ANSWER_SECTION_BREAK_RE = re.compile(
+    r"^\s*(sources utiles|niveau de confiance|points a verifier|si necessaire\s*:\s*points a verifier)\s*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+ANSWER_LEAD_RE = re.compile(r"^\s*reponse\s*$", re.IGNORECASE | re.MULTILINE)
+HASHED_FILENAME_RE = re.compile(r"_([0-9a-f]{8,})(?=\.[a-z0-9]+$)", re.IGNORECASE)
+LIST_PREFIX_RE = re.compile(r"^\s*(?:[-*]|\d+[.)])\s*")
 
 
 class ChatRequestSerializer(serializers.Serializer):
@@ -86,16 +105,36 @@ class ChatAPIView(APIView):
             request.user,
             serializer.validated_data.get("conversation_id"),
         )
+        context_payload = build_conversation_context(conversation, message)
+        rag_question = str(context_payload.get("rewritten_question") or message).strip()
         _save_user_message(conversation, message)
         try:
-            result = answer_question(QuestionRequest(question=message))
-            _save_assistant_message(conversation, result)
+            result = answer_question(QuestionRequest(question=rag_question))
+            result.retrieval_meta.update(
+                {
+                    "original_question": message,
+                    "rewritten_question": rag_question,
+                    "conversation_context_used": bool(context_payload.get("context_used")),
+                    "context_service": (
+                        context_payload.get("detected_service")
+                        or (context_payload.get("context_meta") or {}).get("service", "")
+                    ),
+                    "context_intent": (
+                        context_payload.get("detected_intent")
+                        or (context_payload.get("context_meta") or {}).get("intent", "")
+                    ),
+                }
+            )
+            clean_answer = _sanitize_answer_text(result.answer, question=message)
+            clean_sources = _sanitize_sources(result.sources)
+            _save_assistant_message(conversation, result, answer=clean_answer, sources=clean_sources)
+            update_conversation_context(conversation, message, clean_answer, result, context_payload=context_payload)
             return Response(
                 {
                     "conversation_id": conversation.id,
                     "conversation_title": conversation.title or "Nouvelle conversation",
-                    "answer": result.answer.strip(),
-                    "sources": result.sources,
+                    "answer": clean_answer,
+                    "sources": clean_sources,
                     "confidence": result.confidence,
                     "backend": result.backend,
                     "retrieval_meta": result.retrieval_meta,
@@ -181,7 +220,7 @@ class ChatConversationDetailAPIView(APIView):
         conversation.save(update_fields=["is_archived", "updated_at"])
         return Response(
             {
-                "detail": "Conversation archivee.",
+                "detail": "Conversation supprimee de l'historique actif.",
                 "conversations": _serialize_conversation_list(request.user),
             },
             status=status.HTTP_200_OK,
@@ -450,8 +489,8 @@ def _serialize_message(message: Message) -> dict:
     return {
         "id": message.id,
         "role": message.role,
-        "content": message.content,
-        "sources": list(message.sources or []),
+        "content": _sanitize_answer_text(message.content) if message.role == Message.ROLE_ASSISTANT else message.content,
+        "sources": _sanitize_sources(message.sources or []),
         "confidence": message.confidence,
         "retrieval_meta": dict(message.retrieval_meta or {}),
         "created_at": message.created_at.isoformat(),
@@ -505,12 +544,218 @@ def _save_user_message(conversation: Conversation, text: str) -> Message:
     )
 
 
-def _save_assistant_message(conversation: Conversation, result) -> Message:
+def _save_assistant_message(
+    conversation: Conversation,
+    result,
+    *,
+    answer: str | None = None,
+    sources: list[dict] | None = None,
+) -> Message:
     return Message.objects.create(
         conversation=conversation,
         role=Message.ROLE_ASSISTANT,
-        content=result.answer.strip(),
-        sources=list(result.sources or []),
+        content=(answer or result.answer or "").strip(),
+        sources=list(sources if sources is not None else result.sources or []),
         confidence=str(result.confidence or ""),
         retrieval_meta=dict(result.retrieval_meta or {}),
     )
+
+
+def _sanitize_answer_text(raw_answer: str, question: str = "") -> str:
+    text = str(raw_answer or "").strip()
+    if not text:
+        return ""
+
+    lead_match = ANSWER_LEAD_RE.search(text)
+    if lead_match:
+        text = text[lead_match.end():].lstrip(" \n:-")
+
+    section_match = ANSWER_SECTION_BREAK_RE.search(text)
+    if section_match:
+        text = text[:section_match.start()].rstrip()
+
+    cleaned_lines: list[str] = []
+    for line in text.splitlines():
+        stripped = re.sub(r"^\s*#{1,6}\s*", "", line).rstrip()
+        cleaned_lines.append(stripped)
+
+    text = "\n".join(cleaned_lines)
+    text = re.sub(r"\n{3,}", "\n\n", text).strip()
+    text = text or "Information non disponible dans mes sources actuelles."
+    if question:
+        text = _organize_answer_text(question, text)
+    return text
+
+
+def _organize_answer_text(question: str, answer: str) -> str:
+    normalized_question = question.lower()
+    if "information non disponible" in answer.lower():
+        return answer
+
+    if _is_ucastudent_attestation_question(normalized_question):
+        specialized = _format_ucastudent_attestation_answer(answer)
+        if specialized:
+            return specialized
+
+    if _is_procedure_question(normalized_question):
+        lines = _extract_informative_lines(answer, normalized_question)
+        if lines:
+            topic = _question_topic_label(question)
+            ordered = "\n".join(f"{index}. {line}" for index, line in enumerate(lines[:4], start=1))
+            return f"Pour {topic} :\n{ordered}"
+
+    return answer
+
+
+def _is_procedure_question(normalized_question: str) -> bool:
+    return any(token in normalized_question for token in ("comment", "obtenir", "demande", "demander", "procedure"))
+
+
+def _is_ucastudent_attestation_question(normalized_question: str) -> bool:
+    return (
+        "attestation" in normalized_question
+        and any(token in normalized_question for token in ("uc@student", "ucastudent", "student"))
+    )
+
+
+def _question_topic_label(question: str) -> str:
+    clean = question.strip().rstrip(" ?")
+    lower = clean.lower()
+    if lower.startswith("comment "):
+        return clean[len("comment "):]
+    return clean[:1].lower() + clean[1:] if clean else "effectuer cette demarche"
+
+
+def _extract_informative_lines(answer: str, normalized_question: str) -> list[str]:
+    query_tokens = {
+        token for token in re.findall(r"\b[\w@']+\b", normalized_question)
+        if len(token) >= 4 and token not in {"comment", "obtenir", "votre", "cette", "demande", "faire", "avec"}
+    }
+    action_tokens = {"connect", "demande", "demandes", "certificat", "attestation", "releve", "ligne", "telecharg", "suivi"}
+    lines: list[str] = []
+    seen: set[str] = set()
+    for raw_line in answer.splitlines():
+        line = LIST_PREFIX_RE.sub("", raw_line).strip()
+        if not line:
+            continue
+        line = re.sub(r"^#{1,6}\s*", "", line).strip()
+        line = re.sub(r"\s+", " ", line)
+        lower = line.lower()
+        if "confiance:" in lower or "sources utiles" in lower:
+            continue
+        if "espace d’administration" in lower or "espace d'administration" in lower:
+            continue
+        if "les etablissements" in lower or "responsables administratifs" in lower:
+            continue
+        if "avantages cles" in lower or "objectifs de la plateforme" in lower:
+            continue
+        if query_tokens and not any(token in lower for token in query_tokens) and not any(token in lower for token in action_tokens):
+            continue
+        normalized = lower.strip(" .")
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        lines.append(line.rstrip(".") + ".")
+    return lines
+
+
+def _format_ucastudent_attestation_answer(answer: str) -> str:
+    lines = _extract_informative_lines(answer, "attestation ucastudent")
+    admin_line = next(
+        (
+            line for line in lines
+            if "demandes administratives" in line.lower()
+            or ("certificat" in line.lower() and "ligne" in line.lower())
+        ),
+        "",
+    )
+    if not admin_line:
+        return ""
+
+    admin_line = re.sub(r"^demandes administratives\s*", "", admin_line, flags=re.IGNORECASE).strip()
+    admin_line = admin_line.lstrip(":;- ").strip()
+    admin_line = admin_line[:1].lower() + admin_line[1:] if admin_line else admin_line
+    if admin_line.lower().startswith("effectuez "):
+        admin_line = "d'effectuer " + admin_line[len("effectuez "):].lstrip()
+    intro = (
+        "D'apres les sources disponibles, l'attestation se demande en ligne depuis la rubrique "
+        "\"Demandes administratives\" de UC@Student."
+    )
+    detail = admin_line.rstrip(".")
+    detail_sentence = f"Cette rubrique permet {detail}." if detail else ""
+    steps = [
+        "Connectez-vous a UC@Student.",
+        "Ouvrez la rubrique \"Demandes administratives\".",
+        "Selectionnez la demande d'attestation ou de certificat si elle est proposee a votre niveau.",
+    ]
+    note = (
+        "Remarque: les extraits recuperes ne detaillent pas davantage le chemin complet, les delais ou les pieces a fournir."
+    )
+    body = [intro]
+    if detail_sentence:
+        body.append(detail_sentence)
+    body.append("")
+    body.extend(f"{index}. {step}" for index, step in enumerate(steps, start=1))
+    body.append("")
+    body.append(note)
+    return "\n".join(body).strip()
+
+
+def _sanitize_sources(raw_sources) -> list[dict]:
+    if not isinstance(raw_sources, list):
+        return []
+
+    cleaned: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for raw_source in raw_sources[:3]:
+        if not isinstance(raw_source, dict):
+            continue
+        label = _source_label(raw_source)
+        if not label:
+            continue
+        url = str(raw_source.get("url") or raw_source.get("official_url") or "").strip()
+        path = str(raw_source.get("path") or "").strip()
+        key = (label.lower(), url or path)
+        if key in seen:
+            continue
+        seen.add(key)
+        entry = {
+            "name": label,
+            "path": path,
+        }
+        if url:
+            entry["url"] = url
+        score = raw_source.get("score")
+        if score is not None:
+            entry["score"] = score
+        cleaned.append(entry)
+    return cleaned
+
+
+def _source_label(source: dict) -> str:
+    service_name = str(source.get("service_name") or "").strip().lower()
+    if service_name in SERVICE_LABELS:
+        return SERVICE_LABELS[service_name]
+
+    for key in ("label", "title", "page_title"):
+        value = str(source.get(key) or "").strip()
+        if value:
+            return value
+
+    for key in ("url", "official_url"):
+        value = str(source.get(key) or "").strip()
+        if value:
+            host = (urlparse(value).netloc or "").strip()
+            if host:
+                return host
+
+    raw_name = str(source.get("name") or source.get("path") or "").strip()
+    if not raw_name:
+        return ""
+
+    filename = Path(raw_name).name
+    filename = HASHED_FILENAME_RE.sub("", filename)
+    filename = re.sub(r"\.(html?|pdf|docx?|md|txt)$", "", filename, flags=re.IGNORECASE)
+    filename = filename.replace("_", " ").replace("-", " ").strip()
+    filename = re.sub(r"\s{2,}", " ", filename).strip()
+    return filename or raw_name

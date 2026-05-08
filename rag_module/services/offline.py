@@ -28,8 +28,8 @@ def run_ingestion(config: IngestionJobConfig | None = None) -> Dict:
 
 
 def run_processing(corpus: str = "all") -> Dict:
-    preprocess_all(corpus=corpus)
-    return {"status": "ok", "step": "processing", "corpus": corpus}
+    result = preprocess_all(corpus=corpus)
+    return {"status": "ok", "step": "processing", "corpus": corpus, **result}
 
 
 def run_indexing(

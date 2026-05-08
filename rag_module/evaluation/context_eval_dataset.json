@@ -1,0 +1,284 @@
+[
+  {
+    "conversation_id": "conv_ucastudent_attestation_01",
+    "title": "Attestation UC@Student",
+    "turns": [
+      {
+        "question": "Comment obtenir mon attestation sur UC@Student ?",
+        "expected_service": "UC@Student",
+        "expected_intent": "attestation",
+        "expected_keywords": ["attestation", "UC@Student", "demandes administratives"],
+        "context_needed": false
+      },
+      {
+        "question": "Et pour les delais ?",
+        "expected_rewritten_query": "Quel est le delai pour attestation sur UC@Student ?",
+        "expected_service": "UC@Student",
+        "expected_intent": "attestation",
+        "expected_keywords": ["delai", "attestation", "UC@Student"],
+        "context_needed": true
+      },
+      {
+        "question": "Ou trouver cette rubrique ?",
+        "expected_rewritten_query": "Ou trouver la rubrique liee a attestation sur UC@Student ?",
+        "expected_service": "UC@Student",
+        "expected_intent": "attestation",
+        "expected_keywords": ["rubrique", "attestation", "UC@Student"],
+        "context_needed": true
+      },
+      {
+        "question": "Est-ce que je peux la recevoir par courrier postal ?",
+        "expected_service": "UC@Student",
+        "expected_intent": "attestation",
+        "expected_keywords": ["courrier", "attestation", "UC@Student"],
+        "context_needed": true,
+        "expected_abstain": true
+      }
+    ]
+  },
+  {
+    "conversation_id": "conv_ucastudent_notes_01",
+    "title": "Notes UC@Student",
+    "turns": [
+      {
+        "question": "Ou consulter mes notes sur UC@Student ?",
+        "expected_service": "UC@Student",
+        "expected_intent": "notes",
+        "expected_keywords": ["notes", "UC@Student"],
+        "context_needed": false
+      },
+      {
+        "question": "Et le releve ?",
+        "expected_service": "UC@Student",
+        "expected_intent": "notes",
+        "expected_keywords": ["releve", "notes", "UC@Student"],
+        "context_needed": true
+      },
+      {
+        "question": "Comment le telecharger ?",
+        "expected_rewritten_query": "Comment telecharger notes sur UC@Student ?",
+        "expected_service": "UC@Student",
+        "expected_intent": "notes",
+        "expected_keywords": ["telecharger", "notes", "UC@Student"],
+        "context_needed": true
+      },
+      {
+        "question": "Comment candidater sur PEDOC ?",
+        "expected_service": "PEDOC",
+        "expected_intent": "candidature",
+        "expected_keywords": ["candidature", "PEDOC"],
+        "context_needed": false
+      }
+    ]
+  },
+  {
+    "conversation_id": "conv_pedoc_candidature_01",
+    "title": "Candidature PEDOC",
+    "turns": [
+      {
+        "question": "Comment candidater sur PEDOC ?",
+        "expected_service": "PEDOC",
+        "expected_intent": "candidature",
+        "expected_keywords": ["candidature", "PEDOC"],
+        "context_needed": false
+      },
+      {
+        "question": "Et les documents necessaires ?",
+        "expected_service": "PEDOC",
+        "expected_intent": "candidature",
+        "expected_keywords": ["documents", "candidature", "PEDOC"],
+        "context_needed": true
+      },
+      {
+        "question": "Comment suivre l'etat de la demande ?",
+        "expected_service": "PEDOC",
+        "expected_intent": "candidature",
+        "expected_keywords": ["suivre", "demande", "PEDOC"],
+        "context_needed": true
+      },
+      {
+        "question": "Peut-on payer les frais par cette plateforme ?",
+        "expected_service": "PEDOC",
+        "expected_intent": "candidature",
+        "expected_keywords": ["payer", "frais", "PEDOC"],
+        "context_needed": true,
+        "expected_abstain": true
+      }
+    ]
+  },
+  {
+    "conversation_id": "conv_ucaplat_devoirs_01",
+    "title": "Cours et devoirs UCAPLAT",
+    "turns": [
+      {
+        "question": "A quoi sert UCAPLAT ?",
+        "expected_service": "UCAPLAT",
+        "expected_intent": "cours",
+        "expected_keywords": ["UCAPLAT", "cours", "devoirs"],
+        "context_needed": false
+      },
+      {
+        "question": "Comment deposer des devoirs ?",
+        "expected_service": "UCAPLAT",
+        "expected_intent": "devoirs",
+        "expected_keywords": ["devoirs", "deposer", "UCAPLAT"],
+        "context_needed": true
+      },
+      {
+        "question": "Et pour les cours ?",
+        "expected_service": "UCAPLAT",
+        "expected_intent": "cours",
+        "expected_keywords": ["cours", "UCAPLAT"],
+        "context_needed": true
+      },
+      {
+        "question": "Cette plateforme donne-t-elle des attestations de stage ?",
+        "expected_service": "UCAPLAT",
+        "expected_intent": "cours",
+        "expected_keywords": ["attestation", "stage", "UCAPLAT"],
+        "context_needed": true,
+        "expected_abstain": true
+      }
+    ]
+  },
+  {
+    "conversation_id": "conv_cip_accompagnement_01",
+    "title": "Accompagnement CIP",
+    "turns": [
+      {
+        "question": "A quoi sert le CIP ?",
+        "expected_service": "CIP",
+        "expected_intent": "procedure",
+        "expected_keywords": ["CIP", "accompagnement", "guides"],
+        "context_needed": false
+      },
+      {
+        "question": "Et pour l'accompagnement ?",
+        "expected_service": "CIP",
+        "expected_intent": "procedure",
+        "expected_keywords": ["accompagnement", "CIP"],
+        "context_needed": true
+      },
+      {
+        "question": "Ou trouver ces guides ?",
+        "expected_service": "CIP",
+        "expected_intent": "procedure",
+        "expected_keywords": ["guides", "CIP"],
+        "context_needed": true
+      },
+      {
+        "question": "Est-ce que le CIP gere les notes des examens ?",
+        "expected_service": "CIP",
+        "expected_intent": "procedure",
+        "expected_keywords": ["notes", "examens", "CIP"],
+        "context_needed": true,
+        "expected_abstain": true
+      }
+    ]
+  },
+  {
+    "conversation_id": "conv_diplomes_suivi_01",
+    "title": "Suivi diplome",
+    "turns": [
+      {
+        "question": "Comment suivre l etat de mon diplome ?",
+        "expected_service": "Espace Diplomes",
+        "expected_intent": "diplome",
+        "expected_keywords": ["diplome", "suivi", "etat"],
+        "context_needed": false
+      },
+      {
+        "question": "Et le e-diplome ?",
+        "expected_service": "Espace Diplomes",
+        "expected_intent": "diplome",
+        "expected_keywords": ["e-diplome", "diplome"],
+        "context_needed": true
+      },
+      {
+        "question": "Comment le telecharger ?",
+        "expected_service": "Espace Diplomes",
+        "expected_intent": "diplome",
+        "expected_keywords": ["telecharger", "diplome"],
+        "context_needed": true
+      },
+      {
+        "question": "Est-ce que je peux modifier mes notes depuis cet espace ?",
+        "expected_service": "Espace Diplomes",
+        "expected_intent": "diplome",
+        "expected_keywords": ["modifier", "notes", "diplome"],
+        "context_needed": true,
+        "expected_abstain": true
+      }
+    ]
+  },
+  {
+    "conversation_id": "conv_mobilite_bourse_01",
+    "title": "Bourse Mobilite internationale",
+    "turns": [
+      {
+        "question": "Comment postuler a une bourse via Mobilite internationale ?",
+        "expected_service": "Mobilite internationale",
+        "expected_intent": "candidature",
+        "expected_keywords": ["mobilite", "bourse", "postuler"],
+        "context_needed": false
+      },
+      {
+        "question": "Et les documents demandes ?",
+        "expected_service": "Mobilite internationale",
+        "expected_intent": "candidature",
+        "expected_keywords": ["documents", "bourse", "mobilite"],
+        "context_needed": true
+      },
+      {
+        "question": "Comment suivre la candidature ?",
+        "expected_service": "Mobilite internationale",
+        "expected_intent": "candidature",
+        "expected_keywords": ["suivre", "candidature", "mobilite"],
+        "context_needed": true
+      },
+      {
+        "question": "Est-ce que cette bourse paie mon logement automatiquement ?",
+        "expected_service": "Mobilite internationale",
+        "expected_intent": "candidature",
+        "expected_keywords": ["logement", "bourse", "mobilite"],
+        "context_needed": true,
+        "expected_abstain": true
+      }
+    ]
+  },
+  {
+    "conversation_id": "conv_pucastaff_conge_01",
+    "title": "Conge PUCAStaff",
+    "turns": [
+      {
+        "question": "Comment demander un conge sur PUCAStaff ?",
+        "expected_service": "PUCAStaff",
+        "expected_intent": "conge",
+        "expected_keywords": ["PUCAStaff", "conge"],
+        "context_needed": false
+      },
+      {
+        "question": "Et les documents necessaires ?",
+        "expected_service": "PUCAStaff",
+        "expected_intent": "conge",
+        "expected_keywords": ["documents", "conge", "PUCAStaff"],
+        "context_needed": true
+      },
+      {
+        "question": "Ou suivre la demande ?",
+        "expected_service": "PUCAStaff",
+        "expected_intent": "conge",
+        "expected_keywords": ["suivre", "demande", "PUCAStaff"],
+        "context_needed": true
+      },
+      {
+        "question": "Est-ce que les etudiants peuvent utiliser ce service ?",
+        "expected_service": "PUCAStaff",
+        "expected_intent": "conge",
+        "expected_keywords": ["etudiants", "PUCAStaff"],
+        "context_needed": true,
+        "expected_abstain": true
+      }
+    ]
+  }
+]

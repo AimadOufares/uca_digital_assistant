@@ -21,8 +21,13 @@ try:
         chunk_refcounts as pc_chunk_refcounts,
         corpus_paths as pc_corpus_paths,
         delete_chunk_file_if_unreferenced as pc_delete_chunk_file_if_unreferenced,
+        classify_document_state as pc_classify_document_state,
         load_cache as pc_load_cache,
         load_raw_metadata as pc_load_raw_metadata,
+        mark_failed as pc_mark_failed,
+        mark_no_chunks as pc_mark_no_chunks,
+        mark_processed as pc_mark_processed,
+        mark_skipped as pc_mark_skipped,
         save_cache as pc_save_cache,
     )
     from .text_quality import (
@@ -44,8 +49,13 @@ except ImportError:  # pragma: no cover
         chunk_refcounts as pc_chunk_refcounts,
         corpus_paths as pc_corpus_paths,
         delete_chunk_file_if_unreferenced as pc_delete_chunk_file_if_unreferenced,
+        classify_document_state as pc_classify_document_state,
         load_cache as pc_load_cache,
         load_raw_metadata as pc_load_raw_metadata,
+        mark_failed as pc_mark_failed,
+        mark_no_chunks as pc_mark_no_chunks,
+        mark_processed as pc_mark_processed,
+        mark_skipped as pc_mark_skipped,
         save_cache as pc_save_cache,
     )
     from rag_module.offline.text_quality import (
@@ -478,10 +488,26 @@ def _delete_chunk_file_if_unreferenced(
     return pc_delete_chunk_file_if_unreferenced(chunk_hash, refcounts, seen_chunks, processed_path)
 
 
-def _preprocess_corpus(corpus: str) -> None:
+def _preprocess_corpus(corpus: str) -> Dict:
     raw_path, processed_path, cache_file = _corpus_paths(corpus)
     raw_metadata = _load_raw_metadata(corpus)
     os.makedirs(processed_path, exist_ok=True)
+    summary = {
+        "corpus": corpus,
+        "raw_path": raw_path,
+        "processed_path": processed_path,
+        "detected": 0,
+        "processed": 0,
+        "skipped_unchanged": 0,
+        "skipped_no_chunks": 0,
+        "failed": 0,
+        "quarantined": 0,
+        "deleted_sources": 0,
+        "removed_chunks": 0,
+        "new": 0,
+        "modified": 0,
+        "retried": 0,
+    }
 
     backup_dir = create_backup(processed_path, cache_file)
     if backup_dir:
@@ -513,6 +539,8 @@ def _preprocess_corpus(corpus: str) -> None:
             if _delete_chunk_file_if_unreferenced(chunk_hash, refcounts, seen_chunks, processed_path):
                 removed_chunks += 1
     if deleted_sources:
+        summary["deleted_sources"] = len(deleted_sources)
+        summary["removed_chunks"] = removed_chunks
         logger.info(
             "Cleanup removed sources: %s source(s), %s chunk(s).",
             len(deleted_sources),
@@ -524,6 +552,7 @@ def _preprocess_corpus(corpus: str) -> None:
         future_to_path = {}
 
         for file_path in files:
+            summary["detected"] += 1
             file_hash = hash_file(file_path)
             record = file_records.get(file_path, {})
             old_hashes = record.get("chunk_hashes", [])
@@ -531,13 +560,28 @@ def _preprocess_corpus(corpus: str) -> None:
                 os.path.exists(os.path.join(processed_path, f"{chunk_hash}.json"))
                 for chunk_hash in old_hashes
             )
-            if (
-                record.get("file_hash") == file_hash
-                and has_all_chunks
-                and record.get("policy_version") == PROCESSING_POLICY_VERSION
-            ):
+            state = pc_classify_document_state(
+                file_path,
+                file_hash,
+                record,
+                has_all_chunks=has_all_chunks,
+                policy_version=PROCESSING_POLICY_VERSION,
+            )
+            if state in {"processed", "skipped"}:
+                file_records[file_path] = pc_mark_skipped(record, file_hash, PROCESSING_POLICY_VERSION, corpus)
+                summary["skipped_unchanged"] += 1
                 logger.info("Skip unchanged -> %s", Path(file_path).name)
                 continue
+            if state == "quarantine":
+                summary["quarantined"] += 1
+                logger.warning("Skip quarantined -> %s", Path(file_path).name)
+                continue
+            if state == "new":
+                summary["new"] += 1
+            elif state == "modified":
+                summary["modified"] += 1
+            elif state == "retry":
+                summary["retried"] += 1
 
             future = executor.submit(preprocess_file, file_path, corpus, raw_metadata.get(file_path, {}))
             future_to_path[future] = (file_path, file_hash)
@@ -548,6 +592,17 @@ def _preprocess_corpus(corpus: str) -> None:
                 chunks = future.result()
             except Exception as exc:
                 logger.error("Processing error for %s: %s", file_path, exc)
+                file_records[file_path] = pc_mark_failed(
+                    file_records.get(file_path, {}),
+                    file_hash,
+                    PROCESSING_POLICY_VERSION,
+                    corpus,
+                    str(exc),
+                )
+                if file_records[file_path].get("status") == "quarantine":
+                    summary["quarantined"] += 1
+                else:
+                    summary["failed"] += 1
                 continue
 
             previous_hashes = set(file_records.get(file_path, {}).get("chunk_hashes", []))
@@ -563,6 +618,17 @@ def _preprocess_corpus(corpus: str) -> None:
                         refcounts.pop(old_hash, None)
                 if old_hash not in new_hashes_set:
                     _delete_chunk_file_if_unreferenced(old_hash, refcounts, seen_chunks, processed_path)
+
+            if not chunks:
+                file_records[file_path] = pc_mark_no_chunks(
+                    file_hash,
+                    PROCESSING_POLICY_VERSION,
+                    corpus,
+                    reason="Aucun chunk genere: document vide, faible qualite, langue non supportee ou format ignore.",
+                )
+                summary["skipped_no_chunks"] += 1
+                logger.info("Skipped no chunks [%s]: %s", corpus, Path(file_path).name)
+                continue
 
             for chunk in chunks:
                 chunk_hash = chunk["metadata"]["chunk_hash"]
@@ -582,11 +648,13 @@ def _preprocess_corpus(corpus: str) -> None:
             for chunk_hash in new_hashes_set:
                 refcounts[chunk_hash] = refcounts.get(chunk_hash, 0) + 1
 
-            file_records[file_path] = {
-                "file_hash": file_hash,
-                "chunk_hashes": list(dict.fromkeys(new_hashes)),
-                "policy_version": PROCESSING_POLICY_VERSION,
-            }
+            file_records[file_path] = pc_mark_processed(
+                file_hash,
+                list(dict.fromkeys(new_hashes)),
+                PROCESSING_POLICY_VERSION,
+                corpus,
+            )
+            summary["processed"] += 1
 
             logger.info(
                 "Processed [%s]: %s -> %s chunks (%s saved, %s overwritten)",
@@ -598,15 +666,17 @@ def _preprocess_corpus(corpus: str) -> None:
             )
 
     save_cache({"version": 2, "files": file_records}, cache_file)
-    logger.info("Processing completed successfully for corpus=%s.", corpus)
+    logger.info("Processing completed successfully for corpus=%s. Summary=%s", corpus, summary)
+    return summary
 
 
-def preprocess_all(corpus: str = "all") -> None:
+def preprocess_all(corpus: str = "all") -> Dict:
     if corpus in {"main", "archive", "drive"}:
-        _preprocess_corpus(corpus)
-        return
+        return {"status": "ok", "corpora": [_preprocess_corpus(corpus)]}
+    summaries = []
     for selected in ("main", "archive", "drive"):
-        _preprocess_corpus(selected)
+        summaries.append(_preprocess_corpus(selected))
+    return {"status": "ok", "corpora": summaries}
 
 
 if __name__ == "__main__":

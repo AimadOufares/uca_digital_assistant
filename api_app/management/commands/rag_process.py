@@ -19,3 +19,14 @@ class Command(BaseCommand):
         self.stdout.write(
             self.style.SUCCESS(f"Processing termine: {result['step']} ({result['corpus']})")
         )
+        for summary in result.get("corpora", []):
+            self.stdout.write(
+                "  "
+                f"{summary.get('corpus')}: "
+                f"detected={summary.get('detected', 0)}, "
+                f"processed={summary.get('processed', 0)}, "
+                f"skipped={summary.get('skipped_unchanged', 0)}, "
+                f"no_chunks={summary.get('skipped_no_chunks', 0)}, "
+                f"failed={summary.get('failed', 0)}, "
+                f"quarantined={summary.get('quarantined', 0)}"
+            )

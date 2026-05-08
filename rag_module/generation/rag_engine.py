@@ -7,7 +7,9 @@ from typing import Any, Dict, List
 
 from .prompt_builder import build_rag_prompt
 from ..adapters.llm_provider import LLMProviderAdapter
+from ..retrieval.query_intelligence import NORMALIZED_SERVICE_ALIAS_RULES, build_query_profile
 from ..shared.env_loader import load_env_file
+from ..shared.metadata_policy import normalize_text
 from ..shared.runtime import get_runtime_settings
 
 try:
@@ -60,11 +62,62 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name, "").strip().lower()
+    if not raw:
+        return default
+    return raw in {"1", "true", "yes", "on"}
+
+
 def _safe_sentences(text: str) -> List[str]:
     if not text:
         return []
-    parts = re.split(r"(?<=[.!?])\s+", text.strip())
-    return [p.strip() for p in parts if p.strip()]
+    prepared = re.sub(r"\s*([🔹🔸✅✔➡])\s*", r"\n\1 ", text.strip())
+    prepared = re.sub(r"\s+(#{1,6}\s+)", r"\n\1", prepared)
+    parts = re.split(r"(?:\n+|(?<=[.!?])\s+)", prepared)
+    return [p.strip(" -\t") for p in parts if p.strip(" -\t")]
+
+
+def _fallback_query_tokens(query: str) -> set[str]:
+    stopwords = {
+        "comment",
+        "obtenir",
+        "avoir",
+        "mon",
+        "ma",
+        "mes",
+        "sur",
+        "dans",
+        "pour",
+        "avec",
+        "une",
+        "des",
+        "les",
+        "le",
+        "la",
+        "un",
+        "du",
+    }
+    tokens = set(re.findall(r"\b[\w@']+\b", normalize_text(query)))
+    return {token for token in tokens if len(token) >= 3 and token not in stopwords}
+
+
+def _sentence_query_score(sentence: str, query_tokens: set[str]) -> int:
+    if not query_tokens:
+        return 0
+    normalized = normalize_text(sentence)
+    score = 0
+    for token in query_tokens:
+        if token in normalized:
+            if token in {"attestation", "attestations"}:
+                score += 5
+            elif token in {"uc@student", "ucastudent", "student"}:
+                score += 1
+            else:
+                score += 2
+    if {"attestation", "attestations"}.intersection(query_tokens) and "demande" in normalized:
+        score += 3
+    return score
 
 
 def _confidence_label_from_chunks(chunks: List[Dict]) -> str:
@@ -99,54 +152,49 @@ def _fallback_sources_section(chunks: List[Dict]) -> List[str]:
 
 def _extractive_fallback_answer(query: str, chunks: List[Dict]) -> str:
     if not chunks:
-        return (
-            "Reponse\n"
-            "Information non disponible dans mes sources actuelles.\n\n"
-            "Sources utiles\n"
-            "- Aucune source pertinente disponible.\n\n"
-            "Niveau de confiance: faible\n\n"
-            "Points a verifier\n"
-            "- Reformuler la question ou preciser la faculte, l'annee ou la procedure concernee."
-        )
+        return "Information non disponible dans mes sources actuelles."
 
-    lines: List[str] = []
-    for chunk in chunks[:3]:
+    query_tokens = _fallback_query_tokens(query)
+    candidates: List[tuple[int, int, str]] = []
+    for chunk_index, chunk in enumerate(chunks[:4]):
         for sentence in _safe_sentences(chunk.get("text", "")):
-            if len(sentence) >= 35:
-                lines.append(sentence)
-            if len(lines) >= 4:
-                break
+            if len(sentence) < 20:
+                continue
+            score = _sentence_query_score(sentence, query_tokens)
+            if score > 0:
+                candidates.append((score, -chunk_index, sentence))
+
+    candidates.sort(key=lambda item: (item[0], item[1], -len(item[2])), reverse=True)
+    lines: List[str] = []
+    seen_normalized: set[str] = set()
+    for _, _, sentence in candidates:
+        normalized_sentence = normalize_text(sentence)
+        if normalized_sentence in seen_normalized:
+            continue
+        seen_normalized.add(normalized_sentence)
+        lines.append(sentence)
         if len(lines) >= 4:
             break
 
     if not lines:
-        response_body = (
+        for chunk in chunks[:3]:
+            for sentence in _safe_sentences(chunk.get("text", "")):
+                if len(sentence) >= 35:
+                    lines.append(sentence)
+                if len(lines) >= 4:
+                    break
+            if len(lines) >= 4:
+                break
+
+    if not lines:
+        return (
             "J'ai trouve des documents lies a votre question, mais je n'ai pas pu "
             "produire une synthese suffisamment fiable automatiquement."
         )
-    else:
-        response_body = "Voici les informations les plus directement appuyees par les extraits recuperes :\n"
-        response_body += "\n".join(f"- {line}" for line in lines)
 
-    sources_lines = _fallback_sources_section(chunks)
-    if not sources_lines:
-        sources_block = "- Sources internes non identifiees clairement."
-    else:
-        sources_block = "\n".join(f"- {name}" for name in sources_lines)
-
-    confidence_label = _confidence_label_from_chunks(chunks)
-    points = (
-        "- Verifier les details exacts si vous avez besoin d'une date, d'un delai ou d'une procedure complete."
-        if confidence_label != "eleve"
-        else "- Aucun point critique supplementaire releve a partir des extraits recuperes."
-    )
-
-    return (
-        f"Reponse\n{response_body}\n\n"
-        f"Sources utiles\n{sources_block}\n\n"
-        f"Niveau de confiance: {confidence_label}\n\n"
-        f"Points a verifier\n{points}"
-    )
+    lead = "D'apres les informations retrouvees dans les documents UCA :"
+    bullet_lines = "\n".join(f"- {line}" for line in lines[:3])
+    return f"{lead}\n{bullet_lines}"
 
 
 def _abstention_answer() -> str:
@@ -343,6 +391,9 @@ def _normalize_sources(chunks: List[Dict]) -> List[Dict]:
             by_source[source_key] = {
                 "name": source_name,
                 "path": source_path,
+                "service_name": str(metadata.get("service_name") or "").strip(),
+                "official_url": str(metadata.get("official_url") or metadata.get("url") or "").strip(),
+                "title": str(metadata.get("title") or "").strip(),
                 "score": round(confidence["score"], 4),
                 "score_type": confidence["score_type"],
                 "hits": 1,
@@ -368,13 +419,51 @@ def _reorder_context(chunks: List[Dict]) -> List[Dict]:
     return left + right
 
 
+def _chunk_matches_explicit_service(chunk: Dict, requested_services: set[str]) -> bool:
+    metadata = chunk.get("metadata", {}) or {}
+    service_name = normalize_text(str(metadata.get("service_name") or ""))
+    official_url = normalize_text(str(metadata.get("official_url") or metadata.get("url") or ""))
+    source_name = normalize_text(str(metadata.get("source") or metadata.get("file_name") or ""))
+    text = normalize_text(str(chunk.get("text") or ""))
+    haystack = " ".join(part for part in (service_name, official_url, source_name, text[:600]) if part)
+
+    for requested in requested_services:
+        aliases = set(NORMALIZED_SERVICE_ALIAS_RULES.get(requested, set()) or set())
+        aliases.add(requested)
+        if any(alias and alias in haystack for alias in aliases):
+            return True
+    return False
+
+
+def _prioritize_explicit_service_chunks(query: str, chunks: List[Dict]) -> tuple[List[Dict], Dict[str, Any]]:
+    query_profile = build_query_profile(query)
+    requested_services = {normalize_text(service) for service in query_profile.get("services", []) if normalize_text(service)}
+    if not requested_services:
+        return chunks, {"requested_services": [], "service_filtered": False}
+
+    matching = [chunk for chunk in chunks if _chunk_matches_explicit_service(chunk, requested_services)]
+    if not matching:
+        return chunks, {
+            "requested_services": sorted(requested_services),
+            "service_filtered": False,
+            "service_match_count": 0,
+        }
+
+    return matching, {
+        "requested_services": sorted(requested_services),
+        "service_filtered": True,
+        "service_match_count": len(matching),
+        "service_original_count": len(chunks),
+    }
+
+
 class RAGEngine:
-    def __init__(self, retrieval_k: int = DEFAULT_RETRIEVAL_K, prompt_style: str = "auto", use_hyde: bool = True):
+    def __init__(self, retrieval_k: int = DEFAULT_RETRIEVAL_K, prompt_style: str = "auto", use_hyde: bool = False):
         retrieval_k_from_env = _env_int("RAG_RETRIEVAL_K", retrieval_k)
         self.retrieval_k = max(1, retrieval_k_from_env)
         env_prompt_style = os.getenv("RAG_PROMPT_STYLE", prompt_style).strip().lower()
         self.prompt_style = env_prompt_style if env_prompt_style in {"auto", "standard", "concise", "compact"} else "auto"
-        self.use_hyde = use_hyde
+        self.use_hyde = _env_bool("RAG_USE_HYDE", use_hyde)
 
     def _llm_is_available(self) -> bool:
         """Vérifie rapidement si un LLM est disponible avant de tenter HyDE."""
@@ -455,7 +544,9 @@ class RAGEngine:
         retrieval_meta = dict(retrieval_payload.get("meta", {}) or {})
         if not chunks:
             return {"answer": _abstention_answer(), "sources": [], "retrieval_meta": retrieval_meta}
-            
+
+        chunks, service_filter_meta = _prioritize_explicit_service_chunks(cleaned_query, chunks)
+        retrieval_meta.update(service_filter_meta)
         chunks = _reorder_context(chunks)
         
         try:

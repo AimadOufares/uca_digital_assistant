@@ -240,6 +240,7 @@ def score_chunk_thematic_match(chunk: Dict, query_profile: Dict[str, Any]) -> Di
     haystack = _chunk_haystack(chunk)
     chunk_topics = _chunk_topics(chunk, haystack)
     chunk_tokens = _tokenize_normalized(haystack)
+    text_tokens = _tokenize_normalized(str(chunk.get("text") or ""))
     metadata_phrases = [
         normalize_text(str(item))
         for item in [*(metadata.get("retrieval_keywords", []) or []), *(metadata.get("main_actions", []) or [])]
@@ -272,6 +273,11 @@ def score_chunk_thematic_match(chunk: Dict, query_profile: Dict[str, Any]) -> Di
     }
     matched_services = sorted(query_services.intersection(chunk_services))
     matched_intents = sorted(query_intents.intersection(metadata_intents))
+    matched_text_intents = sorted(
+        intent
+        for intent in query_intents
+        if any(token == intent or token.startswith(intent) or intent.startswith(token) for token in text_tokens)
+    )
     matched_topics = sorted(primary_topics.intersection(chunk_topics.keys()))
     anchor_topic_hits: Dict[str, List[str]] = {}
     for topic in matched_topics:
@@ -288,8 +294,20 @@ def score_chunk_thematic_match(chunk: Dict, query_profile: Dict[str, Any]) -> Di
     for topic in primary_topics:
         allowed_document_types.update(NORMALIZED_QUERY_TOPIC_RULES.get(topic, {}).get("allowed_document_types", set()))
     doc_type_match = bool(metadata_doc_type and metadata_doc_type in allowed_document_types)
-    matched_informative_tokens = sorted(informative_tokens.intersection(chunk_tokens.union(metadata_tokens)))
-    informative_coverage = (float(len(matched_informative_tokens)) / float(len(informative_tokens)) if informative_tokens else 0.0)
+    matched_text_informative_tokens = sorted(informative_tokens.intersection(text_tokens))
+    matched_metadata_informative_tokens = sorted(informative_tokens.intersection(metadata_tokens))
+    matched_informative_tokens = sorted(set(matched_text_informative_tokens).union(matched_metadata_informative_tokens))
+    text_informative_coverage = (
+        float(len(matched_text_informative_tokens)) / float(len(informative_tokens))
+        if informative_tokens
+        else 0.0
+    )
+    metadata_informative_coverage = (
+        float(len(matched_metadata_informative_tokens)) / float(len(informative_tokens))
+        if informative_tokens
+        else 0.0
+    )
+    informative_coverage = max(text_informative_coverage, metadata_informative_coverage * 0.45)
     score = 0.35 if not primary_topics else 0.0
     reasons: List[str] = []
     if anchor_topic_hits:
@@ -331,6 +349,9 @@ def score_chunk_thematic_match(chunk: Dict, query_profile: Dict[str, Any]) -> Di
     if matched_intents:
         score += 0.2 + (0.04 * min(2, len(matched_intents) - 1))
         reasons.append("intent_match")
+        if matched_text_intents:
+            score += 0.14
+            reasons.append("intent_text_match")
     elif query_intents:
         score -= 0.18
         reasons.append("intent_missing")
@@ -388,9 +409,14 @@ def score_chunk_thematic_match(chunk: Dict, query_profile: Dict[str, Any]) -> Di
         "matched_topics": matched_topics,
         "matched_services": matched_services,
         "matched_intents": matched_intents,
+        "matched_text_intents": matched_text_intents,
         "anchor_topic_hits": anchor_topic_hits,
         "matched_informative_tokens": matched_informative_tokens,
+        "matched_text_informative_tokens": matched_text_informative_tokens,
+        "matched_metadata_informative_tokens": matched_metadata_informative_tokens,
         "informative_coverage": round(informative_coverage, 4),
+        "text_informative_coverage": round(text_informative_coverage, 4),
+        "metadata_informative_coverage": round(metadata_informative_coverage, 4),
         "conflicting_topics": sorted(conflicting_topics),
         "matched_levels": matched_levels,
         "chunk_topics": sorted(chunk_topics.keys()),

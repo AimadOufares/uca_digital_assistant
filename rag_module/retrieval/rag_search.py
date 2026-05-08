@@ -563,15 +563,44 @@ def rerank_chunks(query: str, chunks_list: List[Dict], top_k: int = TOP_K_FINAL)
     return selected
 
 
-def truncate_chunks(chunks_list: List[Dict], max_chars: int = MAX_CONTEXT_CHARS) -> List[Dict]:
+def _query_clip_window(text: str, query: str, max_len: int) -> str:
+    if len(text) <= max_len or not query:
+        return text[:max_len]
+    normalized_text = unidecode.unidecode(text).lower()
+    query_tokens = [
+        token
+        for token in re.findall(r"\b[\w@']+\b", normalize_text(query))
+        if len(token) >= 4 and token not in {"comment", "obtenir", "avec", "dans", "pour"}
+    ]
+    hit_positions = [normalized_text.find(token) for token in query_tokens if normalized_text.find(token) >= 0]
+    if not hit_positions:
+        return text[:max_len]
+    center = min(hit_positions)
+    start = max(0, center - max_len // 3)
+    end = min(len(text), start + max_len)
+    if end - start < max_len:
+        start = max(0, end - max_len)
+    prefix = "... " if start > 0 else ""
+    suffix = " ..." if end < len(text) else ""
+    return f"{prefix}{text[start:end].strip()}{suffix}"
+
+
+def truncate_chunks(chunks_list: List[Dict], max_chars: int = MAX_CONTEXT_CHARS, query: str = "") -> List[Dict]:
     total = 0
     selected = []
+    max_per_chunk = max(450, max_chars // 3)
     for chunk in chunks_list:
-        text = chunk.get("text", "")
-        if total + len(text) > max_chars and selected:
+        text = chunk.get("text", "") or ""
+        remaining = max_chars - total
+        if remaining <= 0:
             break
-        selected.append(chunk)
-        total += len(text)
+        clipped_text = _query_clip_window(text, query, min(len(text), remaining, max_per_chunk))
+        if len(clipped_text) < min(120, len(text)) and selected:
+            break
+        enriched = dict(chunk)
+        enriched["text"] = clipped_text
+        selected.append(enriched)
+        total += len(clipped_text)
     return selected
 
 
@@ -617,7 +646,7 @@ def run_hybrid_search_debug(raw_query: str, top_k: int = TOP_K_FINAL) -> Dict[st
         top_k=top_k,
     )
     abstention = decide_retrieval_abstention(final_ranked, guardrail_diagnostics.get("query_profile", {}))
-    final_results = [] if abstention["abstain"] else truncate_chunks(final_ranked, MAX_CONTEXT_CHARS)
+    final_results = [] if abstention["abstain"] else truncate_chunks(final_ranked, MAX_CONTEXT_CHARS, query=query)
 
     logger.info(
         "Retrieval debug | dense=%s bm25=%s merged=%s guarded=%s final=%s abstain=%s reason=%s",

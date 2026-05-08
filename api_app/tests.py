@@ -11,10 +11,14 @@ from rest_framework import status
 from rest_framework.test import APITestCase
 
 from api_app.models import Conversation
+from api_app.services.conversation_context import build_conversation_context, update_conversation_context
+from api_app.views import _sanitize_answer_text, _sanitize_sources
+from rag_module.evaluation.evaluate_rag import evaluate_context
 from rag_module.adapters.vector_store import FaissVectorStoreAdapter
 from rag_module.adapters.storage import DocumentStorage
 from rag_module.adapters.llm_provider import LLMProviderAdapter
 from rag_module.contracts import AnswerResult
+from rag_module.generation.rag_engine import _prioritize_explicit_service_chunks
 from rag_module.offline.indexing import load_chunks
 from rag_module.offline.ingestion_utils import (
     _download_document,
@@ -23,6 +27,12 @@ from rag_module.offline.ingestion_utils import (
     default_seeds,
 )
 from rag_module.offline.processing import clean_text
+from rag_module.offline.processing_cache import (
+    classify_document_state,
+    mark_failed,
+    mark_no_chunks,
+    mark_processed,
+)
 from rag_module.retrieval.rag_search import get_candidate_reranker_names, get_reranker
 from rag_module.shared.metadata_policy import prepare_chunk_metadata
 from rag_module.services.health import build_ready_health
@@ -64,7 +74,9 @@ class ChatApiTests(APITestCase):
         self.assertEqual(payload["sources"], [])
         self.assertEqual(payload["confidence"], "moyen")
         self.assertEqual(payload["backend"], "faiss")
-        self.assertEqual(payload["retrieval_meta"], {})
+        self.assertEqual(payload["retrieval_meta"]["original_question"], "Bonjour")
+        self.assertEqual(payload["retrieval_meta"]["rewritten_question"], "Bonjour")
+        self.assertFalse(payload["retrieval_meta"]["conversation_context_used"])
         self.assertIn("conversation_id", payload)
         conversation = Conversation.objects.get(pk=payload["conversation_id"])
         self.assertEqual(conversation.user, self.student_user)
@@ -149,6 +161,45 @@ class ChatApiTests(APITestCase):
         selected.refresh_from_db()
         self.assertEqual(selected.messages.count(), 2)
 
+    @patch("api_app.views.answer_question")
+    def test_chat_post_rewrites_follow_up_question_with_conversation_context(self, mocked_answer_question):
+        mocked_answer_question.return_value = AnswerResult(
+            answer="Reponse contexte",
+            sources=[{"name": "UC@Student", "service_name": "UC@Student", "score": 0.9}],
+            confidence="eleve",
+            backend="faiss",
+            retrieval_meta={},
+        )
+        conversation = Conversation.objects.create(
+            user=self.student_user,
+            title="Attestation",
+            context_summary="Contexte courant: service UC@Student; intention attestation.",
+            context_meta={
+                "service": "UC@Student",
+                "intent": "attestation",
+                "main_topic": "attestation",
+                "entities": ["attestation"],
+            },
+        )
+        conversation.messages.create(role="user", content="Comment obtenir mon attestation sur UC@Student ?")
+        self.client.force_login(self.student_user)
+
+        response = self.client.post(
+            reverse("api-chat"),
+            {"message": "Et pour les delais ?", "conversation_id": conversation.id},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        request_arg = mocked_answer_question.call_args.args[0]
+        self.assertEqual(request_arg.question, "Quel est le delai pour attestation sur UC@Student ?")
+        payload = response.json()
+        self.assertTrue(payload["retrieval_meta"]["conversation_context_used"])
+        self.assertEqual(payload["retrieval_meta"]["original_question"], "Et pour les delais ?")
+        self.assertEqual(payload["retrieval_meta"]["rewritten_question"], "Quel est le delai pour attestation sur UC@Student ?")
+        conversation.refresh_from_db()
+        self.assertEqual(conversation.context_meta["last_rewritten_query"], "Quel est le delai pour attestation sur UC@Student ?")
+
     def test_chat_conversation_can_be_renamed(self):
         conversation = Conversation.objects.create(user=self.student_user, title="Ancien titre")
         self.client.force_login(self.student_user)
@@ -172,6 +223,114 @@ class ChatApiTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         conversation.refresh_from_db()
         self.assertTrue(conversation.is_archived)
+
+    def test_sanitize_answer_text_removes_structured_sections(self):
+        raw = (
+            "Reponse\n"
+            "1. Connectez-vous a UC@Student.\n"
+            "2. Ouvrez la rubrique des demandes administratives.\n\n"
+            "Sources utiles\n"
+            "- guide.pdf\n\n"
+            "Niveau de confiance: eleve\n\n"
+            "Points a verifier\n"
+            "- Aucun"
+        )
+
+        cleaned = _sanitize_answer_text(raw)
+
+        self.assertEqual(
+            cleaned,
+            "1. Connectez-vous a UC@Student.\n2. Ouvrez la rubrique des demandes administratives.",
+        )
+
+    def test_sanitize_answer_text_organizes_procedure_answer(self):
+        raw = (
+            "D'apres les informations retrouvees dans les documents UCA :\n"
+            "- Espace d'administration UC@Student L'espace d'administration permet aux etablissements de gerer les modules.\n"
+            "- Demandes administratives : effectuez vos demandes de diplomes, releves de notes et certificats en ligne.\n"
+            "- Le service permet aussi le suivi des demandes."
+        )
+
+        cleaned = _sanitize_answer_text(raw, question="Comment obtenir mon attestation sur UC@Student ?")
+
+        self.assertEqual(
+            cleaned,
+            "D'apres les sources disponibles, l'attestation se demande en ligne depuis la rubrique "
+            "\"Demandes administratives\" de UC@Student.\n"
+            "Cette rubrique permet d'effectuer vos demandes de diplomes, releves de notes et certificats en ligne.\n\n"
+            "1. Connectez-vous a UC@Student.\n"
+            "2. Ouvrez la rubrique \"Demandes administratives\".\n"
+            "3. Selectionnez la demande d'attestation ou de certificat si elle est proposee a votre niveau.\n\n"
+            "Remarque: les extraits recuperes ne detaillent pas davantage le chemin complet, les delais ou les pieces a fournir.",
+        )
+
+    def test_sanitize_answer_text_formats_ucastudent_attestation_as_clear_procedure(self):
+        raw = (
+            "D'apres les informations retrouvees dans les documents UCA :\n"
+            "- Demandes Administratives Effectuez vos demandes de diplomes, releves de notes et certificats en ligne.\n"
+            "- Avantages cles de UC@Student."
+        )
+
+        cleaned = _sanitize_answer_text(raw, question="Comment obtenir mon attestation sur UC@Student ?")
+
+        self.assertEqual(
+            cleaned,
+            "D'apres les sources disponibles, l'attestation se demande en ligne depuis la rubrique "
+            "\"Demandes administratives\" de UC@Student.\n"
+            "Cette rubrique permet d'effectuer vos demandes de diplomes, releves de notes et certificats en ligne.\n\n"
+            "1. Connectez-vous a UC@Student.\n"
+            "2. Ouvrez la rubrique \"Demandes administratives\".\n"
+            "3. Selectionnez la demande d'attestation ou de certificat si elle est proposee a votre niveau.\n\n"
+            "Remarque: les extraits recuperes ne detaillent pas davantage le chemin complet, les delais ou les pieces a fournir.",
+        )
+
+    def test_sanitize_sources_prefers_service_name_and_removes_hashes(self):
+        raw_sources = [
+            {
+                "name": "ucastudent.uca.ma_0a18fe3a94.html",
+                "path": "ucastudent.uca.ma_0a18fe3a94.html",
+                "service_name": "ucastudent",
+                "official_url": "https://ucastudent.uca.ma/attestation",
+                "score": 1.0,
+            },
+            {
+                "name": "V2 - Fiche Espace de suivi des diplômes.docx",
+                "path": "V2 - Fiche Espace de suivi des diplômes.docx",
+                "score": 0.91,
+            },
+        ]
+
+        cleaned = _sanitize_sources(raw_sources)
+
+        self.assertEqual(cleaned[0]["name"], "UC@Student")
+        self.assertEqual(cleaned[1]["name"], "V2 Fiche Espace de suivi des diplômes")
+
+    def test_prioritize_explicit_service_chunks_keeps_matching_service_only(self):
+        chunks = [
+            {
+                "text": "UCAPLAT permet de suivre les cours et de deposer les devoirs.",
+                "metadata": {
+                    "service_name": "UCAPLAT",
+                    "official_url": "https://ucaplat.uca.ma",
+                    "source": "ucaplat-guide",
+                },
+            },
+            {
+                "text": "Le centre de conferences accueille les evenements institutionnels.",
+                "metadata": {
+                    "service_name": "Centre de conférences",
+                    "official_url": "https://conferences.uca.ma",
+                    "source": "conference-guide",
+                },
+            },
+        ]
+
+        filtered, meta = _prioritize_explicit_service_chunks("A quoi sert la plateforme UCAPLAT ?", chunks)
+
+        self.assertEqual(len(filtered), 1)
+        self.assertEqual(filtered[0]["metadata"]["service_name"], "UCAPLAT")
+        self.assertTrue(meta["service_filtered"])
+        self.assertEqual(meta["requested_services"], ["ucaplat"])
 
 
 class StudentAuthTests(APITestCase):
@@ -227,6 +386,99 @@ class StudentAuthTests(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_302_FOUND)
         self.assertIn("/login/", response.headers["Location"])
+
+    def test_logout_post_disconnects_student(self):
+        user = get_user_model().objects.create_user(
+            username="student-logout",
+            email="student.logout@uca.ac.ma",
+            password="Secret12345!",
+        )
+        self.client.force_login(user)
+
+        response = self.client.post(reverse("student-logout"))
+
+        self.assertEqual(response.status_code, status.HTTP_302_FOUND)
+        self.assertEqual(response.headers["Location"], reverse("student-login"))
+        self.assertNotIn("_auth_user_id", self.client.session)
+
+
+class ConversationContextTests(APITestCase):
+    def setUp(self):
+        super().setUp()
+        self.user = get_user_model().objects.create_user(
+            username="context-user",
+            email="context@uca.ac.ma",
+            password="Secret12345!",
+        )
+
+    def test_first_question_does_not_use_context_but_updates_it(self):
+        conversation = Conversation.objects.create(user=self.user)
+
+        context_payload = build_conversation_context(conversation, "Comment obtenir mon attestation sur UC@Student ?")
+
+        self.assertFalse(context_payload["context_used"])
+        self.assertEqual(context_payload["rewritten_question"], "Comment obtenir mon attestation sur UC@Student ?")
+        update_conversation_context(
+            conversation,
+            "Comment obtenir mon attestation sur UC@Student ?",
+            "Reponse",
+            MagicMock(sources=[]),
+            context_payload=context_payload,
+        )
+        conversation.refresh_from_db()
+        self.assertEqual(conversation.context_meta["service"], "UC@Student")
+        self.assertEqual(conversation.context_meta["intent"], "attestation")
+
+    def test_follow_up_uses_existing_context(self):
+        conversation = Conversation.objects.create(
+            user=self.user,
+            context_summary="Contexte courant: service UC@Student; intention attestation.",
+            context_meta={"service": "UC@Student", "intent": "attestation", "entities": ["attestation"]},
+        )
+        conversation.messages.create(role="user", content="Comment obtenir mon attestation sur UC@Student ?")
+
+        context_payload = build_conversation_context(conversation, "Et pour les delais ?")
+
+        self.assertTrue(context_payload["context_used"])
+        self.assertEqual(context_payload["rewritten_question"], "Quel est le delai pour attestation sur UC@Student ?")
+
+    def test_new_service_resets_context_usage(self):
+        conversation = Conversation.objects.create(
+            user=self.user,
+            context_summary="Contexte courant: service UC@Student; intention notes.",
+            context_meta={"service": "UC@Student", "intent": "notes", "entities": ["notes"]},
+        )
+
+        context_payload = build_conversation_context(conversation, "Comment candidater sur PEDOC ?")
+
+        self.assertFalse(context_payload["context_used"])
+        self.assertTrue(context_payload["service_changed"])
+        self.assertEqual(context_payload["rewritten_question"], "Comment candidater sur PEDOC ?")
+
+
+class ContextEvaluationTests(APITestCase):
+    @patch("rag_module.evaluation.evaluate_rag._retrieval_metrics")
+    def test_context_evaluation_builds_summary_report(self, mocked_retrieval_metrics):
+        mocked_retrieval_metrics.return_value = {
+            "precision_at_k": 1.0,
+            "coverage_at_k": 0.75,
+            "hit_at_k": 1,
+            "latency_ms": 10.0,
+            "retrieved": 1,
+            "relevant": 1,
+            "best_match_score": 0.75,
+            "service_top1_match": 1,
+            "abstained": 0,
+            "abstain_reason": "",
+        }
+
+        report = evaluate_context(top_k=5)
+
+        self.assertEqual(report["benchmark"], "context")
+        self.assertEqual(report["conversations_evaluated"], 8)
+        self.assertGreaterEqual(report["turns_evaluated"], 32)
+        self.assertIn("rewrite_match_rate", report["summary"])
+        self.assertIn("context_used_accuracy", report["summary"])
 
 
 class HealthApiTests(APITestCase):
@@ -525,6 +777,95 @@ class IngestionPolicyTests(APITestCase):
 
 
 class ProcessingAndIndexingTests(APITestCase):
+    def test_processing_manifest_detects_new_modified_and_processed_documents(self):
+        processed_record = mark_processed("hash-1", ["chunk-1"], "policy-v1", "drive")
+
+        self.assertEqual(
+            classify_document_state(
+                "guide.docx",
+                "hash-1",
+                processed_record,
+                has_all_chunks=True,
+                policy_version="policy-v1",
+            ),
+            "processed",
+        )
+        self.assertEqual(
+            classify_document_state(
+                "guide.docx",
+                "hash-2",
+                processed_record,
+                has_all_chunks=True,
+                policy_version="policy-v1",
+            ),
+            "modified",
+        )
+        self.assertEqual(
+            classify_document_state(
+                "new.docx",
+                "hash-new",
+                None,
+                has_all_chunks=False,
+                policy_version="policy-v1",
+            ),
+            "new",
+        )
+
+    def test_processing_manifest_retries_failed_then_quarantines(self):
+        failed_once = mark_failed(None, "hash-1", "policy-v1", "drive", "extract failed", max_failures=3)
+
+        self.assertEqual(failed_once["status"], "failed")
+        self.assertEqual(
+            classify_document_state(
+                "broken.pdf",
+                "hash-1",
+                failed_once,
+                has_all_chunks=False,
+                policy_version="policy-v1",
+            ),
+            "retry",
+        )
+
+        failed_twice = mark_failed(failed_once, "hash-1", "policy-v1", "drive", "extract failed", max_failures=3)
+        quarantined = mark_failed(failed_twice, "hash-1", "policy-v1", "drive", "extract failed", max_failures=3)
+
+        self.assertEqual(quarantined["status"], "quarantine")
+        self.assertEqual(
+            classify_document_state(
+                "broken.pdf",
+                "hash-1",
+                quarantined,
+                has_all_chunks=False,
+                policy_version="policy-v1",
+            ),
+            "quarantine",
+        )
+
+    def test_processing_manifest_skips_no_chunk_documents_until_changed(self):
+        skipped = mark_no_chunks("hash-1", "policy-v1", "drive")
+
+        self.assertEqual(skipped["status"], "skipped")
+        self.assertEqual(
+            classify_document_state(
+                "weak.html",
+                "hash-1",
+                skipped,
+                has_all_chunks=False,
+                policy_version="policy-v1",
+            ),
+            "skipped",
+        )
+        self.assertEqual(
+            classify_document_state(
+                "weak.html",
+                "hash-2",
+                skipped,
+                has_all_chunks=False,
+                policy_version="policy-v1",
+            ),
+            "modified",
+        )
+
     def test_clean_text_preserves_drive_urls(self):
         text = "Plateforme officielle\nhttps://pucastaff.uca.ma/\nDescription"
 

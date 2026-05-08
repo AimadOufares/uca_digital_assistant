@@ -46,6 +46,7 @@ Documentation detaillee:
 - `docs/RAG_ARCHITECTURE.md`
 - `docs/REFERENCE_VERSION.md`
 - `docs/DEMO_GUIDE.md`
+- `docs/SOUTENANCE_TECHNIQUE.md`
 
 ## Structure du projet
 
@@ -168,7 +169,10 @@ RAG_LLM_PROVIDER=lmstudio
 LM_STUDIO_BASE_URL=http://127.0.0.1:1234/v1
 LM_STUDIO_API_KEY=lm-studio
 RAG_LM_STUDIO_MODEL=mistral-7b-instruct-v0.3
-RAG_REQUEST_TIMEOUT=180
+RAG_USE_HYDE=false
+RAG_USE_RERANK=false
+RAG_REQUEST_TIMEOUT=20
+RAG_LM_STUDIO_MAX_TOKENS=420
 ```
 
 ## Reproductibilite
