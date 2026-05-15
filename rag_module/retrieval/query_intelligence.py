@@ -25,13 +25,26 @@ QUERY_CANONICAL_REPLACEMENTS: List[Tuple[str, str]] = [
 
 SERVICE_ALIAS_RULES: Dict[str, Set[str]] = {
     "ucastudent": {"uc@student", "ucastudent", "uc student"},
-    "ucaplat": {"ucaplat"},
+    "ucaplat": {"ucaplat", "uca plat", "plateforme ucaplat", "plateforme pedagogique", "cours en ligne", "devoirs en ligne"},
     "pedoc": {"pedoc"},
     "cip": {"cip", "centre d innovation pedagogique", "centre innovation pedagogique"},
     "e-candidature": {"e-candidature", "e candidature", "ecandidature"},
     "diplomes": {"espace diplomes", "espace diplomes", "e diplome", "diplomes.uca.ma"},
-    "pucastaff": {"pucastaff"},
+    "pucastaff": {"pucastaff", "puca staff"},
     "hpc": {"hpc", "hpc uca"},
+    "mobilite internationale": {"mobilite internationale", "mobilite", "mobilite-internationale", "bourse mobilite"},
+    "soutien-recherche": {"soutien-recherche", "soutien recherche", "soutien a la recherche"},
+    "clubs des etudiants": {
+        "clubs des etudiants",
+        "clubs etudiants",
+        "club etudiant",
+        "association etudiante",
+        "associations etudiantes",
+        "vie associative",
+    },
+    "centre conferences": {"centre conferences", "centre de conferences", "centre-de-conferences"},
+    "appels a projets": {"appels a projets", "appel a projets", "call uca", "call for projects"},
+    "club uca": {"club uca", "club de l universite"},
 }
 
 QUERY_INTENT_RULES: Dict[str, Set[str]] = {
@@ -76,6 +89,28 @@ NORMALIZED_LEVEL_KEYWORDS = {level: {normalize_text(keyword) for keyword in keyw
 NORMALIZED_SERVICE_ALIAS_RULES: Dict[str, Set[str]] = {service: {normalize_text(alias) for alias in aliases if normalize_text(alias)} for service, aliases in SERVICE_ALIAS_RULES.items()}
 NORMALIZED_QUERY_INTENT_RULES: Dict[str, Set[str]] = {intent: {normalize_text(alias) for alias in aliases if normalize_text(alias)} for intent, aliases in QUERY_INTENT_RULES.items()}
 NORMALIZED_FACULTY_RULES: Dict[str, str] = {}
+
+SERVICE_CONTENT_HINTS: Dict[str, Dict[str, Set[str]]] = {
+    "ucaplat": {
+        "positive": {"cours", "devoir", "devoirs", "examen", "pedagogique", "enseignant", "etudiant", "apprentissage"},
+        "negative": {"analyse scientifique", "analyses scientifiques", "equipement", "equipements", "mutualises", "laboratoire"},
+    },
+    "clubs des etudiants": {
+        "positive": {"club etudiant", "clubs etudiants", "association etudiante", "vie associative", "subvention", "creer un club", "rejoindre un club"},
+        "negative": {"club uca", "oeuvre sociale", "reserver un espace", "evenements", "activites sociales"},
+    },
+    "club uca": {
+        "positive": {"club uca", "oeuvre sociale", "reserver un espace", "evenements", "activites sociales"},
+        "negative": {"club etudiant", "clubs etudiants", "association etudiante", "subvention", "creer un club"},
+    },
+}
+NORMALIZED_SERVICE_CONTENT_HINTS: Dict[str, Dict[str, Set[str]]] = {
+    service: {
+        kind: {normalize_text(value) for value in values if normalize_text(value)}
+        for kind, values in hints.items()
+    }
+    for service, hints in SERVICE_CONTENT_HINTS.items()
+}
 
 
 def _tokenize_normalized(text: str) -> Set[str]:
@@ -151,6 +186,15 @@ def _alias_matches_text(alias: str, normalized_text: str, text_tokens: Set[str])
         return alias in normalized_text
     alias_tokens = _tokenize_normalized(alias)
     return bool(alias_tokens) and alias_tokens.issubset(text_tokens)
+
+
+def _service_content_signal(service: str, haystack: str, text_tokens: Set[str]) -> Tuple[bool, bool]:
+    hints = NORMALIZED_SERVICE_CONTENT_HINTS.get(service, {})
+    positives = hints.get("positive", set())
+    negatives = hints.get("negative", set())
+    positive_match = any(_alias_matches_text(hint, haystack, text_tokens) for hint in positives)
+    negative_match = any(_alias_matches_text(hint, haystack, text_tokens) for hint in negatives)
+    return positive_match, negative_match
 
 
 def build_query_profile(query: str) -> Dict[str, Any]:
@@ -327,6 +371,18 @@ def score_chunk_thematic_match(chunk: Dict, query_profile: Dict[str, Any]) -> Di
     if matched_services:
         score += 0.42
         reasons.append("service_match")
+        service_positive = False
+        service_negative = False
+        for service in matched_services:
+            positive_match, negative_match = _service_content_signal(service, haystack, chunk_tokens)
+            service_positive = service_positive or positive_match
+            service_negative = service_negative or negative_match
+        if service_positive:
+            score += 0.12
+            reasons.append("service_content_hint_match")
+        if service_negative:
+            score -= 0.22
+            reasons.append("service_content_hint_conflict")
     elif query_services:
         score -= 0.28
         reasons.append("service_mismatch")
@@ -447,9 +503,17 @@ def apply_retrieval_guardrails(query: str, results: List[Dict], top_k: int, top_
         if support_score < min_support_score:
             should_drop = True
             drop_reasons.append("support_score_below_min")
-        if query_profile["has_strong_topic"] and not thematic.get("anchor_topic_hits") and float(thematic.get("informative_coverage", 0.0) or 0.0) < 0.2:
+        if (
+            query_profile["has_strong_topic"]
+            and not thematic.get("matched_services")
+            and not thematic.get("anchor_topic_hits")
+            and float(thematic.get("informative_coverage", 0.0) or 0.0) < 0.2
+        ):
             should_drop = True
             drop_reasons.append("anchor_topic_missing")
+        if query_profile.get("services") and not thematic.get("matched_services"):
+            should_drop = True
+            drop_reasons.append("explicit_service_mismatch")
         if thematic["conflicting_topics"] and float(thematic["thematic_score"]) <= topical_mismatch_drop_threshold:
             should_drop = True
             drop_reasons.append("topic_conflict")
@@ -495,6 +559,8 @@ def apply_post_rerank_guardrails(results: List[Dict], query_profile: Dict[str, A
         final_support = _clamp01((rerank_normalized * 0.56) + (hybrid_score * 0.22) + (thematic_score * 0.22))
         enriched["rerank_score_normalized"] = round(rerank_normalized, 4)
         enriched["final_support_score"] = round(final_support, 4)
+        if query_profile.get("services") and not enriched.get("matched_services"):
+            continue
         if query_profile.get("has_strong_topic") and thematic_score < min_thematic_score:
             continue
         if final_support < min_final_support_score:
@@ -521,7 +587,11 @@ def decide_retrieval_abstention(results: List[Dict], query_profile: Dict[str, An
         return {"abstain": True, "reason": "top_chunk_support_too_low"}
     if top_rerank_normalized < min_top_rerank_normalized:
         return {"abstain": True, "reason": "top_rerank_too_low"}
-    conflict_count = sum(1 for item in results[:3] if item.get("conflicting_topics"))
+    conflict_count = sum(
+        1
+        for item in results[:3]
+        if item.get("conflicting_topics") and not item.get("matched_services")
+    )
     if query_profile.get("has_strong_topic") and conflict_count >= 2:
         return {"abstain": True, "reason": "top_results_thematically_incoherent"}
     return {"abstain": False, "reason": ""}

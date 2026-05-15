@@ -4,6 +4,7 @@ __pycache__/
 *.pyo
 *.pyd
 *.env
+.tmp_test_chunks/
 env/
 venv/
 ENV/
@@ -22,4 +23,6 @@ media/
 
 # Dossier de données
 data_storage/
+reports/
+reunion/
 

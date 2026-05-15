@@ -5,6 +5,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Dashboard Admin RAG UCA</title>
+    <link rel="icon" type="image/png" href="{% static 'api_app/img/uca-logo.png' %}">
+    <link rel="apple-touch-icon" href="{% static 'api_app/img/uca-logo.png' %}">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
@@ -249,19 +251,17 @@
             <div class="section-head">
                 <div>
                     <p class="section-kicker">Maintenance</p>
-                    <h2 id="actions-title">Actions administrateur</h2>
+                    <h2 id="actions-title">Etat technique</h2>
                 </div>
             </div>
             <div class="action-grid">
                 <article class="panel stack">
-                    <h3>Rebuild</h3>
-                    <p>Traite seulement les documents nouveaux ou modifies, puis publie l'index.</p>
-                    <button class="uca-btn uca-btn-secondary" type="button" id="rebuild-drive-btn-bottom">Relancer rebuild drive</button>
+                    <h3>Pipeline incremental</h3>
+                    <p>Le rebuild drive traite seulement les documents nouveaux ou modifies avant de republier l'index.</p>
                 </article>
                 <article class="panel stack">
-                    <h3>Benchmark</h3>
-                    <p>Regenerer le dernier rapport d'evaluation metier.</p>
-                    <button class="uca-btn uca-btn-secondary" type="button" id="evaluate-drive-btn-bottom">Relancer benchmark drive</button>
+                    <h3>Evaluation</h3>
+                    <p>Le benchmark drive mesure si les sources retrouvees correspondent aux services attendus.</p>
                 </article>
                 <article class="panel stack">
                     <h3>Index actif</h3>
@@ -271,6 +271,6 @@
         </section>
     </main>
 
-    <script src="{% static 'api_app/admin_dashboard.js' %}?v=20260508-processing-summary" defer></script>
+    <script src="{% static 'api_app/admin_dashboard.js' %}?v=20260509-dashboard-cleanup" defer></script>
 </body>
 </html>

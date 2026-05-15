@@ -195,8 +195,13 @@ function renderDashboard(payload) {
     setText("kpi-chunks", String(activeIndex.chunk_count || 0));
     setText("kpi-sources", String(activeIndex.source_count || 0));
     setText("kpi-drive-docs", String(driveSync.document_count || 0));
-    setText("kpi-benchmark", evaluation.benchmark || "drive");
-    setText("kpi-benchmark-sub", `${evaluation.questions_evaluated || 0} questions evaluees`);
+    if (evaluation.summary) {
+        setText("kpi-benchmark", evaluation.benchmark || "drive");
+        setText("kpi-benchmark-sub", `${evaluation.questions_evaluated || 0} questions evaluees`);
+    } else {
+        setText("kpi-benchmark", "-");
+        setText("kpi-benchmark-sub", "Aucun benchmark charge.");
+    }
     setText("admin-index-note", activeIndex.build_id ? `Build ${activeIndex.build_id} - ${activeIndex.embedding_model || "-"}` : "Aucun index publie detecte.");
 
     renderDriveSync(driveSync);
@@ -267,8 +272,17 @@ function renderAuditSummary(latestReports) {
 }
 
 function renderEvaluation(evaluation) {
+    const body = byId("eval-table-body");
     if (!evaluation || !evaluation.summary) {
         setText("eval-summary-box", "Aucun benchmark drive disponible.");
+        setText("eval-service-accuracy", "-");
+        setText("eval-best-match", "-");
+        setText("eval-abstention", "-");
+        setText("eval-latency", "-");
+        if (body) {
+            clearNode(body);
+            body.appendChild(makeEmptyRow(5, "Aucun benchmark charge."));
+        }
         return;
     }
     const summary = evaluation.summary;
@@ -278,7 +292,6 @@ function renderEvaluation(evaluation) {
     setText("eval-abstention", percent(summary.abstention_rate));
     setText("eval-latency", `${fixed(summary.retrieval_latency_ms_avg, 0)} ms`);
 
-    const body = byId("eval-table-body");
     if (!body) return;
     clearNode(body);
     const rows = evaluation.rows || [];
@@ -449,8 +462,6 @@ function bindAction(id, handler) {
 
 bindAction("upload-drive-btn", uploadDriveDocument);
 bindAction("rebuild-drive-btn", rebuildDrive);
-bindAction("rebuild-drive-btn-bottom", rebuildDrive);
 bindAction("evaluate-drive-btn", evaluateDrive);
-bindAction("evaluate-drive-btn-bottom", evaluateDrive);
 
 loadDashboard();

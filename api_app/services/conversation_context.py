@@ -5,14 +5,25 @@ from typing import Any
 
 SERVICE_RULES = {
     "UC@Student": {"uc@student", "ucastudent", "student.uca", "uc student"},
-    "UCAPLAT": {"ucaplat", "uca plat"},
+    "UCAPLAT": {"ucaplat", "uca plat", "plateforme ucaplat", "plateforme pedagogique", "cours en ligne", "devoirs en ligne"},
     "PEDOC": {"pedoc"},
-    "CIP": {"cip"},
+    "CIP": {"cip", "centre d innovation pedagogique", "centre innovation pedagogique"},
     "PUCAStaff": {"pucastaff", "puca staff"},
     "Espace Diplomes": {"diplome", "diplomes", "e-diplome", "e diplome"},
-    "Mobilite internationale": {"mobilite", "bourse"},
+    "Mobilite internationale": {"mobilite internationale", "mobilite", "mobilite-internationale", "bourse", "bourse mobilite"},
     "HPC UCA": {"hpc", "calcul haute performance"},
-    "Soutien-Recherche": {"soutien recherche", "projet de recherche"},
+    "Soutien-Recherche": {"soutien-recherche", "soutien recherche", "soutien a la recherche", "projet de recherche"},
+    "Clubs des etudiants": {
+        "clubs des etudiants",
+        "clubs etudiants",
+        "club etudiant",
+        "association etudiante",
+        "associations etudiantes",
+        "vie associative",
+    },
+    "Centre de conferences": {"centre conferences", "centre de conferences", "centre-de-conferences"},
+    "Appels a Projets": {"appels a projets", "appel a projets", "call uca", "call for projects"},
+    "Club UCA": {"club uca", "club de l universite"},
 }
 
 INTENT_RULES = {
@@ -155,7 +166,7 @@ def rewrite_question_with_context(new_message: str, context_payload: dict[str, A
 
     meta = dict(context_payload.get("context_meta") or {})
     service = str(meta.get("service") or context_payload.get("detected_service") or "").strip()
-    intent = str(meta.get("intent") or meta.get("main_topic") or context_payload.get("detected_intent") or "").strip()
+    intent = str(context_payload.get("detected_intent") or meta.get("intent") or meta.get("main_topic") or "").strip()
     entities = list(meta.get("entities") or []) + list(context_payload.get("detected_entities") or [])
     topic = _topic_label(intent, entities)
     normalized = normalize_text(question)

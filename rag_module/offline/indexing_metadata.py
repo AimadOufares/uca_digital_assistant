@@ -159,6 +159,8 @@ def build_retrieval_keywords(metadata: Dict) -> List[str]:
         metadata.get("page_kind"),
         metadata.get("intent", []),
         metadata.get("main_actions", []),
+        metadata.get("workflow_steps", []),
+        metadata.get("official_url"),
     ]
     keywords = normalize_int_list(fields)
     return keywords[:12]
@@ -172,6 +174,8 @@ def build_retrieval_haystack(text: str, metadata: Dict) -> str:
         str(metadata.get("page_kind") or ""),
         " ".join(normalize_int_list(metadata.get("intent"))),
         " ".join(normalize_int_list(metadata.get("main_actions"))),
+        " ".join(normalize_int_list(metadata.get("workflow_steps"))),
+        str(metadata.get("official_url") or ""),
     ]
     prefix = normalize(" ".join(part for part in additions if part))
     if not prefix:

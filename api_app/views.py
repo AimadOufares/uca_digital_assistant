@@ -28,7 +28,7 @@ from rag_module.generation.rag_engine import RAGGenerationError, RAGIndexNotRead
 from rag_module.services.offline import run_evaluation, run_indexing, run_processing
 from rag_module.services.health import build_live_health, build_ready_health
 from rag_module.services.online import answer_question
-from rag_module.services.reports import build_dashboard_payload, build_drive_sync_status, latest_report_payload
+from rag_module.services.reports import build_dashboard_payload, latest_report_payload
 from rag_module.shared.runtime import get_runtime_settings
 
 logger = logging.getLogger(__name__)
@@ -273,7 +273,6 @@ def _serialize_drive_document(path: Path) -> dict:
     stat = path.stat()
     return {
         "name": path.name,
-        "size_bytes": stat.st_size,
         "size_kb": round(stat.st_size / 1024.0, 2),
         "updated_at": stat.st_mtime,
     }
@@ -299,7 +298,6 @@ class DriveDocumentsAPIView(AdminOnlyAPIView):
             {
                 "documents": documents,
                 "count": len(documents),
-                "drive_sync_status": build_drive_sync_status(),
             },
             status=status.HTTP_200_OK,
         )

@@ -25,19 +25,20 @@ def _latest_report_file(storage: DocumentStorage, prefix: str) -> Optional[Path]
     return files[0] if files else None
 
 
-def _latest_report_bundle(storage: DocumentStorage, prefix: str) -> Dict[str, object]:
+def _latest_report_bundle(storage: DocumentStorage, prefix: str, include_report: bool = True) -> Dict[str, object]:
     report_file = _latest_report_file(storage, prefix)
     if not report_file:
         return {"prefix": prefix, "available": False}
-    payload = storage.load_json(report_file)
-    return {
+    bundle = {
         "prefix": prefix,
         "available": True,
         "file_name": report_file.name,
         "file_path": str(report_file),
         "updated_at": datetime.fromtimestamp(report_file.stat().st_mtime).isoformat(),
-        "report": payload,
     }
+    if include_report:
+        bundle["report"] = storage.load_json(report_file)
+    return bundle
 
 
 def _active_index_summary(storage: DocumentStorage) -> Dict[str, object]:
@@ -106,11 +107,11 @@ def build_dashboard_payload() -> Dict[str, object]:
     ready = build_ready_health()
     settings = get_runtime_settings()
     latest_reports = {
-        "data_audit": _latest_report_bundle(storage, "data_audit"),
-        "raw_quality_audit": _latest_report_bundle(storage, "raw_quality_audit"),
-        "rag_eval": _latest_report_bundle(storage, "rag_eval_drive")
+        "data_audit": _latest_report_bundle(storage, "data_audit", include_report=False),
+        "raw_quality_audit": _latest_report_bundle(storage, "raw_quality_audit", include_report=False),
+        "rag_eval": _latest_report_bundle(storage, "rag_eval_drive", include_report=False)
         if _latest_report_file(storage, "rag_eval_drive")
-        else _latest_report_bundle(storage, "rag_eval"),
+        else _latest_report_bundle(storage, "rag_eval", include_report=False),
     }
     return {
         **reports,
