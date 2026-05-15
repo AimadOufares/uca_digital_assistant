@@ -2,18 +2,15 @@ import logging
 import math
 import os
 import re
-import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from .prompt_builder import build_rag_prompt
-from ..shared.context_resolution import (
-    allowed_establishments_for_resolution,
-    build_clarification_message,
-    build_out_of_scope_message,
-    resolve_context,
-)
+from ..adapters.llm_provider import LLMProviderAdapter
+from ..retrieval.query_intelligence import NORMALIZED_SERVICE_ALIAS_RULES, build_query_profile
 from ..shared.env_loader import load_env_file
+from ..shared.metadata_policy import normalize_text
+from ..shared.runtime import get_runtime_settings
 
 try:
     from openai import OpenAI
@@ -26,22 +23,21 @@ logger = logging.getLogger(__name__)
 
 
 class RAGIndexNotReadyError(RuntimeError):
-    """Raised when the Qdrant index is not available."""
+    """Raised when FAISS index or chunks are not available."""
 
 
 class RAGGenerationError(RuntimeError):
     """Raised when answer generation fails."""
 
 
-DEFAULT_LM_STUDIO_BASE_URL = "http://127.0.0.1:1234/v1"
+DEFAULT_LM_STUDIO_BASE_URL = ""
 DEFAULT_LM_STUDIO_MODEL = ""
 DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
 DEFAULT_MAX_TOKENS = 420
-DEFAULT_LM_STUDIO_MAX_TOKENS = 220
+DEFAULT_LM_STUDIO_MAX_TOKENS = 800
 DEFAULT_TEMPERATURE = 0.15
 DEFAULT_REQUEST_TIMEOUT = 120.0
 DEFAULT_RETRIEVAL_K = 4
-MIN_GENERATED_ANSWER_CHARS = 40
 
 
 def _env_int(name: str, default: int) -> int:
@@ -66,18 +62,62 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name, "").strip().lower()
+    if not raw:
+        return default
+    return raw in {"1", "true", "yes", "on"}
+
+
 def _safe_sentences(text: str) -> List[str]:
     if not text:
         return []
-    parts = re.split(r"(?<=[.!?])\s+", text.strip())
-    return [p.strip() for p in parts if p.strip()]
+    prepared = re.sub(r"\s*([🔹🔸✅✔➡])\s*", r"\n\1 ", text.strip())
+    prepared = re.sub(r"\s+(#{1,6}\s+)", r"\n\1", prepared)
+    parts = re.split(r"(?:\n+|(?<=[.!?])\s+)", prepared)
+    return [p.strip(" -\t") for p in parts if p.strip(" -\t")]
 
 
-def _safe_preview(text: str, max_chars: int = 220) -> str:
-    value = re.sub(r"\s+", " ", str(text or "")).strip()
-    if len(value) <= max_chars:
-        return value
-    return value[:max_chars].rstrip() + "..."
+def _fallback_query_tokens(query: str) -> set[str]:
+    stopwords = {
+        "comment",
+        "obtenir",
+        "avoir",
+        "mon",
+        "ma",
+        "mes",
+        "sur",
+        "dans",
+        "pour",
+        "avec",
+        "une",
+        "des",
+        "les",
+        "le",
+        "la",
+        "un",
+        "du",
+    }
+    tokens = set(re.findall(r"\b[\w@']+\b", normalize_text(query)))
+    return {token for token in tokens if len(token) >= 3 and token not in stopwords}
+
+
+def _sentence_query_score(sentence: str, query_tokens: set[str]) -> int:
+    if not query_tokens:
+        return 0
+    normalized = normalize_text(sentence)
+    score = 0
+    for token in query_tokens:
+        if token in normalized:
+            if token in {"attestation", "attestations"}:
+                score += 5
+            elif token in {"uc@student", "ucastudent", "student"}:
+                score += 1
+            else:
+                score += 2
+    if {"attestation", "attestations"}.intersection(query_tokens) and "demande" in normalized:
+        score += 3
+    return score
 
 
 def _confidence_label_from_chunks(chunks: List[Dict]) -> str:
@@ -112,155 +152,66 @@ def _fallback_sources_section(chunks: List[Dict]) -> List[str]:
 
 def _extractive_fallback_answer(query: str, chunks: List[Dict]) -> str:
     if not chunks:
-        return (
-            "Reponse\n"
-            "Information non disponible dans mes sources actuelles.\n\n"
-            "Sources utiles\n"
-            "- Aucune source pertinente disponible.\n\n"
-            "Niveau de confiance: faible\n\n"
-            "Points a verifier\n"
-            "- Reformuler la question ou preciser la faculte, l'annee ou la procedure concernee."
-        )
+        return "Information non disponible dans mes sources actuelles."
 
-    lines: List[str] = []
-    for chunk in chunks[:3]:
+    query_tokens = _fallback_query_tokens(query)
+    candidates: List[tuple[int, int, str]] = []
+    for chunk_index, chunk in enumerate(chunks[:4]):
         for sentence in _safe_sentences(chunk.get("text", "")):
-            if len(sentence) >= 35:
-                lines.append(sentence)
-            if len(lines) >= 4:
-                break
+            if len(sentence) < 20:
+                continue
+            score = _sentence_query_score(sentence, query_tokens)
+            if score > 0:
+                candidates.append((score, -chunk_index, sentence))
+
+    candidates.sort(key=lambda item: (item[0], item[1], -len(item[2])), reverse=True)
+    lines: List[str] = []
+    seen_normalized: set[str] = set()
+    for _, _, sentence in candidates:
+        normalized_sentence = normalize_text(sentence)
+        if normalized_sentence in seen_normalized:
+            continue
+        seen_normalized.add(normalized_sentence)
+        lines.append(sentence)
         if len(lines) >= 4:
             break
 
     if not lines:
-        response_body = (
+        for chunk in chunks[:3]:
+            for sentence in _safe_sentences(chunk.get("text", "")):
+                if len(sentence) >= 35:
+                    lines.append(sentence)
+                if len(lines) >= 4:
+                    break
+            if len(lines) >= 4:
+                break
+
+    if not lines:
+        return (
             "J'ai trouve des documents lies a votre question, mais je n'ai pas pu "
             "produire une synthese suffisamment fiable automatiquement."
         )
-    else:
-        response_body = "Voici les informations les plus directement appuyees par les extraits recuperes :\n"
-        response_body += "\n".join(f"- {line}" for line in lines)
 
-    sources_lines = _fallback_sources_section(chunks)
-    if not sources_lines:
-        sources_block = "- Sources internes non identifiees clairement."
-    else:
-        sources_block = "\n".join(f"- {name}" for name in sources_lines)
-
-    confidence_label = _confidence_label_from_chunks(chunks)
-    points = (
-        "- Verifier les details exacts si vous avez besoin d'une date, d'un delai ou d'une procedure complete."
-        if confidence_label != "eleve"
-        else "- Aucun point critique supplementaire releve a partir des extraits recuperes."
-    )
-
-    return (
-        f"Reponse\n{response_body}\n\n"
-        f"Sources utiles\n{sources_block}\n\n"
-        f"Niveau de confiance: {confidence_label}\n\n"
-        f"Points a verifier\n{points}"
-    )
+    lead = "D'apres les informations retrouvees dans les documents UCA :"
+    bullet_lines = "\n".join(f"- {line}" for line in lines[:3])
+    return f"{lead}\n{bullet_lines}"
 
 
 def _abstention_answer() -> str:
     return "Information non disponible dans mes sources actuelles."
 
 
-def _normalize_confidence_label(value: str) -> str:
-    normalized = str(value or "").strip().lower()
-    if normalized in {"eleve", "moyen", "faible"}:
-        return normalized
-    return "moyen"
-
-
-def _extract_primary_answer_text(answer: str) -> str:
-    text = str(answer or "").strip()
-    if not text:
-        return ""
-    match = re.search(
-        r"Reponse\s*(.*?)(?:\n\s*Sources utiles|\n\s*Niveau de confiance|\n\s*Points a verifier|\Z)",
-        text,
-        flags=re.IGNORECASE | re.DOTALL,
-    )
-    if match:
-        return match.group(1).strip()
-    return text
-
-
-def _ensure_structured_answer(answer: str, chunks: List[Dict]) -> str:
-    text = str(answer or "").strip()
-    if not text:
-        return ""
-
-    primary_answer = _extract_primary_answer_text(text)
-    sources = _fallback_sources_section(chunks)
-    if not sources:
-        sources = ["Aucune source pertinente disponible."]
-    confidence_label = _confidence_label_from_chunks(chunks)
-
-    has_reponse = bool(re.search(r"^\s*Reponse\b", text, flags=re.IGNORECASE | re.MULTILINE))
-    has_sources = bool(re.search(r"^\s*Sources utiles\b", text, flags=re.IGNORECASE | re.MULTILINE))
-    has_confidence = bool(re.search(r"^\s*Niveau de confiance\b", text, flags=re.IGNORECASE | re.MULTILINE))
-
-    if has_reponse and has_sources and has_confidence:
-        return text
-
-    structured_parts = [
-        "Reponse",
-        primary_answer or text,
-        "",
-        "Sources utiles",
-        *[f"- {item}" for item in sources],
-        "",
-        f"Niveau de confiance: {_normalize_confidence_label(confidence_label)}",
-    ]
-    return "\n".join(structured_parts).strip()
-
-
-def _generated_answer_is_usable(answer: str) -> bool:
-    text = str(answer or "").strip()
-    if len(text) < MIN_GENERATED_ANSWER_CHARS:
-        return False
-    primary_answer = _extract_primary_answer_text(text)
-    if len(primary_answer) < 20:
-        return False
-    if primary_answer.strip().lower() == _abstention_answer().lower():
-        return False
-    return True
-
-
-def _generation_backend_status(
-    *,
-    backend: str,
-    success: bool,
-    model: str = "",
-    latency_ms: float = 0.0,
-    answer: str = "",
-    error: str = "",
-) -> Dict[str, Any]:
-    return {
-        "backend": backend,
-        "success": bool(success),
-        "model": str(model or ""),
-        "latency_ms": round(float(latency_ms or 0.0), 2),
-        "answer": str(answer or ""),
-        "answer_preview": _safe_preview(answer),
-        "answer_chars": len(str(answer or "")),
-        "error": str(error or ""),
-    }
-
-
-def _generate_with_openai(prompt: str) -> Dict[str, Any]:
-    api_key = os.getenv("OPENAI_API_KEY", "").strip()
+def _generate_with_openai(prompt: str) -> str:
+    runtime = get_runtime_settings()
+    api_key = runtime.openai_api_key or os.getenv("OPENAI_API_KEY", "").strip()
     if not api_key or OpenAI is None:
-        return _generation_backend_status(backend="openai", success=False, model="", error="openai_unavailable")
+        return ""
 
-    model = os.getenv("RAG_CHAT_MODEL", DEFAULT_OPENAI_MODEL).strip() or DEFAULT_OPENAI_MODEL
+    model = os.getenv("RAG_CHAT_MODEL", runtime.rag_chat_model).strip() or runtime.rag_chat_model or DEFAULT_OPENAI_MODEL
     max_tokens = _env_int("RAG_MAX_TOKENS", DEFAULT_MAX_TOKENS)
     temperature = _env_float("RAG_TEMPERATURE", DEFAULT_TEMPERATURE)
     timeout = _env_float("RAG_REQUEST_TIMEOUT", DEFAULT_REQUEST_TIMEOUT)
     client = OpenAI(api_key=api_key, timeout=timeout)
-    started = time.perf_counter()
 
     try:
         response = client.responses.create(
@@ -269,23 +220,10 @@ def _generate_with_openai(prompt: str) -> Dict[str, Any]:
             temperature=temperature,
             max_output_tokens=max_tokens,
         )
-        answer = (getattr(response, "output_text", "") or "").strip()
-        return _generation_backend_status(
-            backend="openai",
-            success=bool(answer),
-            model=model,
-            latency_ms=(time.perf_counter() - started) * 1000.0,
-            answer=answer,
-        )
+        return (getattr(response, "output_text", "") or "").strip()
     except Exception as exc:
         logger.warning("Generation OpenAI indisponible, fallback local active: %s", exc)
-        return _generation_backend_status(
-            backend="openai",
-            success=False,
-            model=model,
-            latency_ms=(time.perf_counter() - started) * 1000.0,
-            error=str(exc),
-        )
+        return ""
 
 
 def _is_embedding_model(model_id: str) -> bool:
@@ -309,74 +247,93 @@ def _resolve_lm_studio_model(client: Any, configured_model: str) -> str:
         return ""
 
 
-def _generate_with_lm_studio(prompt: str) -> Dict[str, Any]:
+def _generate_with_lm_studio(prompt: str) -> str:
     if OpenAI is None:
-        return _generation_backend_status(backend="lmstudio", success=False, model="", error="openai_sdk_unavailable")
+        return ""
 
-    base_url = os.getenv("LM_STUDIO_BASE_URL", DEFAULT_LM_STUDIO_BASE_URL).strip()
+    runtime = get_runtime_settings()
+    base_url = os.getenv("LM_STUDIO_BASE_URL", runtime.lm_studio_base_url or DEFAULT_LM_STUDIO_BASE_URL).strip()
     configured_model = os.getenv("RAG_LM_STUDIO_MODEL", DEFAULT_LM_STUDIO_MODEL).strip()
-    api_key = os.getenv("LM_STUDIO_API_KEY", "lm-studio").strip() or "lm-studio"
-    max_tokens = _env_int("RAG_LM_STUDIO_MAX_TOKENS", _env_int("RAG_MAX_TOKENS", DEFAULT_LM_STUDIO_MAX_TOKENS))
+    api_key = os.getenv("LM_STUDIO_API_KEY", runtime.lm_studio_api_key or "lm-studio").strip() or "lm-studio"
+    max_tokens_raw = _env_int("RAG_LM_STUDIO_MAX_TOKENS", _env_int("RAG_MAX_TOKENS", DEFAULT_LM_STUDIO_MAX_TOKENS))
+    # -1 = pas de limite (le LLM genere jusqu'a la fin naturelle)
+    max_tokens = None if max_tokens_raw <= 0 else max_tokens_raw
     temperature = _env_float("RAG_TEMPERATURE", DEFAULT_TEMPERATURE)
     timeout = _env_float("RAG_REQUEST_TIMEOUT", DEFAULT_REQUEST_TIMEOUT)
 
     if not base_url:
-        return _generation_backend_status(backend="lmstudio", success=False, model="", error="lmstudio_base_url_missing")
+        return ""
 
-    client = OpenAI(base_url=base_url, api_key=api_key, timeout=timeout)
+    # max_retries=0 : evite les ré-essais automatiques qui relancent la génération depuis zéro
+    client = OpenAI(base_url=base_url, api_key=api_key, timeout=timeout, max_retries=0)
     model = _resolve_lm_studio_model(client, configured_model)
     if not model:
         logger.warning("Aucun modele LM Studio texte n'a ete trouve.")
-        return _generation_backend_status(backend="lmstudio", success=False, model="", error="lmstudio_model_missing")
+        return ""
 
-    started = time.perf_counter()
+    try:
+        kwargs = {
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": temperature,
+        }
+        if max_tokens is not None:
+            kwargs["max_tokens"] = max_tokens
+
+        response = client.chat.completions.create(**kwargs)
+        choices = getattr(response, "choices", []) or []
+        if not choices:
+            return ""
+        message = getattr(choices[0], "message", None)
+        content = getattr(message, "content", "") if message is not None else ""
+        return (content or "").strip()
+    except Exception as exc:
+        logger.warning("LM Studio indisponible (%s).", exc)
+        return ""
+
+
+HYDE_MAX_TOKENS = 75  # Court extrait suffit, evite une generation trop longue
+
+
+def _generate_hyde_doc(prompt: str) -> str:
+    """Génère un document hypothétique court pour HyDE (max 75 tokens)."""
+    if OpenAI is None:
+        return ""
+
+    runtime = get_runtime_settings()
+    base_url = os.getenv("LM_STUDIO_BASE_URL", runtime.lm_studio_base_url or DEFAULT_LM_STUDIO_BASE_URL).strip()
+    configured_model = os.getenv("RAG_LM_STUDIO_MODEL", DEFAULT_LM_STUDIO_MODEL).strip()
+    api_key = os.getenv("LM_STUDIO_API_KEY", runtime.lm_studio_api_key or "lm-studio").strip() or "lm-studio"
+    timeout = _env_float("RAG_REQUEST_TIMEOUT", DEFAULT_REQUEST_TIMEOUT)
+
+    if not base_url:
+        return ""
+
+    client = OpenAI(base_url=base_url, api_key=api_key, timeout=timeout, max_retries=0)
+    model = _resolve_lm_studio_model(client, configured_model)
+    if not model:
+        return ""
 
     try:
         response = client.chat.completions.create(
             model=model,
             messages=[{"role": "user", "content": prompt}],
-            temperature=temperature,
-            max_tokens=max_tokens,
+            temperature=0.3,
+            max_tokens=HYDE_MAX_TOKENS,  # Limite stricte pour la vitesse
         )
         choices = getattr(response, "choices", []) or []
         if not choices:
-            return _generation_backend_status(
-                backend="lmstudio",
-                success=False,
-                model=model,
-                latency_ms=(time.perf_counter() - started) * 1000.0,
-                error="lmstudio_empty_choices",
-            )
+            return ""
         message = getattr(choices[0], "message", None)
         content = getattr(message, "content", "") if message is not None else ""
-        answer = (content or "").strip()
-        return _generation_backend_status(
-            backend="lmstudio",
-            success=bool(answer),
-            model=model,
-            latency_ms=(time.perf_counter() - started) * 1000.0,
-            answer=answer,
-        )
+        return (content or "").strip()
     except Exception as exc:
-        logger.warning("LM Studio indisponible (%s).", exc)
-        return _generation_backend_status(
-            backend="lmstudio",
-            success=False,
-            model=model,
-            latency_ms=(time.perf_counter() - started) * 1000.0,
-            error=str(exc),
-        )
+        logger.warning("HyDE generation echouee: %s", exc)
+        return ""
 
 
 def _generation_order() -> List[str]:
-    provider = os.getenv("RAG_LLM_PROVIDER", "lmstudio").strip().lower()
-    if provider in {"lmstudio", "local"}:
-        return ["lmstudio"]
-    if provider == "openai":
-        return ["openai"]
-    if provider == "auto":
-        return ["lmstudio", "openai"]
-    return ["lmstudio", "openai"]
+    return LLMProviderAdapter(get_runtime_settings()).provider_order()
 
 
 def _prompt_style_for_backend(configured_style: str, backend: str) -> str:
@@ -434,6 +391,9 @@ def _normalize_sources(chunks: List[Dict]) -> List[Dict]:
             by_source[source_key] = {
                 "name": source_name,
                 "path": source_path,
+                "service_name": str(metadata.get("service_name") or "").strip(),
+                "official_url": str(metadata.get("official_url") or metadata.get("url") or "").strip(),
+                "title": str(metadata.get("title") or "").strip(),
                 "score": round(confidence["score"], 4),
                 "score_type": confidence["score_type"],
                 "hits": 1,
@@ -449,26 +409,109 @@ def _normalize_sources(chunks: List[Dict]) -> List[Dict]:
     return ordered
 
 
+def _reorder_context(chunks: List[Dict]) -> List[Dict]:
+    """Lost in the middle context reordering."""
+    if len(chunks) < 3:
+        return chunks
+    
+    left = chunks[0::2]
+    right = chunks[1::2][::-1]
+    return left + right
+
+
+def _chunk_matches_explicit_service(chunk: Dict, requested_services: set[str]) -> bool:
+    metadata = chunk.get("metadata", {}) or {}
+    service_name = normalize_text(str(metadata.get("service_name") or ""))
+    official_url = normalize_text(str(metadata.get("official_url") or metadata.get("url") or ""))
+    source_name = normalize_text(str(metadata.get("source") or metadata.get("file_name") or ""))
+    text = normalize_text(str(chunk.get("text") or ""))
+    haystack = " ".join(part for part in (service_name, official_url, source_name, text[:600]) if part)
+
+    for requested in requested_services:
+        aliases = set(NORMALIZED_SERVICE_ALIAS_RULES.get(requested, set()) or set())
+        aliases.add(requested)
+        if any(alias and alias in haystack for alias in aliases):
+            return True
+    return False
+
+
+def _prioritize_explicit_service_chunks(query: str, chunks: List[Dict]) -> tuple[List[Dict], Dict[str, Any]]:
+    query_profile = build_query_profile(query)
+    requested_services = {normalize_text(service) for service in query_profile.get("services", []) if normalize_text(service)}
+    if not requested_services:
+        return chunks, {"requested_services": [], "service_filtered": False}
+
+    matching = [chunk for chunk in chunks if _chunk_matches_explicit_service(chunk, requested_services)]
+    if not matching:
+        return chunks, {
+            "requested_services": sorted(requested_services),
+            "service_filtered": False,
+            "service_match_count": 0,
+        }
+
+    return matching, {
+        "requested_services": sorted(requested_services),
+        "service_filtered": True,
+        "service_match_count": len(matching),
+        "service_original_count": len(chunks),
+    }
+
+
 class RAGEngine:
-    def __init__(self, retrieval_k: int = DEFAULT_RETRIEVAL_K, prompt_style: str = "auto"):
+    def __init__(self, retrieval_k: int = DEFAULT_RETRIEVAL_K, prompt_style: str = "auto", use_hyde: bool = False):
         retrieval_k_from_env = _env_int("RAG_RETRIEVAL_K", retrieval_k)
         self.retrieval_k = max(1, retrieval_k_from_env)
         env_prompt_style = os.getenv("RAG_PROMPT_STYLE", prompt_style).strip().lower()
         self.prompt_style = env_prompt_style if env_prompt_style in {"auto", "standard", "concise", "compact"} else "auto"
+        self.use_hyde = _env_bool("RAG_USE_HYDE", use_hyde)
 
-    def retrieve_debug(self, query: str, resolution_context: Optional[Dict] = None) -> Dict[str, Any]:
+    def _llm_is_available(self) -> bool:
+        """Vérifie rapidement si un LLM est disponible avant de tenter HyDE."""
+        runtime = get_runtime_settings()
+        # Vérifie LM Studio
+        base_url = os.getenv("LM_STUDIO_BASE_URL", runtime.lm_studio_base_url or "").strip()
+        if base_url:
+            try:
+                import urllib.request
+                req = urllib.request.Request(base_url.rstrip("/v1").rstrip("/") + "/v1/models", method="GET")
+                urllib.request.urlopen(req, timeout=2)
+                return True
+            except Exception:
+                pass
+        # Vérifie OpenAI
+        if runtime.openai_api_key or os.getenv("OPENAI_API_KEY", "").strip():
+            return True
+        return False
+
+    def retrieve(self, query: str) -> Dict[str, Any]:
+        search_query = query
+        hyde_used = False
+        if self.use_hyde and self._llm_is_available():
+            try:
+                hyde_prompt = f"En 2-3 phrases maximum, rédigez un extrait administratif répondant à : {query}"
+                hypo_doc = _generate_hyde_doc(hyde_prompt)
+                if hypo_doc:
+                    logger.info("HyDE actif: document hypothetique genere (%d chars)", len(hypo_doc))
+                    search_query = f"{query} {hypo_doc}"
+                    hyde_used = True
+            except Exception as e:
+                logger.warning(f"HyDE error: {e}")
+
         try:
-            from ..retrieval import rag_search
+            from ..retrieval.rag_search import get_relevant_chunks_debug
 
-            if not rag_search.is_search_backend_ready():
-                raise RAGIndexNotReadyError("Index RAG introuvable. Lancez d'abord l'indexation.")
-            allowed_establishments = allowed_establishments_for_resolution(resolution_context or {})
-            debug_payload = rag_search.run_hybrid_search_debug(
-                query,
-                top_k=self.retrieval_k,
-                allowed_establishments=allowed_establishments,
-            )
-            return debug_payload if isinstance(debug_payload, dict) else {}
+            debug_payload = get_relevant_chunks_debug(search_query, top_k=self.retrieval_k)
+            return {
+                "chunks": list(debug_payload.get("final_results", [])),
+                "meta": {
+                    "search_query": search_query,
+                    "hyde_used": hyde_used,
+                    "abstain": bool(debug_payload.get("abstain", False)),
+                    "abstain_reason": str(debug_payload.get("abstain_reason", "") or ""),
+                    "query_profile": debug_payload.get("query_profile", {}),
+                    "guardrail_diagnostics": debug_payload.get("guardrail_diagnostics", {}),
+                },
+            }
         except FileNotFoundError as exc:
             raise RAGIndexNotReadyError("Index RAG introuvable. Lancez d'abord l'indexation.") from exc
         except RAGIndexNotReadyError:
@@ -478,151 +521,49 @@ class RAGEngine:
                 "Le moteur de recherche RAG n'est pas pret (index ou modeles indisponibles)."
             ) from exc
 
-    def retrieve(self, query: str, resolution_context: Optional[Dict] = None) -> List[Dict]:
-        retrieval_debug = self.retrieve_debug(query, resolution_context=resolution_context)
-        return list(retrieval_debug.get("final_results", []))
-
-    def _effective_prompt_style(self) -> str:
-        return "standard" if self.prompt_style == "auto" else self.prompt_style
-
-    def _build_generation_prompt(
-        self,
-        query: str,
-        chunks: List[Dict],
-        resolution_context: Optional[Dict] = None,
-        prompt_style: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        effective_prompt_style = prompt_style or self._effective_prompt_style()
-        prompt = build_rag_prompt(
-            query=query,
-            chunks=chunks,
-            style=effective_prompt_style,
-            resolution_context=resolution_context,
-        )
-        return {
-            "prompt": prompt,
-            "prompt_style": effective_prompt_style,
-            "prompt_chars": len(prompt),
-            "chunk_count": len(chunks),
-            "confidence_label": _confidence_label_from_chunks(chunks),
-            "sources_preview": _fallback_sources_section(chunks),
-        }
-
-    def generate_with_debug(self, query: str, chunks: List[Dict], resolution_context: Optional[Dict] = None) -> Dict[str, Any]:
+    def generate(self, query: str, chunks: List[Dict]) -> str:
         if not chunks:
-            return {
-                "answer": _abstention_answer(),
-                "backend": "none",
-                "used_fallback": True,
-                "fallback_type": "abstention",
-                "backend_attempts": [],
-                "prompt": {"prompt_style": self._effective_prompt_style(), "prompt_chars": 0, "chunk_count": 0},
-            }
+            return _abstention_answer()
 
-        backend_attempts: List[Dict[str, Any]] = []
-        prompt_payload = self._build_generation_prompt(query, chunks, resolution_context=resolution_context)
-
-        for backend in _generation_order():
+        backends = _generation_order()
+        for backend in backends:
             prompt_style = _prompt_style_for_backend(self.prompt_style, backend)
-            prompt_payload = self._build_generation_prompt(
-                query,
-                chunks,
-                resolution_context=resolution_context,
-                prompt_style=prompt_style,
-            )
-            prompt = str(prompt_payload.get("prompt") or "")
-            result = _generate_with_lm_studio(prompt) if backend == "lmstudio" else _generate_with_openai(prompt)
-            backend_attempts.append(
-                {
-                    **result,
-                    "prompt_style": prompt_payload.get("prompt_style", ""),
-                    "prompt_chars": prompt_payload.get("prompt_chars", 0),
-                }
-            )
-            raw_candidate_answer = str(result.get("answer") or "")
-            candidate_answer = _ensure_structured_answer(raw_candidate_answer, chunks)
-            if result.get("success"):
-                normalized_answer = candidate_answer or _ensure_structured_answer(raw_candidate_answer, chunks)
-                if _generated_answer_is_usable(normalized_answer):
-                    return {
-                        "answer": normalized_answer,
-                        "backend": backend,
-                        "used_fallback": False,
-                        "fallback_type": "",
-                        "backend_attempts": backend_attempts,
-                        "prompt": {key: value for key, value in prompt_payload.items() if key != "prompt"},
-                    }
+            prompt = build_rag_prompt(query=query, chunks=chunks, style=prompt_style)
+            answer = _generate_with_lm_studio(prompt) if backend == "lmstudio" else _generate_with_openai(prompt)
+            if answer:
+                return answer
+        return _extractive_fallback_answer(query, chunks)
 
-        fallback_answer = _extractive_fallback_answer(query, chunks)
-        return {
-            "answer": fallback_answer,
-            "backend": "fallback",
-            "used_fallback": True,
-            "fallback_type": "extractive",
-            "backend_attempts": backend_attempts,
-            "prompt": {key: value for key, value in prompt_payload.items() if key != "prompt"},
-        }
-
-    def generate(self, query: str, chunks: List[Dict], resolution_context: Optional[Dict] = None) -> str:
-        return str(self.generate_with_debug(query, chunks, resolution_context=resolution_context).get("answer") or "")
-
-    def answer(self, query: str, user_establishment: Optional[str] = None) -> Dict:
+    def answer(self, query: str) -> Dict:
         cleaned_query = (query or "").strip()
         if not cleaned_query:
             raise ValueError("La question ne peut pas etre vide.")
 
-        resolution_context = resolve_context(cleaned_query, user_establishment=user_establishment)
-        resolution_context["allowed_establishments"] = allowed_establishments_for_resolution(resolution_context)
-
-        if resolution_context.get("mode") == "clarification":
-            return {
-                "answer": build_clarification_message(resolution_context),
-                "sources": [],
-                "needs_clarification": True,
-                "resolution": resolution_context,
-            }
-
-        if resolution_context.get("mode") == "out_of_scope":
-            return {
-                "answer": build_out_of_scope_message(),
-                "sources": [],
-                "resolution": resolution_context,
-            }
-
-        retrieval_debug = self.retrieve_debug(cleaned_query, resolution_context=resolution_context)
-        chunks = list(retrieval_debug.get("final_results", []))
+        retrieval_payload = self.retrieve(cleaned_query)
+        chunks = list(retrieval_payload.get("chunks", []))
+        retrieval_meta = dict(retrieval_payload.get("meta", {}) or {})
         if not chunks:
-            return {
-                "answer": _abstention_answer(),
-                "sources": [],
-                "resolution": resolution_context,
-                "retrieval_debug": retrieval_debug,
-                "generation_debug": {
-                    "backend": "none",
-                    "used_fallback": True,
-                    "fallback_type": "abstention",
-                    "backend_attempts": [],
-                    "prompt": {"prompt_style": self._effective_prompt_style(), "prompt_chars": 0, "chunk_count": 0},
-                },
-            }
+            return {"answer": _abstention_answer(), "sources": [], "retrieval_meta": retrieval_meta}
+
+        chunks, service_filter_meta = _prioritize_explicit_service_chunks(cleaned_query, chunks)
+        retrieval_meta.update(service_filter_meta)
+        chunks = _reorder_context(chunks)
+        
         try:
-            generation_debug = self.generate_with_debug(cleaned_query, chunks, resolution_context=resolution_context)
-            answer = str(generation_debug.get("answer") or "")
+            answer = self.generate(cleaned_query, chunks)
         except Exception as exc:
             raise RAGGenerationError("Erreur lors de la generation de reponse.") from exc
 
+        retrieval_meta["context_chunk_count"] = len(chunks)
         return {
             "answer": answer.strip(),
             "sources": _normalize_sources(chunks),
-            "resolution": resolution_context,
-            "retrieval_debug": retrieval_debug,
-            "generation_debug": generation_debug,
+            "retrieval_meta": retrieval_meta,
         }
-
 
 _default_engine = RAGEngine()
 
 
-def answer_question(question: str, user_establishment: Optional[str] = None) -> Dict:
+def answer_question(question: str) -> Dict:
     """Fonction utilitaire conservee pour compatibilite avec pipeline.py."""
-    return _default_engine.answer(question, user_establishment=user_establishment)
+    return _default_engine.answer(question)

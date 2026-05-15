@@ -1,304 +1,318 @@
-import hashlib
+﻿import hashlib
+import json
 import logging
-import math
+import os
 import re
-import time
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+import faiss
+import numpy as np
 import unidecode
+from qdrant_client import QdrantClient
+from sentence_transformers import SentenceTransformer
 from sentence_transformers.cross_encoder import CrossEncoder
 
 try:
-    from ..shared.context_resolution import (
-        CANONICAL_ESTABLISHMENTS,
-        UCA_GLOBAL,
-        detect_establishments_in_text,
-        get_metadata_establishment,
-        normalize_establishment_label,
+    from ..adapters.storage import DocumentStorage
+    from ..offline.indexing import DEFAULT_EMBEDDING_MODEL
+    from ..retrieval.query_intelligence import (
+        QUERY_CANONICAL_REPLACEMENTS,
+        apply_post_rerank_guardrails as qi_apply_post_rerank_guardrails,
+        apply_retrieval_guardrails as qi_apply_retrieval_guardrails,
+        build_query_profile as qi_build_query_profile,
+        decide_retrieval_abstention as qi_decide_retrieval_abstention,
+        score_chunk_thematic_match as qi_score_chunk_thematic_match,
     )
+    from ..retrieval.bm25_search import build_bm25_index, load_bm25_corpus, search_bm25
     from ..shared.env_loader import load_env_file
+    from ..shared.index_manifest import load_manifest, validate_manifest
     from ..shared.metadata_policy import normalize_text
     from ..shared.relevance_policy import boost_results_with_metadata
+    from ..shared.runtime import get_runtime_settings
 except ImportError:  # pragma: no cover
-    from rag_module.shared.context_resolution import (
-        CANONICAL_ESTABLISHMENTS,
-        UCA_GLOBAL,
-        detect_establishments_in_text,
-        get_metadata_establishment,
-        normalize_establishment_label,
+    from rag_module.adapters.storage import DocumentStorage
+    from rag_module.offline.indexing import DEFAULT_EMBEDDING_MODEL
+    from rag_module.retrieval.query_intelligence import (
+        QUERY_CANONICAL_REPLACEMENTS,
+        apply_post_rerank_guardrails as qi_apply_post_rerank_guardrails,
+        apply_retrieval_guardrails as qi_apply_retrieval_guardrails,
+        build_query_profile as qi_build_query_profile,
+        decide_retrieval_abstention as qi_decide_retrieval_abstention,
+        score_chunk_thematic_match as qi_score_chunk_thematic_match,
     )
+    from rag_module.retrieval.bm25_search import build_bm25_index, load_bm25_corpus, search_bm25
     from rag_module.shared.env_loader import load_env_file
+    from rag_module.shared.index_manifest import load_manifest, validate_manifest
     from rag_module.shared.metadata_policy import normalize_text
     from rag_module.shared.relevance_policy import boost_results_with_metadata
+    from rag_module.shared.runtime import get_runtime_settings
 
 load_env_file()
+RUNTIME = get_runtime_settings()
+STORAGE = DocumentStorage(RUNTIME)
 
 
-RERANK_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+def _env_float(name: str, default: float) -> float:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
+INDEX_PATH = "data_storage/index/index.faiss"
+CHUNKS_PATH = "data_storage/index/chunks.json"
+MANIFEST_PATH = "data_storage/index/index_manifest.json"
+BM25_CORPUS_PATH = "data_storage/index/bm25_corpus.json"
+
+RERANK_MODEL = os.getenv("RAG_RERANK_MODEL", "BAAI/bge-reranker-v2-m3")
+RERANK_FALLBACK_MODELS = [
+    model.strip()
+    for model in os.getenv(
+        "RAG_RERANK_FALLBACK_MODELS",
+        "cross-encoder/ms-marco-MiniLM-L-6-v2",
+    ).split(",")
+    if model.strip()
+]
 
 TOP_K_RETRIEVE = 20
 TOP_K_FINAL = 5
 MAX_CONTEXT_CHARS = 2500
 DENSE_WEIGHT = 0.65
-SPARSE_WEIGHT = 0.35
+BM25_WEIGHT = 0.35
 
-USE_RERANK = True
+USE_RERANK = os.getenv("RAG_USE_RERANK", "true").strip().lower() in {"1", "true", "yes", "on"}
 USE_SPELLCHECK = False
-USE_MULTI_QUERY = True
+USE_MULTI_QUERY = False
 USE_ASCII_NORMALIZATION = False
 
-MIN_GUARDRAIL_SCORE = 0.24
-MIN_THEMATIC_SCORE = 0.18
-MIN_SUPPORT_SCORE = 0.28
-MIN_FINAL_SUPPORT_SCORE = 0.42
-MIN_TOP_RERANK_NORMALIZED = 0.44
-TOPICAL_MISMATCH_DROP_THRESHOLD = 0.45
-RERANK_FALLBACK_SUPPORT_SCORE = 0.62
-RERANK_FALLBACK_THEMATIC_SCORE = 0.20
+MIN_GUARDRAIL_SCORE = _env_float("RAG_MIN_GUARDRAIL_SCORE", 0.24)
+MIN_THEMATIC_SCORE = _env_float("RAG_MIN_THEMATIC_SCORE", 0.18)
+MIN_SUPPORT_SCORE = _env_float("RAG_MIN_SUPPORT_SCORE", 0.28)
+MIN_FINAL_SUPPORT_SCORE = _env_float("RAG_MIN_FINAL_SUPPORT_SCORE", 0.42)
+MIN_TOP_RERANK_NORMALIZED = _env_float("RAG_MIN_TOP_RERANK_NORMALIZED", 0.44)
+TOPICAL_MISMATCH_DROP_THRESHOLD = _env_float("RAG_TOPICAL_MISMATCH_DROP_THRESHOLD", 0.45)
 
-QUERY_STOPWORDS = {
-    "a",
-    "au",
-    "aux",
-    "avec",
-    "comment",
-    "dans",
-    "de",
-    "des",
-    "du",
-    "en",
-    "est",
-    "et",
-    "faire",
-    "la",
-    "le",
-    "les",
-    "ma",
-    "mes",
-    "mon",
-    "ou",
-    "pour",
-    "quelles",
-    "quelle",
-    "quel",
-    "quels",
-    "qui",
-    "sur",
-    "un",
-    "une",
-    "vos",
-    "votre",
-}
-
-QUERY_CANONICAL_REPLACEMENTS: List[Tuple[str, str]] = [
-    (r"\bs[' ]inscrire\b", "inscription"),
-    (r"\bsinscrire\b", "inscription"),
-    (r"\binscrire\b", "inscription"),
-    (r"\binscription a\b", "inscription"),
-    (r"\bpre inscription\b", "preinscription"),
-    (r"\bbource\b", "bourse"),
-    (r"\bboursse\b", "bourse"),
-    (r"\bbours\b", "bourse"),
-    (r"\bfac\b", "faculte"),
-]
-
-QUERY_TOPIC_RULES: Dict[str, Dict[str, Any]] = {
-    "stage": {
-        "keywords": {
-            "stage",
-            "stages",
-            "pfe",
-            "projet de fin d etudes",
-            "projet de fin d'etudes",
-            "projet fin d etudes",
-            "convention de stage",
-            "memoire",
-            "internship",
-            "internships",
-        },
-        "allowed_document_types": {"stage", "formation", "general"},
-        "conflicts": {"bourse", "calendrier", "resultats"},
-    },
-    "inscription": {
-        "keywords": {
-            "inscription",
-            "preinscription",
-            "pre inscription",
-            "reinscription",
-            "inscription administrative",
-            "s inscrire",
-            "sinscrire",
-            "inscrire",
-            "scolarite",
-            "registration",
-        },
-        "allowed_document_types": {"inscription", "admission", "general"},
-        "conflicts": {"bourse", "resultats"},
-    },
-    "admission": {
-        "keywords": {
-            "admission",
-            "admissions",
-            "candidature",
-            "selection",
-            "concours",
-            "appel a candidature",
-            "appel a candidatures",
-            "application",
-        },
-        "allowed_document_types": {"admission", "inscription", "formation", "general"},
-        "conflicts": {"bourse", "stage"},
-    },
-    "bourse": {
-        "keywords": {
-            "bourse",
-            "bourses",
-            "scholarship",
-            "scholarships",
-            "allocation",
-            "aide financiere",
-        },
-        "allowed_document_types": {"bourse", "general"},
-        "conflicts": {"stage", "admission", "inscription", "resultats"},
-    },
-    "calendrier": {
-        "keywords": {
-            "calendrier",
-            "planning",
-            "emploi du temps",
-            "date",
-            "dates",
-            "delai",
-            "delais",
-            "deadline",
-            "schedule",
-        },
-        "allowed_document_types": {"calendrier", "resultats", "inscription", "general"},
-        "conflicts": {"bourse"},
-    },
-    "resultats": {
-        "keywords": {
-            "resultat",
-            "resultats",
-            "note",
-            "notes",
-            "deliberation",
-            "rattrapage",
-            "classement",
-        },
-        "allowed_document_types": {"resultats", "admission", "general"},
-        "conflicts": {"bourse", "stage"},
-    },
-    "formation": {
-        "keywords": {
-            "formation",
-            "formations",
-            "filiere",
-            "filiere",
-            "programme",
-            "master",
-            "licence",
-            "doctorat",
-            "doctorale",
-            "doctorat",
-            "module",
-            "modules",
-            "cours",
-        },
-        "allowed_document_types": {"formation", "admission", "general"},
-        "conflicts": set(),
-    },
-    "contact": {
-        "keywords": {
-            "contact",
-            "contacts",
-            "telephone",
-            "email",
-            "mail",
-            "adresse",
-            "service",
-            "scolarite",
-        },
-        "allowed_document_types": {"contact", "inscription", "general"},
-        "conflicts": set(),
-    },
-    "reglement": {
-        "keywords": {
-            "reglement",
-            "reglements",
-            "reglement pedagogique",
-            "reglements pedagogiques",
-            "lmd",
-            "ects",
-            "modalite",
-            "modalites",
-        },
-        "allowed_document_types": {"reglement", "formation", "general"},
-        "conflicts": set(),
-    },
-}
-
-LEVEL_KEYWORDS = {
-    "master": {"master", "masters", "mastère"},
-    "licence": {"licence", "licences", "license"},
-    "doctorat": {"doctorat", "doctorale", "doctorales", "phd", "these", "theses"},
-}
-
-NORMALIZED_QUERY_TOPIC_RULES: Dict[str, Dict[str, Any]] = {
-    topic: {
-        "keywords": {normalize_text(keyword) for keyword in config.get("keywords", set()) if normalize_text(keyword)},
-        "allowed_document_types": {
-            normalize_text(doc_type) for doc_type in config.get("allowed_document_types", set()) if normalize_text(doc_type)
-        },
-        "conflicts": {normalize_text(topic_name) for topic_name in config.get("conflicts", set()) if normalize_text(topic_name)},
-    }
-    for topic, config in QUERY_TOPIC_RULES.items()
-}
-
-NORMALIZED_LEVEL_KEYWORDS = {
-    level: {normalize_text(keyword) for keyword in keywords if normalize_text(keyword)}
-    for level, keywords in LEVEL_KEYWORDS.items()
-}
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 logger = logging.getLogger(__name__)
 
+_embedding_model = None
+_embedding_model_name = None
 _reranker = None
+_index = None
+_chunks = None
+_manifest = None
+_bm25_corpus = None
+_bm25_index = None
+_index_mtime = None
+_chunks_mtime = None
+_manifest_mtime = None
+_bm25_mtime = None
+
+
+def _vector_backend() -> str:
+    return get_runtime_settings().rag_vector_backend
+
+
+def _active_faiss_paths() -> Dict[str, Path]:
+    return STORAGE.resolve_active_faiss_paths()
+
+
+def _active_manifest_path() -> Path:
+    pointer = STORAGE.load_active_index_pointer()
+    if pointer.get("backend") == "qdrant":
+        manifest_path = Path(pointer.get("manifest_path", ""))
+        if manifest_path.exists():
+            return manifest_path
+    return _active_faiss_paths()["manifest_file"]
+
+
+def _qdrant_client() -> QdrantClient:
+    runtime = get_runtime_settings()
+    kwargs = {"url": runtime.rag_qdrant_url}
+    if runtime.rag_qdrant_api_key:
+        kwargs["api_key"] = runtime.rag_qdrant_api_key
+    return QdrantClient(**kwargs)
+
+
+def _qdrant_collection_name() -> str:
+    pointer = STORAGE.load_active_index_pointer()
+    collection_name = str(pointer.get("collection_name") or "").strip()
+    if collection_name:
+        return collection_name
+    return get_runtime_settings().rag_active_index_name
 
 
 def invalidate_search_cache(clear_models: bool = False) -> None:
-    global _reranker
+    global _index, _chunks, _manifest, _bm25_corpus, _bm25_index
+    global _index_mtime, _chunks_mtime, _manifest_mtime, _bm25_mtime
+    global _embedding_model, _embedding_model_name, _reranker
 
-    try:
-        from .qdrant_search import _embed_query  # type: ignore
-
-        _embed_query.cache_clear()
-    except Exception:
-        pass
+    _index = None
+    _chunks = None
+    _manifest = None
+    _bm25_corpus = None
+    _bm25_index = None
+    _index_mtime = None
+    _chunks_mtime = None
+    _manifest_mtime = None
+    _bm25_mtime = None
+    embed_text.cache_clear()
     if clear_models:
+        _embedding_model = None
+        _embedding_model_name = None
         _reranker = None
+
+
+def _configured_embedding_model_name() -> str:
+    return os.getenv("RAG_EMBEDDING_MODEL", "").strip()
+
+
+def get_runtime_embedding_model_name() -> str:
+    configured = _configured_embedding_model_name()
+    manifest = load_manifest_or_raise()
+    manifest_model = str(manifest.get("model_name") or "").strip()
+    if configured and manifest_model and configured != manifest_model:
+        logger.warning(
+            "Modele runtime '%s' different du modele de l'index '%s'. Utilisation du modele de l'index.",
+            configured,
+            manifest_model,
+        )
+    return manifest_model or configured or DEFAULT_EMBEDDING_MODEL
+
+
+def get_candidate_reranker_names() -> List[str]:
+    candidates = [RERANK_MODEL, *RERANK_FALLBACK_MODELS]
+    unique: List[str] = []
+    seen: Set[str] = set()
+    for candidate in candidates:
+        value = (candidate or "").strip()
+        if value and value not in seen:
+            seen.add(value)
+            unique.append(value)
+    return unique
+
+
+def is_e5_model(model_name: str) -> bool:
+    return "e5" in (model_name or "").lower()
+
+
+def get_embedding_model():
+    global _embedding_model, _embedding_model_name
+    model_name = get_runtime_embedding_model_name()
+    if _embedding_model is None or _embedding_model_name != model_name:
+        logger.info("Chargement du modele embedding: %s", model_name)
+        try:
+            _embedding_model = SentenceTransformer(
+                model_name,
+                device="cpu",
+                local_files_only=True,
+            )
+        except Exception:
+            _embedding_model = SentenceTransformer(model_name, device="cpu")
+        _embedding_model.max_seq_length = 512
+        _embedding_model_name = model_name
+    return _embedding_model
 
 
 def get_reranker():
     global _reranker
     if _reranker is None and USE_RERANK:
-        logger.info("Chargement du reranker: %s", RERANK_MODEL)
-        try:
-            _reranker = CrossEncoder(
-                RERANK_MODEL,
-                device="cpu",
-                local_files_only=True,
-            )
-        except TypeError:
+        errors: List[str] = []
+        for model_name in get_candidate_reranker_names():
+            logger.info("Chargement du reranker: %s", model_name)
             try:
-                _reranker = CrossEncoder(RERANK_MODEL, device="cpu")
+                _reranker = CrossEncoder(
+                    model_name,
+                    device="cpu",
+                    local_files_only=True,
+                )
+                break
+            except TypeError:
+                try:
+                    _reranker = CrossEncoder(model_name, device="cpu")
+                    break
+                except Exception as exc:
+                    errors.append(f"{model_name}: {exc}")
+                    _reranker = None
             except Exception as exc:
-                logger.warning("Reranker indisponible, fallback sans rerank: %s", exc)
+                errors.append(f"{model_name}: {exc}")
                 _reranker = None
-        except Exception as exc:
-            logger.warning("Reranker indisponible, fallback sans rerank: %s", exc)
-            _reranker = None
+        if _reranker is None and errors:
+            logger.warning("Reranker indisponible, fallback sans rerank: %s", " | ".join(errors[:3]))
     return _reranker
+
+
+def load_manifest_or_raise() -> Dict:
+    global _manifest, _manifest_mtime
+
+    manifest_file = _active_manifest_path()
+    if not manifest_file.exists():
+        raise FileNotFoundError("Manifest d'index introuvable.")
+
+    current_mtime = manifest_file.stat().st_mtime
+    if _manifest is None or _manifest_mtime != current_mtime:
+        _manifest = load_manifest(str(manifest_file))
+        expected = str(_manifest.get("model_name") or "").strip()
+        validate_manifest(_manifest, expected_model=expected)
+        _manifest_mtime = current_mtime
+    return _manifest
+
+
+def get_faiss_index_and_chunks() -> Tuple[faiss.Index, List[Dict]]:
+    global _index, _chunks, _index_mtime, _chunks_mtime
+
+    paths = _active_faiss_paths()
+    index_file = paths["index_file"]
+    chunks_file = paths["chunks_file"]
+    if not index_file.exists() or not chunks_file.exists():
+        logger.error("Index FAISS ou chunks.json introuvable. Execute d'abord indexing.py")
+        raise FileNotFoundError("Index FAISS non trouve")
+
+    load_manifest_or_raise()
+
+    current_index_mtime = index_file.stat().st_mtime
+    current_chunks_mtime = chunks_file.stat().st_mtime
+    needs_reload = (
+        _index is None
+        or _chunks is None
+        or _index_mtime != current_index_mtime
+        or _chunks_mtime != current_chunks_mtime
+    )
+    if needs_reload:
+        logger.info("Chargement de l'index FAISS...")
+        _index = faiss.read_index(str(index_file))
+        logger.info("Chargement des chunks...")
+        with open(chunks_file, "r", encoding="utf-8") as handle:
+            _chunks = json.load(handle)
+        manifest = load_manifest_or_raise()
+        if int(manifest.get("chunk_count", len(_chunks)) or len(_chunks)) != len(_chunks):
+            logger.warning("Le manifest et chunks.json ne sont pas parfaitement alignes.")
+        _index_mtime = current_index_mtime
+        _chunks_mtime = current_chunks_mtime
+
+    return _index, _chunks
+
+
+def get_bm25_resources() -> Tuple[List[Dict], Dict]:
+    global _bm25_corpus, _bm25_index, _bm25_mtime
+
+    corpus_file = _active_faiss_paths()["bm25_file"]
+    if not corpus_file.exists():
+        raise FileNotFoundError("Corpus BM25 introuvable.")
+
+    current_mtime = corpus_file.stat().st_mtime
+    if _bm25_corpus is None or _bm25_index is None or _bm25_mtime != current_mtime:
+        logger.info("Chargement du corpus BM25...")
+        _bm25_corpus = load_bm25_corpus(str(corpus_file))
+        _bm25_index = build_bm25_index(_bm25_corpus)
+        _bm25_mtime = current_mtime
+
+    return _bm25_corpus, _bm25_index
 
 
 def preprocess_query(query: str) -> str:
@@ -341,6 +355,14 @@ def enhance_query(query: str) -> str:
     return correct_query(preprocess_query(query))
 
 
+def prepare_query_text(query: str) -> str:
+    normalized = enhance_query(query)
+    model_name = get_runtime_embedding_model_name()
+    if is_e5_model(model_name):
+        return f"query: {normalized}"
+    return normalized
+
+
 def generate_multi_queries(query: str) -> List[str]:
     if not USE_MULTI_QUERY:
         return [query]
@@ -359,10 +381,92 @@ def generate_multi_queries(query: str) -> List[str]:
     return list(dict.fromkeys(variations))
 
 
-def merge_dense_and_sparse(dense_results: List[Dict], sparse_results: List[Dict], top_k: int) -> List[Dict]:
+@lru_cache(maxsize=500)
+def embed_text(text: str) -> np.ndarray:
+    model = get_embedding_model()
+    prepared = prepare_query_text(text)
+    return model.encode(prepared, normalize_embeddings=True)
+
+
+def embed_queries(queries: List[str]) -> np.ndarray:
+    return np.array([embed_text(query) for query in queries], dtype="float32")
+
+
+def _normalize_vector_score(raw_score: float, metric_type: int) -> float:
+    if metric_type == faiss.METRIC_L2:
+        return float(max(0.0, min(1.0, 1.0 - (raw_score / 2.0))))
+    if metric_type == faiss.METRIC_INNER_PRODUCT:
+        return float(max(0.0, min(1.0, (raw_score + 1.0) / 2.0)))
+    return raw_score
+
+
+def search_faiss(query_vectors: np.ndarray, top_k: int = TOP_K_RETRIEVE) -> List[Dict]:
+    index, chunks = get_faiss_index_and_chunks()
+    if index.ntotal == 0:
+        return []
+
+    top_k = max(1, int(top_k))
+    distances, indices = index.search(query_vectors, top_k)
+    metric_type = getattr(index, "metric_type", faiss.METRIC_L2)
+
+    results: List[Dict] = []
+    for i, idx_list in enumerate(indices):
+        for rank, idx in enumerate(idx_list):
+            if 0 <= idx < len(chunks):
+                chunk = dict(chunks[idx])
+                raw_score = float(distances[i][rank])
+                chunk["vector_raw_score"] = raw_score
+                chunk["score"] = _normalize_vector_score(raw_score, metric_type)
+                chunk["score_type"] = "dense"
+                chunk["query_source"] = "multi" if len(query_vectors) > 1 else "single"
+                results.append(chunk)
+    return results
+
+
+def search_qdrant(query_vectors: np.ndarray, top_k: int = TOP_K_RETRIEVE) -> List[Dict]:
+    runtime = get_runtime_settings()
+    if not runtime.rag_qdrant_url:
+        raise FileNotFoundError("Qdrant n'est pas configure.")
+
+    client = _qdrant_client()
+    collection_name = _qdrant_collection_name()
+    results: List[Dict] = []
+
+    for vector in query_vectors:
+        response = client.query_points(
+            collection_name=collection_name,
+            query=vector.tolist(),
+            limit=max(1, int(top_k)),
+            with_payload=True,
+            with_vectors=False,
+        )
+        for point in getattr(response, "points", []) or []:
+            payload = getattr(point, "payload", {}) or {}
+            metadata = payload.get("metadata", {}) or {}
+            results.append(
+                {
+                    "id": payload.get("id") or str(getattr(point, "id", "")),
+                    "text": payload.get("text", "") or "",
+                    "metadata": metadata,
+                    "vector_raw_score": float(getattr(point, "score", 0.0) or 0.0),
+                    "score": max(0.0, min(1.0, float(getattr(point, "score", 0.0) or 0.0))),
+                    "score_type": "dense",
+                    "query_source": "multi" if len(query_vectors) > 1 else "single",
+                }
+            )
+    return results
+
+
+def merge_dense_and_bm25(dense_results: List[Dict], bm25_results: List[Dict], top_k: int) -> List[Dict]:
+    # Algorithme de fusion par rangs: Reciprocal Rank Fusion (RRF)
+    RRF_K = 60
+    
+    dense_sorted = sorted(dense_results, key=lambda x: float(x.get("score", 0.0) or 0.0), reverse=True)
+    bm25_sorted = sorted(bm25_results, key=lambda x: float(x.get("score", 0.0) or 0.0), reverse=True)
+
     merged: Dict[str, Dict] = {}
 
-    for result in dense_results:
+    for rank, result in enumerate(dense_sorted):
         metadata = result.get("metadata", {}) or {}
         chunk_id = result.get("id") or metadata.get("chunk_hash") or metadata.get("hash")
         if not chunk_id:
@@ -374,18 +478,16 @@ def merge_dense_and_sparse(dense_results: List[Dict], sparse_results: List[Dict]
                 "id": chunk_id,
                 "text": result.get("text", ""),
                 "metadata": metadata,
-                "dense_score": 0.0,
-                "sparse_score": 0.0,
-                "score": 0.0,
-                "score_type": "hybrid",
+                "rrf_score": 0.0,
+                "score_type": "hybrid_rrf",
                 "retrieval_sources": [],
             },
         )
-        entry["dense_score"] = max(float(entry["dense_score"]), float(result.get("score", 0.0) or 0.0))
+        entry["rrf_score"] += 1.0 / (RRF_K + rank + 1)
         if "dense" not in entry["retrieval_sources"]:
             entry["retrieval_sources"].append("dense")
 
-    for result in sparse_results:
+    for rank, result in enumerate(bm25_sorted):
         metadata = result.get("metadata", {}) or {}
         chunk_id = result.get("id") or metadata.get("chunk_hash") or metadata.get("hash")
         if not chunk_id:
@@ -397,25 +499,24 @@ def merge_dense_and_sparse(dense_results: List[Dict], sparse_results: List[Dict]
                 "id": chunk_id,
                 "text": result.get("text", ""),
                 "metadata": metadata,
-                "dense_score": 0.0,
-                "sparse_score": 0.0,
-                "score": 0.0,
-                "score_type": "hybrid",
+                "rrf_score": 0.0,
+                "score_type": "hybrid_rrf",
                 "retrieval_sources": [],
             },
         )
-        entry["sparse_score"] = max(float(entry["sparse_score"]), float(result.get("score", 0.0) or 0.0))
-        if "sparse" not in entry["retrieval_sources"]:
-            entry["retrieval_sources"].append("sparse")
+        entry["rrf_score"] += 1.0 / (RRF_K + rank + 1)
+        if "bm25" not in entry["retrieval_sources"]:
+            entry["retrieval_sources"].append("bm25")
 
     merged_results: List[Dict] = []
-    for entry in merged.values():
-        dense_score = float(entry.get("dense_score", 0.0))
-        sparse_score = float(entry.get("sparse_score", 0.0))
-        entry["score"] = max(0.0, min(1.0, (dense_score * DENSE_WEIGHT) + (sparse_score * SPARSE_WEIGHT)))
-        merged_results.append(entry)
+    
+    if merged:
+        max_rrf = max(entry["rrf_score"] for entry in merged.values())
+        for entry in merged.values():
+            entry["score"] = float(entry["rrf_score"]) / max_rrf if max_rrf > 0 else 0.0
+            merged_results.append(entry)
 
-    merged_results.sort(key=lambda item: float(item.get("score", 0.0)), reverse=True)
+    merged_results.sort(key=lambda item: item.get("score", 0.0), reverse=True)
     return merged_results[: max(top_k, TOP_K_RETRIEVE)]
 
 
@@ -431,33 +532,6 @@ def deduplicate_chunks(chunks_list: List[Dict]) -> List[Dict]:
             seen.add(chunk_id)
             unique.append(chunk)
     return unique
-
-
-def _normalize_allowed_establishments(allowed_establishments: Optional[List[str]]) -> List[str]:
-    normalized: List[str] = []
-    for item in allowed_establishments or []:
-        canonical = normalize_establishment_label(item)
-        if canonical and canonical not in normalized:
-            normalized.append(canonical)
-    return normalized
-
-
-def _filter_results_by_allowed_establishments(
-    results: List[Dict],
-    allowed_establishments: Optional[List[str]],
-) -> List[Dict]:
-    allowed = _normalize_allowed_establishments(allowed_establishments)
-    if not allowed:
-        return list(results)
-
-    allowed_set = set(allowed)
-    filtered: List[Dict] = []
-    for result in results:
-        metadata = result.get("metadata", {}) or {}
-        chunk_establishment = get_metadata_establishment(metadata)
-        if chunk_establishment in allowed_set:
-            filtered.append(result)
-    return filtered
 
 
 def apply_metadata_boost(results: List[Dict], query: str) -> List[Dict]:
@@ -489,769 +563,167 @@ def rerank_chunks(query: str, chunks_list: List[Dict], top_k: int = TOP_K_FINAL)
     return selected
 
 
-def truncate_chunks(chunks_list: List[Dict], max_chars: int = MAX_CONTEXT_CHARS) -> List[Dict]:
+def _query_clip_window(text: str, query: str, max_len: int) -> str:
+    if len(text) <= max_len or not query:
+        return text[:max_len]
+    normalized_text = unidecode.unidecode(text).lower()
+    query_tokens = [
+        token
+        for token in re.findall(r"\b[\w@']+\b", normalize_text(query))
+        if len(token) >= 4 and token not in {"comment", "obtenir", "avec", "dans", "pour"}
+    ]
+    hit_positions = [normalized_text.find(token) for token in query_tokens if normalized_text.find(token) >= 0]
+    if not hit_positions:
+        return text[:max_len]
+    center = min(hit_positions)
+    start = max(0, center - max_len // 3)
+    end = min(len(text), start + max_len)
+    if end - start < max_len:
+        start = max(0, end - max_len)
+    prefix = "... " if start > 0 else ""
+    suffix = " ..." if end < len(text) else ""
+    return f"{prefix}{text[start:end].strip()}{suffix}"
+
+
+def truncate_chunks(chunks_list: List[Dict], max_chars: int = MAX_CONTEXT_CHARS, query: str = "") -> List[Dict]:
     total = 0
     selected = []
+    max_per_chunk = max(450, max_chars // 3)
     for chunk in chunks_list:
-        text = chunk.get("text", "")
-        if total + len(text) > max_chars and selected:
+        text = chunk.get("text", "") or ""
+        remaining = max_chars - total
+        if remaining <= 0:
             break
-        selected.append(chunk)
-        total += len(text)
+        clipped_text = _query_clip_window(text, query, min(len(text), remaining, max_per_chunk))
+        if len(clipped_text) < min(120, len(text)) and selected:
+            break
+        enriched = dict(chunk)
+        enriched["text"] = clipped_text
+        selected.append(enriched)
+        total += len(clipped_text)
     return selected
 
 
-def _normalize_result_row(result: Dict) -> Dict:
-    entry = dict(result or {})
-    metadata = entry.get("metadata", {}) or {}
-    if not isinstance(metadata, dict):
-        metadata = {}
-    entry["metadata"] = metadata
-    entry["id"] = entry.get("id") or metadata.get("chunk_hash") or metadata.get("hash") or ""
-    entry["text"] = str(entry.get("text", "") or "")
-    entry["score"] = float(entry.get("score", 0.0) or 0.0)
-    entry["dense_score"] = float(entry.get("dense_score", 0.0) or 0.0)
-    entry["sparse_score"] = float(entry.get("sparse_score", 0.0) or 0.0)
-    if "support_score" in entry:
-        entry["support_score"] = float(entry.get("support_score", 0.0) or 0.0)
-    if "final_support_score" in entry:
-        entry["final_support_score"] = float(entry.get("final_support_score", 0.0) or 0.0)
-    if "rerank_score" in entry:
-        entry["rerank_score"] = float(entry.get("rerank_score", 0.0) or 0.0)
-    if "rerank_score_normalized" in entry:
-        entry["rerank_score_normalized"] = float(entry.get("rerank_score_normalized", 0.0) or 0.0)
-    if "thematic_score" in entry:
-        entry["thematic_score"] = float(entry.get("thematic_score", 0.0) or 0.0)
-    entry["score_type"] = str(entry.get("score_type") or "unknown")
-    entry["retrieval_sources"] = list(dict.fromkeys(entry.get("retrieval_sources", []) or []))
-    entry["rejection_reasons"] = list(dict.fromkeys(entry.get("rejection_reasons") or entry.get("reasons") or []))
-    return entry
-
-
-def _normalize_result_rows(results: List[Dict]) -> List[Dict]:
-    return [_normalize_result_row(item) for item in results]
-
-
-def _summarize_results(results: List[Dict], top_n: int = 3) -> Dict[str, Any]:
-    rows = _normalize_result_rows(results)
-    sources = sorted(
-        {
-            source
-            for row in rows
-            for source in row.get("retrieval_sources", [])
-            if isinstance(source, str) and source.strip()
+def run_hybrid_search_debug(raw_query: str, top_k: int = TOP_K_FINAL) -> Dict[str, object]:
+    if not raw_query or not raw_query.strip():
+        return {
+            "query": "",
+            "dense_results": [],
+            "bm25_results": [],
+            "merged_results": [],
+            "boosted_results": [],
+            "guarded_results": [],
+            "final_results": [],
+            "abstain": True,
+            "abstain_reason": "empty_query",
+            "query_profile": {},
         }
+
+    top_k = max(1, int(top_k))
+    query = enhance_query(raw_query)
+    logger.info("Recherche hybride pour: '%s' -> '%s'", raw_query, query)
+
+    queries = generate_multi_queries(query)
+    query_vectors = embed_queries(queries)
+    retrieve_k = max(TOP_K_RETRIEVE, top_k * 4)
+
+    if _vector_backend() == "qdrant":
+        dense_results = search_qdrant(query_vectors, top_k=retrieve_k)
+        bm25_results = []
+    else:
+        dense_results = search_faiss(query_vectors, top_k=retrieve_k)
+        _, bm25_index = get_bm25_resources()
+        bm25_results = search_bm25(query, bm25_index, top_k=retrieve_k)
+
+    retrieved = merge_dense_and_bm25(dense_results, bm25_results, top_k=retrieve_k)
+    retrieved = deduplicate_chunks(retrieved)
+    boosted = apply_metadata_boost(retrieved, query)
+    guarded, guardrail_diagnostics = apply_retrieval_guardrails(query, boosted, top_k=top_k)
+    reranked = rerank_chunks(query, guarded, top_k=max(top_k * 2, top_k))
+    final_ranked = apply_post_rerank_guardrails(
+        reranked,
+        query_profile=guardrail_diagnostics.get("query_profile", {}),
+        top_k=top_k,
+    )
+    abstention = decide_retrieval_abstention(final_ranked, guardrail_diagnostics.get("query_profile", {}))
+    final_results = [] if abstention["abstain"] else truncate_chunks(final_ranked, MAX_CONTEXT_CHARS, query=query)
+
+    logger.info(
+        "Retrieval debug | dense=%s bm25=%s merged=%s guarded=%s final=%s abstain=%s reason=%s",
+        len(dense_results),
+        len(bm25_results),
+        len(retrieved),
+        len(guarded),
+        len(final_results),
+        abstention["abstain"],
+        abstention["reason"] or "none",
     )
     return {
-        "count": len(rows),
-        "best_score": round(max((float(row.get("score", 0.0) or 0.0) for row in rows), default=0.0), 4),
-        "top_ids": [row.get("id", "") for row in rows[:top_n]],
-        "top_scores": [round(float(row.get("score", 0.0) or 0.0), 4) for row in rows[:top_n]],
-        "sources": sources,
+        "query": query,
+        "dense_results": dense_results,
+        "bm25_results": bm25_results,
+        "merged_results": retrieved,
+        "boosted_results": boosted,
+        "guarded_results": guarded,
+        "final_results": final_results,
+        "abstain": abstention["abstain"],
+        "abstain_reason": abstention["reason"],
+        "query_profile": guardrail_diagnostics.get("query_profile", {}),
+        "guardrail_diagnostics": guardrail_diagnostics,
     }
 
 
-def _bucket_rejection_reasons(results: List[Dict]) -> Dict[str, int]:
-    buckets: Dict[str, int] = {}
-    for row in results:
-        reasons = list(row.get("rejection_reasons") or row.get("reasons") or [])
-        if not reasons:
-            buckets["unknown"] = buckets.get("unknown", 0) + 1
-            continue
-        for reason in reasons:
-            key = str(reason or "").strip() or "unknown"
-            buckets[key] = buckets.get(key, 0) + 1
-    return dict(sorted(buckets.items(), key=lambda item: (-item[1], item[0])))
+def get_relevant_chunks_debug(raw_query: str, top_k: int = TOP_K_FINAL) -> Dict[str, object]:
+    return run_hybrid_search_debug(raw_query, top_k=top_k)
 
 
-def _top_result_snapshot(results: List[Dict]) -> Dict[str, Any]:
-    rows = _normalize_result_rows(results)
-    if not rows:
-        return {}
-    top = rows[0]
-    metadata = top.get("metadata", {}) or {}
-    return {
-        "id": top.get("id", ""),
-        "score": round(float(top.get("score", 0.0) or 0.0), 4),
-        "support_score": round(float(top.get("support_score", 0.0) or 0.0), 4) if "support_score" in top else 0.0,
-        "final_support_score": round(float(top.get("final_support_score", 0.0) or 0.0), 4) if "final_support_score" in top else 0.0,
-        "score_type": str(top.get("score_type") or ""),
-        "document_type": str(metadata.get("document_type") or ""),
-        "establishment": get_metadata_establishment(metadata),
-        "source": str(metadata.get("source") or metadata.get("file_name") or ""),
-    }
+def get_relevant_chunks(raw_query: str, top_k: int = TOP_K_FINAL) -> List[Dict]:
+    debug_payload = run_hybrid_search_debug(raw_query, top_k=top_k)
+    return list(debug_payload.get("final_results", []))
 
 
-def _tokenize_normalized(text: str) -> Set[str]:
-    return set(re.findall(r"\b[\w']+\b", normalize_text(text)))
-
-
-def _extract_query_topics(normalized_query: str, query_tokens: Set[str]) -> Dict[str, List[str]]:
-    matches: Dict[str, List[str]] = {}
-    for topic, config in NORMALIZED_QUERY_TOPIC_RULES.items():
-        hits: List[str] = []
-        for keyword in config["keywords"]:
-            if not keyword:
-                continue
-            if " " in keyword and keyword in normalized_query:
-                hits.append(keyword)
-                continue
-            keyword_tokens = _tokenize_normalized(keyword)
-            if keyword_tokens and keyword_tokens.issubset(query_tokens):
-                hits.append(keyword)
-        if hits:
-            matches[topic] = sorted(set(hits))
-    return matches
-
-
-def _extract_query_levels(normalized_query: str, query_tokens: Set[str]) -> List[str]:
-    levels: List[str] = []
-    for level, keywords in NORMALIZED_LEVEL_KEYWORDS.items():
-        for keyword in keywords:
-            if not keyword:
-                continue
-            if (" " in keyword and keyword in normalized_query) or _tokenize_normalized(keyword).issubset(query_tokens):
-                levels.append(level)
-                break
-    return levels
-
-
-def _extract_query_faculties(normalized_query: str) -> List[str]:
-    return [item for item in detect_establishments_in_text(normalized_query) if item != UCA_GLOBAL]
-
-
-def build_query_profile(query: str, allowed_establishments: Optional[List[str]] = None) -> Dict[str, Any]:
-    normalized_query = normalize_text(query)
-    query_tokens = _tokenize_normalized(normalized_query)
-    topic_hits = _extract_query_topics(normalized_query, query_tokens)
-    levels = _extract_query_levels(normalized_query, query_tokens)
-    faculties = _extract_query_faculties(normalized_query)
-    allowed_specific = [
-        item
-        for item in _normalize_allowed_establishments(allowed_establishments)
-        if item != UCA_GLOBAL and item in CANONICAL_ESTABLISHMENTS
-    ]
-    for establishment in allowed_specific:
-        if establishment not in faculties:
-            faculties.append(establishment)
-    years = sorted({int(year) for year in re.findall(r"\b(?:19|20)\d{2}\b", normalized_query)})
-    informative_tokens = sorted(
-        token
-        for token in query_tokens
-        if token
-        and len(token) >= 3
-        and token not in QUERY_STOPWORDS
-        and not token.isdigit()
-    )
-
-    return {
-        "normalized_query": normalized_query,
-        "query_tokens": sorted(query_tokens),
-        "informative_tokens": informative_tokens,
-        "topic_hits": topic_hits,
-        "primary_topics": sorted(topic_hits.keys()),
-        "levels": levels,
-        "faculties": faculties,
-        "years": years,
-        "has_strong_topic": bool(topic_hits),
-    }
-
-
-def _chunk_haystack(chunk: Dict) -> str:
-    metadata = chunk.get("metadata", {}) or {}
-    fields = [
-        chunk.get("text", ""),
-        metadata.get("section_title", ""),
-        " ".join(str(part).strip() for part in metadata.get("section_path", []) if str(part).strip()),
-        metadata.get("source", ""),
-        metadata.get("file_name", ""),
-        metadata.get("document_type", ""),
-        metadata.get("year", ""),
-        get_metadata_establishment(metadata),
-    ]
-    return normalize_text(" ".join(str(field or "") for field in fields))
-
-
-def _chunk_topics(chunk: Dict, haystack: str) -> Dict[str, List[str]]:
-    chunk_tokens = _tokenize_normalized(haystack)
-    hits: Dict[str, List[str]] = {}
-    for topic, config in NORMALIZED_QUERY_TOPIC_RULES.items():
-        topic_hits: List[str] = []
-        for keyword in config["keywords"]:
-            if not keyword:
-                continue
-            if " " in keyword and keyword in haystack:
-                topic_hits.append(keyword)
-                continue
-            keyword_tokens = _tokenize_normalized(keyword)
-            if keyword_tokens and keyword_tokens.issubset(chunk_tokens):
-                topic_hits.append(keyword)
-        if topic_hits:
-            hits[topic] = sorted(set(topic_hits))
-    return hits
-
-
-def _chunk_levels(haystack: str) -> List[str]:
-    chunk_tokens = _tokenize_normalized(haystack)
-    levels: List[str] = []
-    for level, keywords in NORMALIZED_LEVEL_KEYWORDS.items():
-        for keyword in keywords:
-            if (" " in keyword and keyword in haystack) or _tokenize_normalized(keyword).issubset(chunk_tokens):
-                levels.append(level)
-                break
-    return levels
-
-
-def _normalize_rerank_score(raw: float) -> float:
-    return 1.0 / (1.0 + math.exp(-float(raw) / 4.0))
-
-
-def _clamp01(value: float) -> float:
-    return max(0.0, min(1.0, float(value)))
+# Delegation layer extracted to `query_intelligence.py` to keep this module
+# focused on vector access, fusion, caching, and runtime orchestration.
+def build_query_profile(query: str) -> Dict[str, Any]:
+    return qi_build_query_profile(query)
 
 
 def score_chunk_thematic_match(chunk: Dict, query_profile: Dict[str, Any]) -> Dict[str, Any]:
-    metadata = chunk.get("metadata", {}) or {}
-    haystack = _chunk_haystack(chunk)
-    chunk_topics = _chunk_topics(chunk, haystack)
-    chunk_tokens = _tokenize_normalized(haystack)
-    chunk_levels = _chunk_levels(haystack)
+    return qi_score_chunk_thematic_match(chunk, query_profile)
 
-    primary_topics = set(query_profile.get("primary_topics", []))
-    levels = set(query_profile.get("levels", []))
-    faculties = set(query_profile.get("faculties", []))
-    years = {int(year) for year in query_profile.get("years", [])}
-    informative_tokens = set(query_profile.get("informative_tokens", []))
-    topic_query_hits = query_profile.get("topic_hits", {}) or {}
-    metadata_doc_type = normalize_text(str(metadata.get("document_type") or ""))
-    metadata_faculty = get_metadata_establishment(metadata).strip().upper()
-    metadata_year = metadata.get("year")
 
-    matched_topics = sorted(primary_topics.intersection(chunk_topics.keys()))
-    anchor_topic_hits: Dict[str, List[str]] = {}
-    for topic in matched_topics:
-        exact_hits = sorted(set(topic_query_hits.get(topic, [])).intersection(chunk_topics.get(topic, [])))
-        if exact_hits:
-            anchor_topic_hits[topic] = exact_hits
-    conflicting_topics: Set[str] = set()
-    for topic in primary_topics:
-        conflicts = NORMALIZED_QUERY_TOPIC_RULES.get(topic, {}).get("conflicts", set())
-        conflicting_topics.update(conflicts.intersection(chunk_topics.keys()))
-
-    allowed_document_types: Set[str] = set()
-    for topic in primary_topics:
-        allowed_document_types.update(NORMALIZED_QUERY_TOPIC_RULES.get(topic, {}).get("allowed_document_types", set()))
-    doc_type_match = bool(metadata_doc_type and metadata_doc_type in allowed_document_types)
-    matched_informative_tokens = sorted(informative_tokens.intersection(chunk_tokens))
-    informative_coverage = (
-        float(len(matched_informative_tokens)) / float(len(informative_tokens))
-        if informative_tokens
-        else 0.0
+def apply_retrieval_guardrails(query: str, results: List[Dict], top_k: int) -> Tuple[List[Dict], Dict[str, Any]]:
+    return qi_apply_retrieval_guardrails(
+        query,
+        results,
+        top_k,
+        TOP_K_RETRIEVE,
+        MIN_THEMATIC_SCORE,
+        MIN_SUPPORT_SCORE,
+        MIN_FINAL_SUPPORT_SCORE,
+        MIN_TOP_RERANK_NORMALIZED,
+        TOPICAL_MISMATCH_DROP_THRESHOLD,
     )
-
-    score = 0.35 if not primary_topics else 0.0
-    reasons: List[str] = []
-
-    if anchor_topic_hits:
-        score += 0.48 + (0.06 * min(2, len(anchor_topic_hits) - 1))
-        reasons.append("topic_anchor_match")
-    elif matched_topics:
-        score += 0.24 + (0.05 * min(2, len(matched_topics) - 1))
-        reasons.append("topic_partial_match")
-    elif doc_type_match:
-        score += 0.18
-        reasons.append("doc_type_match")
-    elif primary_topics:
-        reasons.append("topic_missing")
-
-    if doc_type_match and (matched_topics or anchor_topic_hits):
-        score += 0.08
-
-    if levels:
-        matched_levels = sorted(levels.intersection(chunk_levels))
-        if matched_levels:
-            score += 0.12
-            reasons.append("level_match")
-        else:
-            score -= 0.1
-            reasons.append("level_missing")
-    else:
-        matched_levels = []
-
-    faculty_match = True
-    if faculties:
-        if metadata_faculty and metadata_faculty in faculties:
-            score += 0.12
-            reasons.append("faculty_match")
-        elif metadata_faculty and metadata_faculty != "UNKNOWN":
-            score -= 0.24
-            reasons.append("faculty_mismatch")
-            faculty_match = False
-        else:
-            score -= 0.05
-            reasons.append("faculty_unknown")
-
-    year_match = True
-    if years:
-        if isinstance(metadata_year, int) and metadata_year in years:
-            score += 0.08
-            reasons.append("year_match")
-        elif isinstance(metadata_year, int):
-            score -= 0.1
-            reasons.append("year_mismatch")
-            year_match = False
-
-    if conflicting_topics:
-        score -= min(0.55, 0.22 * len(conflicting_topics))
-        reasons.append("topic_conflict")
-
-    if informative_tokens:
-        if informative_coverage >= 0.5:
-            score += 0.18
-            reasons.append("query_coverage_high")
-        elif informative_coverage >= 0.25:
-            score += 0.08
-            reasons.append("query_coverage_medium")
-        elif primary_topics:
-            score -= 0.16
-            reasons.append("query_coverage_low")
-
-    if (matched_topics or anchor_topic_hits) and not conflicting_topics and metadata.get("chunk_relevance_score", 0) >= 2:
-        score += 0.06
-
-    thematic_score = _clamp01(score)
-    return {
-        "thematic_score": thematic_score,
-        "matched_topics": matched_topics,
-        "anchor_topic_hits": anchor_topic_hits,
-        "matched_informative_tokens": matched_informative_tokens,
-        "informative_coverage": round(informative_coverage, 4),
-        "conflicting_topics": sorted(conflicting_topics),
-        "matched_levels": matched_levels,
-        "chunk_topics": sorted(chunk_topics.keys()),
-        "doc_type_match": doc_type_match,
-        "faculty_match": faculty_match,
-        "year_match": year_match,
-        "reasons": reasons,
-    }
-
-
-def apply_retrieval_guardrails(
-    query: str,
-    results: List[Dict],
-    top_k: int,
-    allowed_establishments: Optional[List[str]] = None,
-) -> Tuple[List[Dict], Dict[str, Any]]:
-    query_profile = build_query_profile(query, allowed_establishments=allowed_establishments)
-    guarded: List[Dict] = []
-    rejected: List[Dict] = []
-
-    for result in results:
-        enriched = dict(result)
-        thematic = score_chunk_thematic_match(enriched, query_profile)
-        base_score = float(enriched.get("score", 0.0) or 0.0)
-        support_score = _clamp01((base_score * 0.62) + (float(thematic["thematic_score"]) * 0.38))
-
-        enriched.update(thematic)
-        enriched["guardrail_base_score"] = round(base_score, 4)
-        enriched["support_score"] = round(support_score, 4)
-
-        should_drop = False
-        if query_profile["has_strong_topic"] and float(thematic["thematic_score"]) < MIN_THEMATIC_SCORE:
-            should_drop = True
-        if support_score < MIN_SUPPORT_SCORE:
-            should_drop = True
-        if query_profile["has_strong_topic"] and not thematic.get("anchor_topic_hits") and float(
-            thematic.get("informative_coverage", 0.0) or 0.0
-        ) < 0.2:
-            should_drop = True
-        if thematic["conflicting_topics"] and float(thematic["thematic_score"]) <= TOPICAL_MISMATCH_DROP_THRESHOLD:
-            should_drop = True
-        if not thematic["faculty_match"] or not thematic["year_match"]:
-            should_drop = True
-
-        if should_drop:
-            enriched["rejected"] = True
-            enriched["rejection_reasons"] = list(dict.fromkeys(enriched.get("reasons", []) or []))
-            rejected.append(enriched)
-            continue
-
-        enriched["rejected"] = False
-        enriched["rejection_reasons"] = []
-        guarded.append(enriched)
-
-    guarded.sort(
-        key=lambda item: (
-            float(item.get("support_score", 0.0)),
-            float(item.get("score", 0.0)),
-            float(item.get("dense_score", 0.0)),
-            float(item.get("sparse_score", 0.0)),
-        ),
-        reverse=True,
-    )
-    rejected.sort(key=lambda item: float(item.get("support_score", 0.0)), reverse=True)
-
-    diagnostics = {
-        "query_profile": query_profile,
-        "guarded_count": len(guarded),
-        "rejected_count": len(rejected),
-        "rejection_reasons_top": [item.get("reasons", []) for item in rejected[:5]],
-        "rejection_reason_buckets": _bucket_rejection_reasons(rejected),
-        "rejected_results": rejected,
-        "top_k_requested": top_k,
-    }
-    return guarded[: max(TOP_K_RETRIEVE, top_k * 4)], diagnostics
 
 
 def apply_post_rerank_guardrails(results: List[Dict], query_profile: Dict[str, Any], top_k: int) -> List[Dict]:
-    filtered: List[Dict] = []
-    for result in results:
-        enriched = dict(result)
-        rerank_score = float(enriched.get("rerank_score", 0.0) or 0.0)
-        rerank_normalized = _normalize_rerank_score(rerank_score) if "rerank_score" in enriched else float(
-            enriched.get("score", 0.0) or 0.0
-        )
-        thematic_score = float(enriched.get("thematic_score", 0.0) or 0.0)
-        hybrid_score = float(enriched.get("score", 0.0) or 0.0)
-        final_support = _clamp01((rerank_normalized * 0.56) + (hybrid_score * 0.22) + (thematic_score * 0.22))
-
-        enriched["rerank_score_normalized"] = round(rerank_normalized, 4)
-        enriched["final_support_score"] = round(final_support, 4)
-
-        if query_profile.get("has_strong_topic") and thematic_score < MIN_THEMATIC_SCORE:
-            continue
-        if final_support < MIN_FINAL_SUPPORT_SCORE:
-            continue
-        filtered.append(enriched)
-
-    filtered.sort(
-        key=lambda item: (
-            float(item.get("final_support_score", 0.0)),
-            float(item.get("rerank_score_normalized", 0.0)),
-            float(item.get("support_score", 0.0)),
-        ),
-        reverse=True,
+    return qi_apply_post_rerank_guardrails(
+        results,
+        query_profile=query_profile,
+        top_k=top_k,
+        min_thematic_score=MIN_THEMATIC_SCORE,
+        min_final_support_score=MIN_FINAL_SUPPORT_SCORE,
     )
-    return filtered[:top_k]
-
-
-def select_support_fallback_results(results: List[Dict], query_profile: Dict[str, Any], top_k: int) -> List[Dict]:
-    fallback_candidates: List[Dict] = []
-    for result in results:
-        enriched = dict(result)
-        support_score = float(enriched.get("support_score", enriched.get("score", 0.0)) or 0.0)
-        thematic_score = float(enriched.get("thematic_score", 0.0) or 0.0)
-        if support_score < RERANK_FALLBACK_SUPPORT_SCORE:
-            continue
-        if query_profile.get("has_strong_topic") and thematic_score < RERANK_FALLBACK_THEMATIC_SCORE:
-            continue
-        if enriched.get("conflicting_topics"):
-            continue
-        enriched["final_support_score"] = round(max(float(enriched.get("final_support_score", 0.0) or 0.0), support_score), 4)
-        fallback_candidates.append(enriched)
-
-    fallback_candidates.sort(
-        key=lambda item: (
-            float(item.get("final_support_score", 0.0)),
-            float(item.get("support_score", 0.0)),
-            float(item.get("score", 0.0)),
-        ),
-        reverse=True,
-    )
-    return fallback_candidates[:top_k]
 
 
 def decide_retrieval_abstention(results: List[Dict], query_profile: Dict[str, Any]) -> Dict[str, Any]:
-    if not results:
-        return {"abstain": True, "reason": "no_supported_chunks"}
-
-    top = results[0]
-    top_final_support = float(top.get("final_support_score", top.get("support_score", 0.0)) or 0.0)
-    top_rerank_normalized = float(top.get("rerank_score_normalized", top.get("score", 0.0)) or 0.0)
-    top_thematic = float(top.get("thematic_score", 0.0) or 0.0)
-
-    if query_profile.get("has_strong_topic") and top_thematic < MIN_THEMATIC_SCORE:
-        return {"abstain": True, "reason": "top_chunk_thematically_weak"}
-    if top_final_support < MIN_FINAL_SUPPORT_SCORE:
-        return {"abstain": True, "reason": "top_chunk_support_too_low"}
-    if top_rerank_normalized < MIN_TOP_RERANK_NORMALIZED:
-        return {"abstain": True, "reason": "top_rerank_too_low"}
-
-    conflict_count = sum(1 for item in results[:3] if item.get("conflicting_topics"))
-    if query_profile.get("has_strong_topic") and conflict_count >= 2:
-        return {"abstain": True, "reason": "top_results_thematically_incoherent"}
-
-    return {"abstain": False, "reason": ""}
-
-
-def _empty_debug_payload(raw_query: str, top_k: int, allowed_establishments: Optional[List[str]] = None) -> Dict[str, object]:
-    normalized_allowed = _normalize_allowed_establishments(allowed_establishments)
-    return {
-        "query": "",
-        "raw_query": raw_query,
-        "query_variants": [],
-        "dense_results": [],
-        "sparse_results": [],
-        "fusion_results": [],
-        "merged_results": [],
-        "boosted_results": [],
-        "guarded_results": [],
-        "reranked_results": [],
-        "final_ranked_results": [],
-        "fallback_results": [],
-        "final_results": [],
-        "abstain": True,
-        "abstain_reason": "empty_query",
-        "query_profile": {},
-        "guardrail_diagnostics": {},
-        "allowed_establishments_normalized": normalized_allowed,
-        "candidate_retrieval": {},
-        "trace": {
-            "pipeline_version": "retrieval_explicit_v1",
-            "stages": {
-                "prepare_query": {
-                    "raw_query": raw_query,
-                    "query": "",
-                    "query_variants": [],
-                    "allowed_establishments": normalized_allowed,
-                },
-            },
-            "decision_summary": {
-                "abstain": True,
-                "abstain_reason": "empty_query",
-                "fallback_used": False,
-                "top_k_requested": max(1, int(top_k or TOP_K_FINAL)),
-                "final_result_count": 0,
-                "top_result": {},
-            },
-        },
-    }
-
-
-def _build_explicit_retrieval_pipeline(
-    raw_query: str,
-    top_k: int,
-    allowed_establishments: Optional[List[str]] = None,
-    manifest_override: Optional[Dict[str, Any]] = None,
-) -> Dict[str, object]:
-    if not raw_query or not raw_query.strip():
-        return _empty_debug_payload(raw_query, top_k, allowed_establishments=allowed_establishments)
-
-    from .qdrant_search import run_qdrant_candidate_search
-
-    started_at = time.perf_counter()
-    effective_top_k = max(1, int(top_k))
-    query = enhance_query(raw_query)
-    normalized_allowed = _normalize_allowed_establishments(allowed_establishments)
-    query_profile = build_query_profile(query, allowed_establishments=normalized_allowed)
-    retrieve_k = max(TOP_K_RETRIEVE * 2, effective_top_k * 6)
-    if normalized_allowed:
-        retrieve_k = max(retrieve_k, 60)
-    queries = generate_multi_queries(query)
-
-    candidate_payload = run_qdrant_candidate_search(
-        query=query,
-        queries=queries,
+    return qi_decide_retrieval_abstention(
+        results,
         query_profile=query_profile,
-        retrieve_k=retrieve_k,
-        allowed_establishments=normalized_allowed,
-        manifest_override=manifest_override,
+        min_thematic_score=MIN_THEMATIC_SCORE,
+        min_final_support_score=MIN_FINAL_SUPPORT_SCORE,
+        min_top_rerank_normalized=MIN_TOP_RERANK_NORMALIZED,
     )
-
-    dense_results = _normalize_result_rows(list(candidate_payload.get("dense_results", [])))
-    sparse_results = _normalize_result_rows(list(candidate_payload.get("sparse_results", [])))
-    fusion_results = _normalize_result_rows(list(candidate_payload.get("fusion_results", [])))
-    merged_results = _normalize_result_rows(merge_dense_and_sparse(dense_results, sparse_results, top_k=retrieve_k))
-
-    dense_by_id = {result.get("id"): result for result in dense_results}
-    sparse_by_id = {result.get("id"): result for result in sparse_results}
-    merged_by_id = {result.get("id"): result for result in merged_results}
-    ranking_seed = fusion_results or merged_results
-    enriched_merged: List[Dict] = []
-    for result in ranking_seed:
-        item = _normalize_result_row(result)
-        fallback_scores = merged_by_id.get(item.get("id"), {})
-        item["dense_score"] = float(dense_by_id.get(item.get("id"), {}).get("score", 0.0) or 0.0)
-        item["sparse_score"] = float(sparse_by_id.get(item.get("id"), {}).get("score", 0.0) or 0.0)
-        if "hybrid_raw_score" not in item and "hybrid_raw_score" in fallback_scores:
-            item["hybrid_raw_score"] = float(fallback_scores.get("hybrid_raw_score", 0.0) or 0.0)
-        item["score_type"] = str(fallback_scores.get("score_type") or item.get("score_type") or "hybrid")
-        item["retrieval_sources"] = [
-            source
-            for source, lookup in (("dense", dense_by_id), ("sparse", sparse_by_id))
-            if item.get("id") in lookup
-        ]
-        enriched_merged.append(_normalize_result_row(item))
-
-    boosted_results = _normalize_result_rows(
-        _filter_results_by_allowed_establishments(apply_metadata_boost(enriched_merged, query), normalized_allowed)
-    )
-    guarded_results, guardrail_diagnostics = apply_retrieval_guardrails(
-        query,
-        boosted_results,
-        top_k=effective_top_k,
-        allowed_establishments=normalized_allowed,
-    )
-    guarded_results = _normalize_result_rows(guarded_results)
-    rejected_results = _normalize_result_rows(list(guardrail_diagnostics.get("rejected_results", [])))
-
-    reranked_results = _normalize_result_rows(rerank_chunks(query, guarded_results, top_k=max(effective_top_k * 2, effective_top_k)))
-    final_ranked_results = _normalize_result_rows(
-        apply_post_rerank_guardrails(
-            _filter_results_by_allowed_establishments(reranked_results, normalized_allowed),
-            query_profile=guardrail_diagnostics.get("query_profile", {}),
-            top_k=effective_top_k,
-        )
-    )
-    abstention = decide_retrieval_abstention(final_ranked_results, guardrail_diagnostics.get("query_profile", {}))
-    fallback_results = _normalize_result_rows(
-        select_support_fallback_results(
-            _filter_results_by_allowed_establishments(guarded_results, normalized_allowed),
-            query_profile=guardrail_diagnostics.get("query_profile", {}),
-            top_k=effective_top_k,
-        )
-    )
-
-    fallback_used = False
-    if abstention["abstain"] and abstention["reason"] == "top_rerank_too_low" and fallback_results:
-        final_results = _normalize_result_rows(truncate_chunks(fallback_results, MAX_CONTEXT_CHARS))
-        abstention = {"abstain": False, "reason": "support_fallback"}
-        fallback_used = True
-    else:
-        final_results = [] if abstention["abstain"] else _normalize_result_rows(
-            truncate_chunks(
-                _filter_results_by_allowed_establishments(final_ranked_results, normalized_allowed),
-                MAX_CONTEXT_CHARS,
-            )
-        )
-
-    reranked_ids = {item.get("id") for item in reranked_results if item.get("id")}
-    final_ranked_ids = {item.get("id") for item in final_ranked_results if item.get("id")}
-    post_rerank_rejected = [
-        item
-        for item in reranked_results
-        if item.get("id") and item.get("id") in reranked_ids - final_ranked_ids
-    ]
-
-    total_latency_ms = round((time.perf_counter() - started_at) * 1000.0, 2)
-    trace = {
-        "pipeline_version": "retrieval_explicit_v1",
-        "stages": {
-            "prepare_query": {
-                "raw_query": raw_query,
-                "query": query,
-                "query_variants": queries,
-                "allowed_establishments": normalized_allowed,
-                "query_profile": query_profile,
-            },
-            "candidate_retrieval": {
-                "backend": "qdrant",
-                "retrieve_k": retrieve_k,
-                "manifest": candidate_payload.get("manifest", {}),
-                "query_filter_applied": bool(candidate_payload.get("query_filter_applied")),
-                "query_filter": candidate_payload.get("query_filter"),
-                "latency_ms": candidate_payload.get("latency_ms", {}),
-                "dense": _summarize_results(dense_results),
-                "sparse": _summarize_results(sparse_results),
-                "fusion": _summarize_results(fusion_results),
-            },
-            "candidate_merge": {
-                "merged": _summarize_results(enriched_merged),
-            },
-            "metadata_boost": {
-                "boosted": _summarize_results(boosted_results),
-            },
-            "guardrails": {
-                "guarded": _summarize_results(guarded_results),
-                "rejected_count": len(rejected_results),
-                "rejection_reason_buckets": _bucket_rejection_reasons(rejected_results),
-            },
-            "rerank": {
-                "enabled": bool(USE_RERANK),
-                "reranked": _summarize_results(reranked_results),
-                "post_rerank_rejected_count": len(post_rerank_rejected),
-            },
-            "final_selection": {
-                "final_ranked": _summarize_results(final_ranked_results),
-                "fallback": _summarize_results(fallback_results),
-                "final_results": _summarize_results(final_results),
-                "latency_ms_total": total_latency_ms,
-            },
-        },
-        "decision_summary": {
-            "abstain": bool(abstention["abstain"]),
-            "abstain_reason": str(abstention["reason"] or ""),
-            "fallback_used": fallback_used,
-            "top_k_requested": effective_top_k,
-            "final_result_count": len(final_results),
-            "top_result": _top_result_snapshot(final_results),
-        },
-    }
-
-    return {
-        "query": query,
-        "raw_query": raw_query,
-        "query_variants": queries,
-        "dense_results": dense_results,
-        "sparse_results": sparse_results,
-        "fusion_results": fusion_results,
-        "merged_results": enriched_merged,
-        "boosted_results": boosted_results,
-        "guarded_results": guarded_results,
-        "reranked_results": reranked_results,
-        "final_ranked_results": final_ranked_results,
-        "fallback_results": fallback_results,
-        "final_results": final_results,
-        "abstain": bool(abstention["abstain"]),
-        "abstain_reason": str(abstention["reason"] or ""),
-        "query_profile": guardrail_diagnostics.get("query_profile", query_profile),
-        "guardrail_diagnostics": {
-            **guardrail_diagnostics,
-            "rejected_results": rejected_results,
-            "rejection_reason_buckets": _bucket_rejection_reasons(rejected_results),
-        },
-        "allowed_establishments_normalized": normalized_allowed,
-        "candidate_retrieval": candidate_payload,
-        "trace": trace,
-    }
-
-
-def is_search_backend_ready() -> bool:
-    try:
-        from .qdrant_search import qdrant_index_ready
-
-        return qdrant_index_ready()
-    except Exception:
-        return False
-
-
-def run_hybrid_search_debug(
-    raw_query: str,
-    top_k: int = TOP_K_FINAL,
-    allowed_establishments: Optional[List[str]] = None,
-    manifest_override: Optional[Dict[str, Any]] = None,
-) -> Dict[str, object]:
-    return _build_explicit_retrieval_pipeline(
-        raw_query,
-        top_k=top_k,
-        allowed_establishments=allowed_establishments,
-        manifest_override=manifest_override,
-    )
-
-
-def get_relevant_chunks(
-    raw_query: str,
-    top_k: int = TOP_K_FINAL,
-    allowed_establishments: Optional[List[str]] = None,
-    manifest_override: Optional[Dict[str, Any]] = None,
-) -> List[Dict]:
-    debug_payload = _build_explicit_retrieval_pipeline(
-        raw_query,
-        top_k=top_k,
-        allowed_establishments=allowed_establishments,
-        manifest_override=manifest_override,
-    )
-    return list(debug_payload.get("final_results", []))
 
 
 if __name__ == "__main__":

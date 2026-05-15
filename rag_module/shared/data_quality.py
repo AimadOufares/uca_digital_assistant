@@ -1,8 +1,8 @@
 import os
 from typing import Dict, List
 
-from ..offline.backup_utils import create_backup
-from .metadata_policy import detect_document_type, prepare_chunk_metadata
+from .backup_utils import create_backup
+from .metadata_policy import detect_service_type, prepare_chunk_metadata
 from .relevance_policy import compute_chunk_relevance, compute_source_relevance, should_keep_chunk
 
 
@@ -24,7 +24,7 @@ def _env_int(name: str, default: int) -> int:
     return value if value > 0 else default
 
 
-MAX_CHUNKS_PER_SOURCE = _env_int("RAG_MAX_CHUNKS_PER_SOURCE", 60)
+MAX_CHUNKS_PER_SOURCE = _env_int("RAG_MAX_CHUNKS_PER_SOURCE", 120)
 DOMAIN_FILTER_ENABLED = _env_bool("RAG_DOMAIN_FILTER_ENABLED", True)
 
 
@@ -39,7 +39,7 @@ def _downsample_evenly(items: List[Dict], max_items: int) -> List[Dict]:
     return [items[index] for index in indices]
 
 
-def postprocess_chunks_for_source(chunks: List[Dict], source_path: str) -> List[Dict]:
+def postprocess_chunks_for_source(chunks: List[Dict], source_path: str, corpus: str = "main") -> List[Dict]:
     prepared_chunks: List[Dict] = []
     joined_text_parts: List[str] = []
 
@@ -53,7 +53,7 @@ def postprocess_chunks_for_source(chunks: List[Dict], source_path: str) -> List[
     if not prepared_chunks:
         return []
 
-    source_document_type = detect_document_type(source_path, "\n".join(joined_text_parts[:8]))
+    source_document_type = detect_service_type(source_path, "\n".join(joined_text_parts[:8]))
     source_relevance_score, source_relevance_hits = compute_source_relevance(
         source_path,
         "\n".join(joined_text_parts),
@@ -71,8 +71,9 @@ def postprocess_chunks_for_source(chunks: List[Dict], source_path: str) -> List[
         metadata["source_relevance_hits"] = source_relevance_hits
         metadata["chunk_relevance_score"] = chunk_relevance_score
         metadata["chunk_relevance_hits"] = chunk_relevance_hits
+        metadata["corpus"] = corpus
 
-        if DOMAIN_FILTER_ENABLED and not should_keep_chunk(chunk_relevance_score):
+        if corpus == "main" and DOMAIN_FILTER_ENABLED and not should_keep_chunk(chunk_relevance_score):
             continue
 
         updated_chunk = dict(chunk)

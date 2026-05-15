@@ -1,0 +1,57 @@
+{% load static %}
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Connexion etudiante UCA</title>
+    <link rel="icon" type="image/png" href="{% static 'api_app/img/uca-logo.png' %}">
+    <link rel="apple-touch-icon" href="{% static 'api_app/img/uca-logo.png' %}">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="{% static 'api_app/uca.css' %}">
+    <link rel="stylesheet" href="{% static 'api_app/auth.css' %}">
+</head>
+<body class="auth-page">
+    <main class="auth-shell">
+        <section class="auth-intro" aria-label="Universite Cadi Ayyad">
+            <div>
+                <img class="uca-logo" src="{% static 'api_app/img/uca-logo.svg' %}" alt="Universite Cadi Ayyad">
+                <div class="auth-intro-copy">
+                    <h1>Assistant Digital UCA</h1>
+                    <p>Un espace etudiant protege pour interroger les sources institutionnelles et retrouver les services numeriques utiles.</p>
+                </div>
+            </div>
+            <p class="auth-note">Acces reserve aux comptes etudiants autorises par l'Universite Cadi Ayyad.</p>
+        </section>
+
+        <section class="auth-card">
+            <h2>Connexion etudiante</h2>
+            <p>Connectez-vous avec votre email UCA pour acceder au chat et a votre historique.</p>
+            <form class="auth-form" method="post">
+                {% csrf_token %}
+                {% if next %}
+                    <input type="hidden" name="{{ redirect_field_name }}" value="{{ next }}">
+                {% endif %}
+                {% if form.non_field_errors %}
+                    <ul class="errors">{{ form.non_field_errors }}</ul>
+                {% endif %}
+                {% for field in form %}
+                    <div class="field-group">
+                        <label for="{{ field.id_for_label }}">{{ field.label }}</label>
+                        {{ field }}
+                        {% if field.errors %}
+                            <ul class="field-errors">{{ field.errors }}</ul>
+                        {% endif %}
+                    </div>
+                {% endfor %}
+                <button class="uca-btn uca-btn-primary" type="submit">Se connecter</button>
+            </form>
+            <div class="auth-links">
+                <a href="{% url 'student-signup' %}">Creer un compte etudiant UCA</a>
+            </div>
+        </section>
+    </main>
+</body>
+</html>

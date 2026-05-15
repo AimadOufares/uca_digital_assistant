@@ -1,0 +1,194 @@
+:root {
+    --uca-blue: #0b4f8a;
+    --uca-blue-dark: #082f55;
+    --uca-blue-soft: #eaf2f8;
+    --uca-gold: #f2b233;
+    --uca-gold-dark: #c88716;
+    --uca-red: #c73a32;
+    --uca-bg: #f5f7fa;
+    --uca-surface: #ffffff;
+    --uca-surface-muted: #f8fafc;
+    --uca-border: #d8e1ea;
+    --uca-text: #102033;
+    --uca-muted: #607086;
+    --uca-success: #18875f;
+    --uca-warning: #a4660b;
+    --uca-danger: #b42318;
+    --uca-shadow: 0 18px 42px rgba(16, 32, 51, 0.09);
+    --uca-radius: 8px;
+    --uca-radius-lg: 12px;
+    --uca-font: Inter, Arial, sans-serif;
+    
+    /* Premium Design Tokens */
+    --uca-gradient-primary: linear-gradient(135deg, #0b4f8a 0%, #1a6ab3 100%);
+    --uca-shadow-soft: 0 8px 30px rgba(8, 47, 85, 0.08);
+    --uca-shadow-hover: 0 12px 40px rgba(8, 47, 85, 0.12);
+    --uca-glass-bg: rgba(255, 255, 255, 0.85);
+    --uca-glass-border: rgba(255, 255, 255, 0.4);
+}
+
+* {
+    box-sizing: border-box;
+}
+
+html {
+    font-family: var(--uca-font);
+    color: var(--uca-text);
+    background: var(--uca-bg);
+}
+
+body {
+    margin: 0;
+}
+
+button,
+input,
+textarea,
+select {
+    font: inherit;
+}
+
+button {
+    cursor: pointer;
+}
+
+button:disabled,
+input:disabled,
+textarea:disabled {
+    cursor: not-allowed;
+    opacity: 0.62;
+}
+
+a {
+    color: var(--uca-blue);
+}
+
+.uca-logo {
+    display: block;
+    width: 156px;
+    max-width: 100%;
+    height: auto;
+}
+
+.uca-brand-lockup {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    min-width: 0;
+}
+
+.uca-brand-lockup img {
+    width: 148px;
+    height: auto;
+    flex: 0 0 auto;
+}
+
+.uca-brand-text {
+    min-width: 0;
+}
+
+.uca-brand-title {
+    margin: 0;
+    color: var(--uca-blue-dark);
+    font-size: 15px;
+    font-weight: 800;
+    line-height: 1.2;
+}
+
+.uca-brand-subtitle {
+    margin: 3px 0 0;
+    color: var(--uca-muted);
+    font-size: 12px;
+    line-height: 1.3;
+}
+
+.uca-btn {
+    border: 1px solid transparent;
+    border-radius: var(--uca-radius);
+    padding: 10px 14px;
+    min-height: 40px;
+    font-weight: 750;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    text-decoration: none;
+    transition: background 0.18s ease, border-color 0.18s ease, color 0.18s ease, transform 0.12s ease;
+}
+
+.uca-btn:hover {
+    transform: translateY(-1px);
+}
+
+.uca-btn-primary {
+    background: var(--uca-blue);
+    color: #ffffff;
+}
+
+.uca-btn-primary:hover {
+    background: var(--uca-blue-dark);
+}
+
+.uca-btn-secondary {
+    background: var(--uca-surface);
+    border-color: var(--uca-border);
+    color: var(--uca-blue-dark);
+}
+
+.uca-btn-danger {
+    background: #fff1f0;
+    border-color: #ffd1cc;
+    color: var(--uca-danger);
+}
+
+.uca-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    border-radius: 999px;
+    padding: 6px 10px;
+    border: 1px solid var(--uca-border);
+    background: var(--uca-surface);
+    color: var(--uca-muted);
+    font-size: 12px;
+    font-weight: 750;
+    white-space: nowrap;
+}
+
+.uca-pill::before {
+    content: "";
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: currentColor;
+}
+
+.uca-pill-ok {
+    color: var(--uca-success);
+    background: #ecfdf5;
+    border-color: #b7ead1;
+}
+
+.uca-pill-warn {
+    color: var(--uca-warning);
+    background: #fff8e6;
+    border-color: #f5d893;
+}
+
+.uca-pill-bad {
+    color: var(--uca-danger);
+    background: #fff1f0;
+    border-color: #ffd1cc;
+}
+
+.sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+}

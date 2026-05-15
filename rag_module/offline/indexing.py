@@ -2,37 +2,48 @@ import hashlib
 import json
 import logging
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List
 
-import numpy as np
 from sentence_transformers import SentenceTransformer
 
 try:
-    from ..offline.preparation import verify_qdrant_indexing_prerequisites
-    from ..offline.qdrant_indexing import build_candidate_collection_name, build_qdrant_index
+    from ..offline.indexing_metadata import (
+        enrich_index_metadata as im_enrich_index_metadata,
+        get_hash as im_get_hash,
+        near_duplicate_signature as im_near_duplicate_signature,
+        normalize as im_normalize,
+        should_index_chunk as im_should_index_chunk,
+    )
     from ..shared.env_loader import load_env_file
+    from ..shared.runtime import get_runtime_settings
 except ImportError:  # pragma: no cover
-    from rag_module.offline.preparation import verify_qdrant_indexing_prerequisites
-    from rag_module.offline.qdrant_indexing import build_candidate_collection_name, build_qdrant_index
+    from rag_module.offline.indexing_metadata import (
+        enrich_index_metadata as im_enrich_index_metadata,
+        get_hash as im_get_hash,
+        near_duplicate_signature as im_near_duplicate_signature,
+        normalize as im_normalize,
+        should_index_chunk as im_should_index_chunk,
+    )
     from rag_module.shared.env_loader import load_env_file
+    from rag_module.shared.runtime import get_runtime_settings
+
 
 load_env_file()
+RUNTIME = get_runtime_settings()
 
-
-PROCESSED_PATH = "data_storage/processed"
-INDEX_PATH = "data_storage/index"
-CACHE_PATH = "data_storage/cache/embeddings_cache.json"
-
+CACHE_PATH = str(RUNTIME.rag_cache_dir / "embeddings_cache.json")
 DEFAULT_EMBEDDING_MODEL = "BAAI/bge-m3"
 FALLBACK_EMBEDDING_MODELS = [
-    "intfloat/multilingual-e5-base",
     "sentence-transformers/all-MiniLM-L6-v2",
     "all-MiniLM-L6-v2",
 ]
-BATCH_SIZE = 32
+BATCH_SIZE = 128
+HNSW_M = 32
+HNSW_EF_CONSTRUCTION = 200
+HNSW_EF_SEARCH = 64
 
-os.makedirs(INDEX_PATH, exist_ok=True)
 os.makedirs(os.path.dirname(CACHE_PATH), exist_ok=True)
 
 logging.basicConfig(level=logging.INFO)
@@ -41,36 +52,32 @@ logger = logging.getLogger(__name__)
 _embedding_model = None
 _embedding_model_name = None
 
-
-def _env_bool(name: str, default: bool) -> bool:
-    raw = os.getenv(name, "").strip().lower()
-    if not raw:
-        return default
-    return raw in {"1", "true", "yes", "on"}
-
-
 def get_hash(text: str) -> str:
-    return hashlib.md5(text.encode("utf-8")).hexdigest()
+    return im_get_hash(text)
 
 
 def normalize(text: str) -> str:
-    return " ".join((text or "").strip().split())
+    return im_normalize(text)
+
+
+def _near_duplicate_signature(text: str) -> str:
+    return im_near_duplicate_signature(text)
+
+
+def should_index_chunk(text: str, metadata: Dict) -> bool:
+    return im_should_index_chunk(text, metadata)
+
+
+def enrich_index_metadata(text: str, metadata: Dict, corpus_name: str) -> Dict:
+    return im_enrich_index_metadata(text, metadata, corpus_name)
 
 
 def get_model_name() -> str:
     return os.getenv("RAG_EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL).strip() or DEFAULT_EMBEDDING_MODEL
 
 
-def embedding_model_is_strict() -> bool:
-    return _env_bool("RAG_STRICT_EMBEDDING_MODEL", True)
-
-
 def get_candidate_model_names() -> List[str]:
-    requested = get_model_name()
-    if embedding_model_is_strict():
-        return [requested]
-
-    candidates = [requested, *FALLBACK_EMBEDDING_MODELS]
+    candidates = [get_model_name(), *FALLBACK_EMBEDDING_MODELS]
     unique: List[str] = []
     seen = set()
     for candidate in candidates:
@@ -100,24 +107,12 @@ def load_sentence_transformer_offline(model_names: List[str]) -> tuple[SentenceT
     errors: List[str] = []
     for model_name in model_names:
         try:
-            model = SentenceTransformer(
-                model_name,
-                device="cpu",
-                local_files_only=True,
-            )
+            model = SentenceTransformer(model_name, device="cpu", local_files_only=True)
             return model, model_name
         except Exception as exc:
             errors.append(f"{model_name}: {exc}")
-
-    for model_name in model_names:
-        try:
-            model = SentenceTransformer(model_name, device="cpu")
-            return model, model_name
-        except Exception as exc:
-            errors.append(f"{model_name} (online): {exc}")
-
     raise RuntimeError(
-        "Aucun modele d'embedding compatible n'est disponible. "
+        "Aucun modele d'embedding local n'est disponible. "
         f"Modeles testes: {', '.join(model_names)}. "
         f"Details: {' | '.join(errors[:3])}"
     )
@@ -165,40 +160,51 @@ def load_cache() -> Dict[str, Dict[str, List[float]]]:
 
 
 def save_cache(cache: Dict[str, Dict[str, List[float]]]) -> None:
-    temp_path = CACHE_PATH + ".tmp"
-    with open(temp_path, "w", encoding="utf-8") as handle:
+    with open(CACHE_PATH, "w", encoding="utf-8") as handle:
         json.dump(cache, handle, ensure_ascii=False)
-    os.replace(temp_path, CACHE_PATH)
 
 
-def build_indexable_text(text: str, metadata: Dict) -> str:
-    section_title = normalize(str(metadata.get("section_title") or ""))
-    section_path = normalize(" ".join(str(part).strip() for part in metadata.get("section_path", []) if str(part).strip()))
-    document_type = normalize(str(metadata.get("document_type") or ""))
-    establishment = normalize(str(metadata.get("etablissement") or metadata.get("faculty") or ""))
-    year = metadata.get("year")
-
-    parts = [
-        section_title,
-        section_path,
-        document_type,
-        establishment,
-        str(year).strip() if year else "",
-        normalize(text),
-    ]
-    return "\n".join(part for part in parts if part)
+def _processed_dir_for_corpus(corpus: str) -> Path:
+    if corpus == "archive":
+        return Path(RUNTIME.rag_processed_archive_dir)
+    if corpus == "drive":
+        return Path(RUNTIME.rag_processed_drive_dir)
+    return Path(RUNTIME.rag_processed_main_dir)
 
 
-def load_chunks() -> List[Dict]:
-    files = sorted(Path(PROCESSED_PATH).glob("*.json"))
+def get_published_corpora() -> List[str]:
+    configured = []
+    for corpus in RUNTIME.rag_index_published_corpora:
+        value = (corpus or "").strip().lower()
+        if value in {"main", "drive"} and value not in configured:
+            configured.append(value)
+    return configured or ["main", "drive"]
+
+
+def resolve_index_corpora(corpus: str = "published") -> List[str]:
+    if corpus in {"main", "drive", "archive"}:
+        return [corpus]
+    if corpus in {"main_and_drive", "published"}:
+        return get_published_corpora()
+    return ["main"]
+
+
+def load_chunks(corpus: str = "main") -> List[Dict]:
+    corpora = resolve_index_corpora(corpus)
     chunks: List[Dict] = []
     seen_ids = set()
     seen_text_hashes = set()
+    seen_near_duplicate_signatures = set()
 
-    for file in files:
-        try:
-            with open(file, "r", encoding="utf-8") as handle:
-                data = json.load(handle)
+    for corpus_name in corpora:
+        processed_path = _processed_dir_for_corpus(corpus_name)
+        for file_path in sorted(processed_path.glob("*.json")):
+            try:
+                with file_path.open("r", encoding="utf-8") as handle:
+                    data = json.load(handle)
+            except Exception as exc:
+                logger.warning("Erreur fichier %s: %s", file_path, exc)
+                continue
 
             text = normalize(data.get("text", ""))
             if len(text) < 30:
@@ -207,6 +213,10 @@ def load_chunks() -> List[Dict]:
             metadata = data.get("metadata", {})
             if not isinstance(metadata, dict):
                 metadata = {}
+
+            metadata = enrich_index_metadata(text, metadata, corpus_name)
+            if not should_index_chunk(text, metadata):
+                continue
 
             chunk_id = (
                 data.get("id")
@@ -221,10 +231,16 @@ def load_chunks() -> List[Dict]:
             if text_hash in seen_text_hashes:
                 continue
 
+            near_duplicate_signature = _near_duplicate_signature(text)
+            if near_duplicate_signature and near_duplicate_signature in seen_near_duplicate_signatures:
+                continue
+
             seen_ids.add(chunk_id)
             seen_text_hashes.add(text_hash)
+            if near_duplicate_signature:
+                seen_near_duplicate_signatures.add(near_duplicate_signature)
 
-            source_path = metadata.get("source", str(file))
+            source_path = metadata.get("source", str(file_path))
             source_name = metadata.get("file_name") or Path(source_path).name
             merged_metadata = dict(metadata)
             merged_metadata.update(
@@ -232,6 +248,7 @@ def load_chunks() -> List[Dict]:
                     "source": source_path,
                     "file_name": source_name,
                     "hash": chunk_id,
+                    "date_indexed": datetime.now(timezone.utc).isoformat(),
                 }
             )
 
@@ -239,19 +256,23 @@ def load_chunks() -> List[Dict]:
                 {
                     "id": chunk_id,
                     "text": text,
-                    "indexed_text": build_indexable_text(text, merged_metadata),
                     "metadata": merged_metadata,
                 }
             )
-        except Exception as exc:
-            logger.warning("Erreur fichier %s: %s", file, exc)
 
-    logger.info("%s chunks charges", len(chunks))
+    logger.info("%s chunks charges pour %s", len(chunks), ",".join(corpora))
     return chunks
 
 
-def select_chunks_for_full_rebuild(chunks: List[Dict]) -> List[Dict]:
-    return list(chunks)
+def build_bm25_corpus(chunks: List[Dict]) -> List[Dict]:
+    return [
+        {
+            "id": chunk.get("id"),
+            "text": chunk.get("text", ""),
+            "metadata": chunk.get("metadata", {}) or {},
+        }
+        for chunk in chunks
+    ]
 
 
 def embed(texts: List[str], cache: Dict[str, Dict[str, List[float]]]) -> List[List[float]]:
@@ -263,96 +284,37 @@ def embed(texts: List[str], cache: Dict[str, Dict[str, List[float]]]) -> List[Li
     embeddings: List[List[float]] = []
     new_cache = False
 
-    for i in range(0, len(texts), BATCH_SIZE):
-        batch = texts[i : i + BATCH_SIZE]
-
-        batch_emb: List[List[float]] = []
+    for index in range(0, len(texts), BATCH_SIZE):
+        batch = texts[index : index + BATCH_SIZE]
+        batch_embeddings: List[List[float]] = []
         to_compute: List[str] = []
         idx_map: List[int] = []
 
-        for j, text in enumerate(batch):
-            prepared_text = prepare_passage_text(text, model_name)
-            cache_key = get_hash(prepared_text)
-            cached = model_cache.get(cache_key)
+        for position, text in enumerate(batch):
+            prepared = prepare_passage_text(text, model_name)
+            digest = get_hash(prepared)
+            cached = model_cache.get(digest)
             if cached is not None:
-                batch_emb.append(cached)
+                batch_embeddings.append(cached)
             else:
-                batch_emb.append([])
-                to_compute.append(prepared_text)
-                idx_map.append(j)
+                batch_embeddings.append([])
+                to_compute.append(prepared)
+                idx_map.append(position)
 
         if to_compute:
             computed = model.encode(to_compute, normalize_embeddings=True)
-            for k, emb in enumerate(computed):
-                j = idx_map[k]
-                prepared_text = to_compute[k]
-                cache_key = get_hash(prepared_text)
-                emb_list = emb.tolist()
-                batch_emb[j] = emb_list
-                model_cache[cache_key] = emb_list
+            for position, embedding in enumerate(computed):
+                batch_index = idx_map[position]
+                prepared = to_compute[position]
+                digest = get_hash(prepared)
+                embedding_list = embedding.tolist()
+                batch_embeddings[batch_index] = embedding_list
+                model_cache[digest] = embedding_list
                 new_cache = True
 
-        embeddings.extend(batch_emb)
-        logger.info("Progress embeddings: %s/%s", i + len(batch), len(texts))
+        embeddings.extend(batch_embeddings)
+        logger.info("Progress embeddings: %s/%s", index + len(batch), len(texts))
 
     if new_cache:
         save_cache(cache)
-
     return embeddings
-
-
-def build_index(
-    chunks: List[Dict],
-    target_collection_name: str = "",
-    manifest_path=None,
-    sparse_encoder_path=None,
-    chunks_snapshot_path=None,
-) -> Dict:
-    verify_qdrant_indexing_prerequisites()
-    chunks_to_index = select_chunks_for_full_rebuild(chunks)
-    texts = [chunk.get("indexed_text", chunk["text"]) for chunk in chunks_to_index]
-    if not texts:
-        raise RuntimeError("Aucun texte disponible pour l'indexation.")
-
-    cache = load_cache()
-    embeddings = embed(texts, cache)
-    vectors = np.array(embeddings, dtype="float32")
-    if vectors.ndim != 2 or vectors.shape[0] == 0:
-        raise RuntimeError("Aucun vecteur genere pour construire l'index.")
-
-    dim = int(vectors.shape[1])
-    dense_embeddings = vectors.tolist()
-
-    requested_model_name = get_model_name()
-    active_model_name = get_active_model_name()
-    fallback_model_name = active_model_name if active_model_name != requested_model_name else ""
-
-    effective_target = (target_collection_name or "").strip() or build_candidate_collection_name()
-    manifest = build_qdrant_index(
-        chunks=chunks_to_index,
-        model_name=active_model_name,
-        embedding_dim=dim,
-        dense_vectors=dense_embeddings,
-        requested_model_name=requested_model_name,
-        fallback_model_name=fallback_model_name,
-        target_collection_name=effective_target,
-        manifest_path=manifest_path,
-        sparse_encoder_path=sparse_encoder_path,
-        chunks_snapshot_path=chunks_snapshot_path,
-    )
-    logger.info(
-        "INDEX QDRANT CANDIDAT CREE AVEC SUCCES | collection=%s | modele=%s | dim=%s | chunks=%s",
-        effective_target,
-        active_model_name,
-        dim,
-        len(chunks_to_index),
-    )
-    return manifest
-
-
-if __name__ == "__main__":
-    chunks_data = load_chunks()
-    if not chunks_data:
-        logger.error("Aucun chunk trouve !")
-    else:
-        build_index(chunks_data)

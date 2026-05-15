@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 220" role="img" aria-labelledby="title desc">
+  <title id="title">Universite Cadi Ayyad</title>
+  <desc id="desc">Logo institutionnel local pour l'interface UCA Digital Assistant.</desc>
+  <rect width="720" height="220" rx="18" fill="#ffffff"/>
+  <g transform="translate(34 34)">
+    <path d="M76 0 152 38v76c0 38-31 70-76 92C31 184 0 152 0 114V38L76 0Z" fill="#0b4f8a"/>
+    <path d="M76 20 133 49v62c0 28-22 52-57 70-35-18-57-42-57-70V49L76 20Z" fill="#ffffff" opacity=".96"/>
+    <path d="M76 36 119 58v51c0 21-16 39-43 54-27-15-43-33-43-54V58l43-22Z" fill="#0b4f8a"/>
+    <path d="M52 81h48v14H52V81Zm0 27h48v14H52v-14Z" fill="#f2b233"/>
+    <circle cx="76" cy="64" r="10" fill="#c73a32"/>
+  </g>
+  <g transform="translate(224 52)" fill="#0b2742">
+    <text x="0" y="42" font-family="Arial, Helvetica, sans-serif" font-size="42" font-weight="700">Universite Cadi Ayyad</text>
+    <text x="0" y="83" font-family="Arial, Helvetica, sans-serif" font-size="25" fill="#6b7a8c">Assistant Digital UCA</text>
+    <path d="M0 112h350" stroke="#f2b233" stroke-width="8" stroke-linecap="round"/>
+    <path d="M365 112h72" stroke="#c73a32" stroke-width="8" stroke-linecap="round"/>
+  </g>
+</svg>

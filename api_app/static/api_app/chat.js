@@ -1,22 +1,37 @@
 const chatMessages = document.getElementById("chatMessages");
 const chatForm = document.getElementById("chatForm");
 const messageInput = document.getElementById("messageInput");
-const userEstablishment = document.getElementById("userEstablishment");
 const sendButton = document.getElementById("sendButton");
 const typingIndicator = document.getElementById("typingIndicator");
 const promptButtons = document.querySelectorAll(".prompt-btn");
+const conversationList = document.getElementById("conversationList");
+const newConversationButton = document.getElementById("newConversationButton");
+const conversationTitle = document.getElementById("conversationTitle");
+const appContainer = document.querySelector(".app-container");
+const sidebarToggleButton = document.getElementById("sidebarToggleButton");
+const sidebarCloseButton = document.getElementById("sidebarCloseButton");
+const sidebarOverlay = document.getElementById("sidebarOverlay");
+const serviceStatus = document.getElementById("serviceStatus");
+const messageCounter = document.getElementById("messageCounter");
+const historyCount = document.getElementById("historyCount");
 
 const API_URL = "/api/chat/";
+const CONVERSATIONS_API_URL = "/api/chat/conversations/";
+const HEALTH_URL = "/api/health/ready/";
+const MESSAGE_MAX_LENGTH = 2000;
+const WELCOME_PROMPTS = [
+    "Comment obtenir mon attestation sur UC@Student ?",
+    "Comment utiliser la plateforme PEDOC ?",
+    "A quoi sert la plateforme UCAPLAT ?",
+];
+let currentConversationId = null;
 
 function getCookie(name) {
-    const cookies = document.cookie ? document.cookie.split(";") : [];
-    for (const cookie of cookies) {
-        const trimmed = cookie.trim();
-        if (trimmed.startsWith(`${name}=`)) {
-            return decodeURIComponent(trimmed.slice(name.length + 1));
-        }
-    }
-    return "";
+    const cookieValue = document.cookie
+        .split(";")
+        .map((item) => item.trim())
+        .find((item) => item.startsWith(`${name}=`));
+    return cookieValue ? decodeURIComponent(cookieValue.split("=").slice(1).join("=")) : "";
 }
 
 function getCsrfToken() {
@@ -25,7 +40,7 @@ function getCsrfToken() {
 }
 
 function escapeHtml(value) {
-    return value
+    return String(value || "")
         .replaceAll("&", "&amp;")
         .replaceAll("<", "&lt;")
         .replaceAll(">", "&gt;")
@@ -43,14 +58,207 @@ function autoResizeInput() {
     messageInput.style.height = `${Math.min(messageInput.scrollHeight, 140)}px`;
 }
 
-function appendMessage(role, text) {
+function clearInitialMessages() {
+    chatMessages.replaceChildren();
+}
+
+function hasWelcomeState() {
+    return Boolean(chatMessages.querySelector(".chat-welcome"));
+}
+
+function openSidebar() {
+    if (appContainer) {
+        appContainer.classList.add("sidebar-open");
+    }
+}
+
+function closeSidebar() {
+    if (appContainer) {
+        appContainer.classList.remove("sidebar-open");
+    }
+}
+
+function createTextNode(tagName, className, text) {
+    const node = document.createElement(tagName);
+    if (className) {
+        node.className = className;
+    }
+    node.textContent = text || "";
+    return node;
+}
+
+function updateMessageCounter() {
+    if (!messageCounter || !messageInput) {
+        return;
+    }
+    const length = messageInput.value.length;
+    messageCounter.textContent = `${length}/${MESSAGE_MAX_LENGTH}`;
+    messageCounter.classList.toggle("is-near-limit", length >= 1800 && length < MESSAGE_MAX_LENGTH);
+    messageCounter.classList.toggle("is-at-limit", length >= MESSAGE_MAX_LENGTH);
+}
+
+function setServiceStatus(label, stateClass) {
+    if (!serviceStatus) {
+        return;
+    }
+    serviceStatus.textContent = label;
+    serviceStatus.className = `uca-pill ${stateClass || ""}`.trim();
+}
+
+function setConversationTitle(title) {
+    if (!conversationTitle) {
+        return;
+    }
+    conversationTitle.textContent = title || "Nouvelle conversation";
+}
+
+function buildConversationPreview(item) {
+    const preview = (item.preview || "").trim();
+    if (!preview) {
+        return "";
+    }
+    return preview.length > 22 ? `${preview.slice(0, 22)}...` : preview;
+}
+
+function formatConversationDate(value) {
+    if (!value) {
+        return "";
+    }
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) {
+        return "";
+    }
+    return new Intl.DateTimeFormat("fr-FR", {
+        day: "2-digit",
+        month: "short",
+        hour: "2-digit",
+        minute: "2-digit",
+    }).format(date);
+}
+
+function renderConversationList(conversations = []) {
+    if (!conversationList) {
+        return;
+    }
+    const conversationItems = Array.isArray(conversations) ? conversations : [];
+    if (historyCount) {
+        historyCount.textContent = String(conversationItems.length);
+    }
+    conversationList.replaceChildren();
+    if (!conversationItems.length) {
+        const empty = document.createElement("div");
+        empty.className = "conversation-empty";
+        empty.append(
+            createTextNode("strong", "", "Aucune conversation"),
+            createTextNode("span", "", "Cliquez sur Nouvelle conversation ou posez directement une question.")
+        );
+        conversationList.appendChild(empty);
+        return;
+    }
+
+    conversationItems.forEach((item) => {
+        const conversationId = Number(item.id || "0");
+        const countLabel = `${item.message_count || 0} msg`;
+        const dateLabel = formatConversationDate(item.updated_at);
+        const wrapper = document.createElement("div");
+        wrapper.className = item.selected ? "conversation-item is-active" : "conversation-item";
+        wrapper.dataset.conversationId = String(conversationId);
+
+        const mainButton = document.createElement("button");
+        mainButton.type = "button";
+        mainButton.className = "conversation-main";
+
+        const footer = document.createElement("span");
+        footer.className = "conversation-item-footer";
+        footer.append(
+            createTextNode("span", "conversation-item-meta", countLabel),
+            createTextNode("span", "conversation-item-date", dateLabel)
+        );
+
+        mainButton.append(
+            createTextNode("span", "conversation-item-title", item.title || "Nouvelle conversation"),
+            createTextNode("span", "conversation-item-preview", buildConversationPreview(item)),
+            footer
+        );
+        mainButton.addEventListener("click", async () => {
+            if (!conversationId || conversationId === currentConversationId || sendButton.disabled) {
+                return;
+            }
+            await loadConversationHistory(conversationId);
+            closeSidebar();
+        });
+
+        const actions = document.createElement("div");
+        actions.className = "conversation-actions";
+
+        const renameButton = document.createElement("button");
+        renameButton.type = "button";
+        renameButton.className = "conversation-action-btn";
+        renameButton.title = "Renommer";
+        renameButton.setAttribute("aria-label", "Renommer la conversation");
+        renameButton.textContent = "Renommer";
+        renameButton.addEventListener("click", async (event) => {
+            event.stopPropagation();
+            if (!conversationId) {
+                return;
+            }
+            const currentTitle = item.title || "Nouvelle conversation";
+            const nextTitle = window.prompt("Nouveau titre de la conversation", currentTitle.trim());
+            if (!nextTitle || !nextTitle.trim()) {
+                return;
+            }
+            await updateConversation(conversationId, { title: nextTitle.trim() });
+        });
+
+        const deleteButton = document.createElement("button");
+        deleteButton.type = "button";
+        deleteButton.className = "conversation-action-btn conversation-action-danger";
+        deleteButton.title = "Supprimer";
+        deleteButton.setAttribute("aria-label", "Supprimer la conversation");
+        deleteButton.textContent = "Supprimer";
+        deleteButton.addEventListener("click", async (event) => {
+            event.stopPropagation();
+            if (!conversationId) {
+                return;
+            }
+            const confirmed = window.confirm("Supprimer cette conversation de votre historique actif ?");
+            if (!confirmed) {
+                return;
+            }
+            await deleteConversation(conversationId);
+        });
+
+        actions.append(renameButton, deleteButton);
+        wrapper.append(mainButton, actions);
+        conversationList.appendChild(wrapper);
+    });
+}
+
+function appendSourceList(content, sources) {
+    if (!Array.isArray(sources) || !sources.length) {
+        return;
+    }
+    const shell = document.createElement("div");
+    shell.className = "message-sources";
+    shell.appendChild(createTextNode("p", "", "Sources utiles"));
+    const list = document.createElement("ul");
+    sources.slice(0, 3).forEach((source) => {
+        const item = document.createElement("li");
+        item.appendChild(createTextNode("span", "", source.name || source.path || "Source"));
+        list.appendChild(item);
+    });
+    shell.appendChild(list);
+    content.appendChild(shell);
+}
+
+function appendMessage(role, text, options = {}) {
     const wrapper = document.createElement("div");
     wrapper.className = `message ${role === "user" ? "message-user" : "message-assistant"}`;
 
     if (role !== "user") {
         const avatar = document.createElement("div");
         avatar.className = "avatar avatar-ai";
-        avatar.innerHTML = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"></path></svg>`;
+        avatar.innerHTML = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2a10 10 0 100 20 10 10 0 000-20zM12 18a6 6 0 100-12 6 6 0 000 12z"></path></svg>`;
         wrapper.appendChild(avatar);
     }
 
@@ -58,21 +266,71 @@ function appendMessage(role, text) {
     content.className = "message-content";
 
     const paragraph = document.createElement("p");
-    paragraph.innerHTML = escapeHtml(text).replaceAll("\n", "<br>");
+    paragraph.textContent = text || "";
     content.appendChild(paragraph);
+
+    if (role !== "user") {
+        if (options.confidence) {
+            content.appendChild(createTextNode("div", "message-meta", `Confiance: ${options.confidence}`));
+        }
+        appendSourceList(content, options.sources || []);
+    }
 
     wrapper.appendChild(content);
     chatMessages.appendChild(wrapper);
     scrollToBottom();
 }
 
+function renderWelcomeState() {
+    clearInitialMessages();
+
+    const shell = document.createElement("section");
+    shell.className = "chat-welcome";
+
+    const logo = document.createElement("img");
+    logo.className = "chat-welcome-logo";
+    logo.src = "/static/api_app/img/logo_uca.webp";
+    logo.alt = "Universite Cadi Ayyad";
+
+    const title = createTextNode("h3", "chat-welcome-title", "Comment puis-je vous aider ?");
+    const subtitle = createTextNode(
+        "p",
+        "chat-welcome-subtitle",
+        "Posez une question sur les services numeriques, la scolarite ou les procedures UCA."
+    );
+
+    const prompts = document.createElement("div");
+    prompts.className = "chat-welcome-prompts";
+
+    WELCOME_PROMPTS.forEach((prompt) => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "chat-welcome-prompt";
+        button.textContent = prompt;
+        button.addEventListener("click", async () => {
+            if (sendButton.disabled) {
+                return;
+            }
+            messageInput.value = prompt;
+            autoResizeInput();
+            updateMessageCounter();
+            await submitMessage(prompt);
+        });
+        prompts.appendChild(button);
+    });
+
+    shell.append(logo, title, subtitle, prompts);
+    chatMessages.appendChild(shell);
+    scrollToBottom();
+}
+
 function setLoadingState(isLoading) {
     sendButton.disabled = isLoading;
     messageInput.disabled = isLoading;
-    if (userEstablishment) {
-        userEstablishment.disabled = isLoading;
-    }
     typingIndicator.hidden = !isLoading;
+    if (newConversationButton) {
+        newConversationButton.disabled = isLoading;
+    }
     promptButtons.forEach((button) => {
         button.disabled = isLoading;
     });
@@ -82,9 +340,13 @@ function setLoadingState(isLoading) {
 }
 
 async function submitMessage(message) {
+    if (hasWelcomeState()) {
+        clearInitialMessages();
+    }
     appendMessage("user", message);
     messageInput.value = "";
     autoResizeInput();
+    updateMessageCounter();
     setLoadingState(true);
 
     try {
@@ -97,10 +359,7 @@ async function submitMessage(message) {
                 "X-Requested-With": "XMLHttpRequest",
                 "X-CSRFToken": csrfToken,
             },
-            body: JSON.stringify({
-                message,
-                user_establishment: userEstablishment ? userEstablishment.value : "",
-            }),
+            body: JSON.stringify({ message, conversation_id: currentConversationId }),
         });
 
         let payload = {};
@@ -111,12 +370,22 @@ async function submitMessage(message) {
         }
 
         if (!response.ok) {
+            if (response.status === 403 || response.status === 401) {
+                window.location.href = `/login/?next=${encodeURIComponent("/chat/")}`;
+                return;
+            }
             const detail = payload.detail || "Le serveur a retourne une erreur.";
             throw new Error(detail);
         }
 
         const answer = payload.answer || "Aucune reponse generee.";
-        appendMessage("assistant", answer);
+        currentConversationId = payload.conversation_id || currentConversationId;
+        setConversationTitle(payload.conversation_title || "Nouvelle conversation");
+        renderConversationList(payload.conversations || []);
+        appendMessage("assistant", answer, {
+            confidence: payload.confidence || "",
+            sources: payload.sources || [],
+        });
     } catch (error) {
         appendMessage(
             "assistant",
@@ -124,6 +393,159 @@ async function submitMessage(message) {
         );
     } finally {
         setLoadingState(false);
+    }
+}
+
+async function loadConversationHistory(conversationId = null) {
+    try {
+        if (conversationId !== null) {
+            setLoadingState(true);
+        }
+        const url = conversationId ? `${API_URL}?conversation_id=${encodeURIComponent(conversationId)}` : API_URL;
+        const effectiveResponse = await fetch(url, {
+            method: "GET",
+            credentials: "same-origin",
+            headers: {
+                "X-Requested-With": "XMLHttpRequest",
+            },
+        });
+
+        if (effectiveResponse.status === 403 || effectiveResponse.status === 401) {
+            window.location.href = `/login/?next=${encodeURIComponent("/chat/")}`;
+            return;
+        }
+        if (!effectiveResponse.ok) {
+            return;
+        }
+
+        const payload = await effectiveResponse.json();
+        currentConversationId = payload.conversation_id || null;
+        setConversationTitle(payload.conversation_title || "Nouvelle conversation");
+        renderConversationList(payload.conversations || []);
+        const messages = Array.isArray(payload.messages) ? payload.messages : [];
+        clearInitialMessages();
+        if (!messages.length) {
+            renderWelcomeState();
+        } else {
+            messages.forEach((message) => {
+                appendMessage(message.role, message.content || "", {
+                    confidence: message.confidence || "",
+                    sources: message.sources || [],
+                });
+            });
+        }
+    } catch (error) {
+        appendMessage("assistant", "Je n'ai pas pu charger l'historique de cette conversation pour le moment.");
+    } finally {
+        setLoadingState(false);
+    }
+}
+
+async function loadServiceStatus() {
+    setServiceStatus("Verification service", "uca-pill-warn");
+    try {
+        const response = await fetch(HEALTH_URL, {
+            method: "GET",
+            credentials: "same-origin",
+            headers: { "X-Requested-With": "XMLHttpRequest" },
+        });
+        if (response.ok) {
+            setServiceStatus("Service pret", "uca-pill-ok");
+            return;
+        }
+        setServiceStatus("Service a verifier", "uca-pill-warn");
+    } catch (error) {
+        setServiceStatus("Service indisponible", "uca-pill-bad");
+    }
+}
+
+async function createNewConversation() {
+    if (!newConversationButton || sendButton.disabled) {
+        return;
+    }
+    setLoadingState(true);
+    try {
+        const response = await fetch(CONVERSATIONS_API_URL, {
+            method: "POST",
+            credentials: "same-origin",
+            headers: {
+                "Content-Type": "application/json",
+                "X-Requested-With": "XMLHttpRequest",
+                "X-CSRFToken": getCsrfToken(),
+            },
+            body: JSON.stringify({}),
+        });
+        if (!response.ok) {
+            throw new Error("Creation impossible pour le moment.");
+        }
+        const payload = await response.json();
+        currentConversationId = payload.conversation_id || null;
+        setConversationTitle(payload.conversation_title || "Nouvelle conversation");
+        renderConversationList(payload.conversations || []);
+        renderWelcomeState();
+    } catch (error) {
+        appendMessage("assistant", `Je n'ai pas pu ouvrir une nouvelle conversation.\nDetail: ${error.message || "Erreur reseau."}`);
+    } finally {
+        setLoadingState(false);
+    }
+}
+
+async function updateConversation(conversationId, payload) {
+    setLoadingState(true);
+    try {
+        const response = await fetch(`/api/chat/conversations/${conversationId}/`, {
+            method: "PATCH",
+            credentials: "same-origin",
+            headers: {
+                "Content-Type": "application/json",
+                "X-Requested-With": "XMLHttpRequest",
+                "X-CSRFToken": getCsrfToken(),
+            },
+            body: JSON.stringify(payload),
+        });
+        if (!response.ok) {
+            throw new Error("Mise a jour impossible.");
+        }
+        const data = await response.json();
+        renderConversationList(data.conversations || []);
+        if (currentConversationId === conversationId && data.conversation) {
+            setConversationTitle(data.conversation.title || "Nouvelle conversation");
+        }
+    } catch (error) {
+        appendMessage("assistant", `Je n'ai pas pu mettre a jour cette conversation.\nDetail: ${error.message || "Erreur reseau."}`);
+    } finally {
+        setLoadingState(false);
+    }
+}
+
+async function deleteConversation(conversationId) {
+    let shouldOpenFreshConversation = false;
+    setLoadingState(true);
+    try {
+        const response = await fetch(`/api/chat/conversations/${conversationId}/`, {
+            method: "DELETE",
+            credentials: "same-origin",
+            headers: {
+                "X-Requested-With": "XMLHttpRequest",
+                "X-CSRFToken": getCsrfToken(),
+            },
+        });
+        if (!response.ok) {
+            throw new Error("Suppression impossible.");
+        }
+        const data = await response.json();
+        renderConversationList(data.conversations || []);
+        if (currentConversationId === conversationId) {
+            currentConversationId = null;
+            shouldOpenFreshConversation = true;
+        }
+    } catch (error) {
+        appendMessage("assistant", `Je n'ai pas pu supprimer cette conversation.\nDetail: ${error.message || "Erreur reseau."}`);
+    } finally {
+        setLoadingState(false);
+    }
+    if (shouldOpenFreshConversation) {
+        await createNewConversation();
     }
 }
 
@@ -144,11 +566,16 @@ promptButtons.forEach((button) => {
         }
         messageInput.value = prompt;
         autoResizeInput();
+        updateMessageCounter();
         await submitMessage(prompt);
+        closeSidebar();
     });
 });
 
-messageInput.addEventListener("input", autoResizeInput);
+messageInput.addEventListener("input", () => {
+    autoResizeInput();
+    updateMessageCounter();
+});
 messageInput.addEventListener("keydown", (event) => {
     if (event.key === "Enter" && !event.shiftKey) {
         event.preventDefault();
@@ -156,4 +583,23 @@ messageInput.addEventListener("keydown", (event) => {
     }
 });
 
+if (newConversationButton) {
+    newConversationButton.addEventListener("click", createNewConversation);
+}
+
+if (sidebarToggleButton) {
+    sidebarToggleButton.addEventListener("click", openSidebar);
+}
+
+if (sidebarCloseButton) {
+    sidebarCloseButton.addEventListener("click", closeSidebar);
+}
+
+if (sidebarOverlay) {
+    sidebarOverlay.addEventListener("click", closeSidebar);
+}
+
 messageInput.focus();
+updateMessageCounter();
+loadServiceStatus();
+loadConversationHistory();

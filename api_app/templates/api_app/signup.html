@@ -1,0 +1,79 @@
+{% load static %}
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Inscription etudiante UCA</title>
+    <link rel="icon" type="image/png" href="{% static 'api_app/img/uca-logo.png' %}">
+    <link rel="apple-touch-icon" href="{% static 'api_app/img/uca-logo.png' %}">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="{% static 'api_app/uca.css' %}">
+    <link rel="stylesheet" href="{% static 'api_app/auth.css' %}">
+</head>
+<body class="auth-page">
+    <main class="auth-shell">
+        <section class="auth-intro" aria-label="Universite Cadi Ayyad">
+            <div>
+                <img class="uca-logo" src="{% static 'api_app/img/uca-logo.svg' %}" alt="Universite Cadi Ayyad">
+                <div class="auth-intro-copy">
+                    <h1>Compte etudiant UCA</h1>
+                    <p>Votre compte donne acces a l'assistant, a l'historique personnel et aux services documentes par les sources UCA.</p>
+                </div>
+            </div>
+            <p class="auth-note">Utilisez uniquement une adresse email appartenant aux domaines autorises.</p>
+        </section>
+
+        <section class="auth-card">
+            <h2>Creer un compte</h2>
+            <p>Renseignez vos informations etudiantes pour ouvrir votre espace chat UCA.</p>
+            <div class="auth-hint">Domaines autorises : {{ allowed_domains|join:", " }}</div>
+            <form class="auth-form" method="post">
+                {% csrf_token %}
+                {% if request.GET.next %}
+                    <input type="hidden" name="next" value="{{ request.GET.next }}">
+                {% endif %}
+                {% if form.non_field_errors %}
+                    <ul class="errors">{{ form.non_field_errors }}</ul>
+                {% endif %}
+                <div class="auth-grid">
+                    <div class="field-group">
+                        <label for="{{ form.first_name.id_for_label }}">{{ form.first_name.label }}</label>
+                        {{ form.first_name }}
+                        {% if form.first_name.errors %}
+                            <ul class="field-errors">{{ form.first_name.errors }}</ul>
+                        {% endif %}
+                    </div>
+                    <div class="field-group">
+                        <label for="{{ form.last_name.id_for_label }}">{{ form.last_name.label }}</label>
+                        {{ form.last_name }}
+                        {% if form.last_name.errors %}
+                            <ul class="field-errors">{{ form.last_name.errors }}</ul>
+                        {% endif %}
+                    </div>
+                </div>
+                {% for field in form %}
+                    {% if field.name != "first_name" and field.name != "last_name" %}
+                        <div class="field-group">
+                            <label for="{{ field.id_for_label }}">{{ field.label }}</label>
+                            {{ field }}
+                            {% if field.help_text %}
+                                <div class="helptext">{{ field.help_text|safe }}</div>
+                            {% endif %}
+                            {% if field.errors %}
+                                <ul class="field-errors">{{ field.errors }}</ul>
+                            {% endif %}
+                        </div>
+                    {% endif %}
+                {% endfor %}
+                <button class="uca-btn uca-btn-primary" type="submit">Creer mon compte UCA</button>
+            </form>
+            <div class="auth-links">
+                <a href="{% url 'student-login' %}">J'ai deja un compte</a>
+            </div>
+        </section>
+    </main>
+</body>
+</html>

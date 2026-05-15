@@ -1,71 +1,79 @@
 import logging
 from typing import Dict, List, Optional
 
-from .generation.rag_engine import answer_question
-from .retrieval.rag_search import invalidate_search_cache
+from .contracts import IngestionJobConfig, QuestionRequest
+from .services.offline import build_knowledge_base as build_kb_service
+from .services.offline import run_indexing as run_indexing_service
+from .services.offline import run_ingestion as run_ingestion_service
+from .services.offline import run_processing as run_processing_service
+from .services.online import answer_question as answer_question_service
 
 logger = logging.getLogger(__name__)
 
 
-def run_ingestion(seeds: Optional[List[str]] = None) -> List[Dict]:
+def run_ingestion(
+    seeds: Optional[List[str]] = None,
+    mode: str = "fast",
+    target_corpus: str = "all",
+    premium_only: bool = False,
+) -> Dict:
     """Etape 1: collecte des documents bruts."""
-    from .offline.ingestion import DEFAULT_SEEDS, crawl
+    logger.info("Ingestion lancee avec %s seed(s).", len(seeds or []))
+    return run_ingestion_service(
+        IngestionJobConfig(
+            seeds=seeds,
+            mode=mode,
+            target_corpus=target_corpus,
+            premium_only=premium_only,
+        )
+    )
 
-    selected_seeds = seeds or DEFAULT_SEEDS
-    logger.info("Ingestion lancee avec %s seed(s).", len(selected_seeds))
-    return crawl(selected_seeds)
 
-
-def run_processing() -> None:
+def run_processing(corpus: str = "all") -> None:
     """Etape 2: nettoyage + chunking des fichiers bruts."""
-    from .offline.processing import preprocess_all
-
-    logger.info("Processing lance.")
-    preprocess_all()
+    logger.info("Processing lance pour corpus=%s.", corpus)
+    run_processing_service(corpus=corpus)
 
 
-def run_indexing() -> int:
+def run_indexing(corpus: str = "main") -> int:
     """Etape 3: creation/mise a jour de l'index hybride dense + lexical."""
-    from .offline.indexing import build_index, load_chunks
-
-    logger.info("Indexing lance.")
-    chunks = load_chunks()
-    if not chunks:
-        raise RuntimeError("Aucun chunk disponible pour l'indexation.")
-    build_index(chunks)
-    invalidate_search_cache(clear_models=True)
-    return len(chunks)
+    logger.info("Indexing lance pour corpus=%s.", corpus)
+    result = run_indexing_service(corpus=corpus, publish=False)
+    return int(result.chunk_count)
 
 
-def build_knowledge_base(seeds: Optional[List[str]] = None) -> int:
+def build_knowledge_base(
+    seeds: Optional[List[str]] = None,
+    mode: str = "fast",
+    target_corpus: str = "all",
+    premium_only: bool = False,
+) -> int:
     """
     Pipeline offline complet.
     A executer manuellement (pas a chaque question).
     """
-    from .offline.orchestrator import OfflinePipelineOptions, run_offline_pipeline
-
-    payload = run_offline_pipeline(
-        OfflinePipelineOptions(
+    result = build_kb_service(
+        config=IngestionJobConfig(
             seeds=seeds,
-            publish=False,
-            dry_run=False,
-            validate_before_publish=False,
-            cleanup_after_publish=False,
-        )
+            mode=mode,
+            target_corpus=target_corpus,
+            premium_only=premium_only,
+        ),
+        publish=False,
     )
-    total_chunks = int((payload.get("manifest", {}) or {}).get("chunk_count", 0) or 0)
-    logger.info("Base de connaissances offline preparee (%s chunks).", total_chunks)
-    return total_chunks
+    logger.info("Base de connaissances prete (%s chunks).", result.chunk_count)
+    return int(result.chunk_count)
 
 
-def ask_question(question: str, user_establishment: Optional[str] = None) -> Dict:
+def ask_question(question: str) -> Dict:
     """
     Flux online de chat:
     - recuperation de contexte
     - generation de reponse
     Ne lance jamais ingestion/processing/indexing.
     """
-    return answer_question(question, user_establishment=user_establishment)
+    result = answer_question_service(QuestionRequest(question=question))
+    return {"answer": result.answer, "sources": result.sources}
 
 
 def run_pipeline(
