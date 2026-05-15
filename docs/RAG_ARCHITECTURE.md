@@ -1,5 +1,33 @@
 # RAG Architecture
 
+## Current Status - 2026-05-15
+
+This document describes the technical architecture of the current demonstration version of **UCA Digital Assistant**.
+
+Reference commit:
+
+```text
+ce68ee2
+```
+
+Current validation summary:
+
+| Area | Result |
+|---|---:|
+| Django targeted tests | 59 tests OK |
+| RAG healthcheck | ready = true |
+| Drive benchmark service top-1 | 92.31 % |
+| Drive benchmark useful answers | 61.54 % |
+| Context rewrite match | 93.75 % |
+| Context usage accuracy | 93.75 % |
+
+Important interpretation:
+
+- retrieval is the strongest part of the module;
+- generation works, but remains slower and more variable because it depends on LM Studio and local hardware;
+- `reunion/` contains the final meeting and defense material;
+- `docs/` should be used as technical documentation and project history.
+
 ## Overview
 
 The project is organized as a staged RAG pipeline with clear boundaries between:
@@ -24,6 +52,8 @@ Seed URLs / raw documents
   -> API response + student chat UI
 ```
 
+The current online flow also includes conversation context rewriting before retrieval when the question is a follow-up.
+
 ## Main Runtime Layers
 
 ### 1. Web Layer
@@ -41,6 +71,8 @@ The student chat UI consumes:
 - `sources`
 - `confidence`
 - `retrieval_meta`
+- `conversation_id`
+- `conversation_title`
 
 ### 2. Service Layer
 
@@ -141,6 +173,8 @@ The online retrieval stack is mainly:
 Responsibilities:
 
 - normalize the user query
+- detect explicit services and intents
+- rewrite follow-up questions with conversation context
 - generate dense embeddings
 - retrieve from FAISS or Qdrant
 - merge dense and BM25 candidates
@@ -160,7 +194,14 @@ Responsibilities:
 - call retrieval
 - build context from supporting chunks
 - call the configured LLM
+- fallback to extractive answers when generation is unavailable or too slow
 - format answer, sources, and diagnostics
+
+Current generation note:
+
+- LM Studio is reachable locally;
+- generation latency is high on the current PC configuration;
+- the compact prompt limits context size to keep local generation more manageable.
 
 ## Corpus Model
 
@@ -204,8 +245,33 @@ The project is no longer only a backend RAG engine. It now includes:
 - protected chat area
 - persistent conversation history
 - multi-conversation workflow
+- source display and confidence information
+- admin dashboard and benchmark access
 
 This makes the assistant a real student-facing application, not just a retrieval prototype.
+
+## Current Evaluation Reading
+
+The latest Drive benchmark with generation (`2026-05-15`) gives:
+
+| Metric | Result |
+|---|---:|
+| Questions evaluated | 13 |
+| Service top-1 accuracy | 92.31 % |
+| Hit@k rate | 61.54 % |
+| Precision@k avg | 48.72 % |
+| Coverage@k avg | 56.28 % |
+| Useful answer rate | 61.54 % |
+| Answer relevance avg | 50.77 % |
+| Retrieval latency avg | 2606.94 ms |
+| Answer latency avg | 21628.93 ms |
+
+Interpretation:
+
+- service-level retrieval is strong;
+- fine-grained chunk quality still needs improvement;
+- answer generation is useful in a majority of cases but remains the most fragile part;
+- latency must be interpreted with the local PC constraints: Intel Core i7-8665U, 16 GB RAM, Intel UHD Graphics 620, no dedicated GPU.
 
 ## Recommended Reading Order
 

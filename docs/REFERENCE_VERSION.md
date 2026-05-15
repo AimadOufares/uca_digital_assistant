@@ -1,33 +1,78 @@
-# Version de Reference
+# Version de reference
 
-## Version stable retenue
+## Version stable actuelle
 
-La version de reference de demonstration correspond a l'etat du depot local base sur le commit :
+La version de reference actuelle correspond au commit :
 
-`aa2d14535adf54f2665da01c1114549359ca2018`
+```text
+ce68ee202cfc9c9ff3d064b50976eca6ebba60cf
+```
+
+Commit court :
+
+```text
+ce68ee2
+```
+
+Date de reference : `2026-05-15`
+
+Cette version correspond a la preparation finale de demonstration et de soutenance.
+
+## Contenu de la version
 
 Cette version inclut :
 
-- authentification etudiante UCA par comptes locaux Django
-- espace chat protege
-- historique personnel des conversations
-- affichage des sources et du niveau de confiance
-- health checks durcis
-- documentation et packaging de deploiement de demonstration
+- application web Django ;
+- inscription et connexion etudiante ;
+- restriction possible par domaines email UCA ;
+- interface chat protegee ;
+- historique des conversations ;
+- gestion multi-conversations ;
+- affichage des sources et du niveau de confiance ;
+- dashboard administrateur ;
+- health checks `live` et `ready` ;
+- module RAG avec ingestion, processing, indexing, retrieval et generation ;
+- recherche hybride FAISS + BM25 ;
+- contexte conversationnel ;
+- evaluation Drive ;
+- evaluation contextuelle ;
+- documents de reunion et de soutenance dans `reunion/`.
 
-## Perimetre de la version stable
+## Resultats de validation
 
-Ce qui est considere stable pour la demo :
+Derniers resultats utiles :
 
-- flux `signup -> login -> chat -> historique`
-- API chat protegee
-- dashboard admin existant
-- pipeline RAG commande via les management commands
-- verification de readiness
+| Element | Resultat |
+|---|---:|
+| Tests Django cibles | 59 tests OK |
+| Healthcheck RAG | ready = true |
+| Service top-1 Drive | 92,31 % |
+| Reponses utiles generation | 61,54 % |
+| Reecriture contextuelle | 93,75 % |
+| Utilisation correcte du contexte | 93,75 % |
 
-## Evolutions explicitement hors perimetre de la version stable
+## Perimetre stable pour la demonstration
 
-- SSO UCA reel
-- orchestration serveur avancee
-- refactor complet des gros modules RAG
-- gestion conversationnelle avancee type favoris/feedback
+Ce qui est considere stable :
+
+- flux `signup -> login -> chat -> historique` ;
+- API chat protegee ;
+- affichage des sources ;
+- dashboard admin ;
+- healthcheck RAG ;
+- benchmark Drive ;
+- scenario contextuel court ;
+- documentation de soutenance dans `reunion/`.
+
+## Hors perimetre de cette version
+
+Les elements suivants restent des perspectives :
+
+- SSO UCA reel ;
+- deploiement production durci ;
+- orchestration serveur institutionnelle ;
+- optimisation GPU/serveur pour la generation LLM ;
+- feedback utilisateur utile / non utile ;
+- sources entierement cliquables ;
+- migration complete vers Qdrant/PostgreSQL/VPS.
+

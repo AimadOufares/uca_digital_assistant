@@ -1,5 +1,33 @@
 # Soutenance Technique
 
+## Note de mise a jour - 15/05/2026
+
+Ce document reste utile comme support technique, mais les documents les plus recents pour la soutenance sont dans `reunion/`.
+
+Documents a utiliser en priorite :
+
+- `reunion/plan_presentation_soutenance.md`
+- `reunion/questions_demo_sures.md`
+- `reunion/reponses_questions_jury.md`
+- `reunion/analyse_evaluation_rapport_pfe.md`
+- `reunion/solution_developpee.md`
+
+Etat actuel a retenir :
+
+| Element | Resultat |
+|---|---:|
+| Commit de reference | `ce68ee2` |
+| Tests Django cibles | 59 tests OK |
+| Healthcheck RAG | ready = true |
+| Service top-1 Drive | 92,31 % |
+| Reponses utiles generation | 61,54 % |
+| Reecriture contextuelle | 93,75 % |
+| Utilisation correcte du contexte | 93,75 % |
+
+Message central actualise :
+
+> Le projet est un prototype avance et demonstrable. Le retrieval est solide et defendable, tandis que la generation reste perfectible a cause de la latence LM Studio, du materiel local et de certains chunks mal alignes.
+
 ## 1. Titre du projet
 
 **UCA Digital Assistant**  
@@ -454,6 +482,9 @@ Limites actuelles:
 - certaines heuristiques restent reglees a la main
 - l'ergonomie peut encore etre poussee
 - la generalisation a d'autres univers documentaires demanderait de nouveaux reglages
+- generation LM Studio lente sur le PC de test sans GPU dedie
+- certaines reponses encore trop extractives
+- corpus Drive et metadonnees encore a nettoyer/enrichir
 
 ## 15. Perspectives
 
@@ -466,6 +497,9 @@ Les evolutions naturelles sont:
 - deploiement VPS plus industrialise
 - optimisation fine du retrieval
 - support multilingue plus pousse
+- migration progressive vers PostgreSQL + Qdrant
+- optimisation de la generation sur serveur ou GPU dedie
+- sources plus cliquables dans l'interface
 
 ## 16. Demonstration technique recommandee
 

@@ -1,5 +1,37 @@
 # Rapport d'avancement PFE
 
+## Note de mise a jour - 15/05/2026
+
+Ce fichier est conserve comme rapport d'avancement historique du `05/05/2026`. Il ne doit plus etre utilise comme source principale pour les chiffres finaux.
+
+Pour l'etat actuel du projet, utiliser en priorite les documents du dossier `reunion/`, notamment :
+
+- `reunion/analyse_evaluation_rapport_pfe.md`
+- `reunion/solution_developpee.md`
+- `reunion/drive_QR.md`
+- `reunion/plan_presentation_soutenance.md`
+
+Chiffres actualises au `15/05/2026` :
+
+| Element | Resultat actuel |
+|---|---:|
+| Commit de reference | `ce68ee2` |
+| Tests Django cibles | 59 tests OK |
+| Healthcheck RAG | ready = true |
+| Benchmark Drive - service top-1 | 92,31 % |
+| Benchmark Drive - reponses utiles | 61,54 % |
+| Benchmark contexte - reecriture correcte | 93,75 % |
+| Benchmark contexte - utilisation correcte du contexte | 93,75 % |
+
+Interpretation actualisee :
+
+- le projet est maintenant un prototype avance et demonstrable ;
+- le retrieval est le point fort du module RAG ;
+- la generation fonctionne, mais reste lente sur le PC de test ;
+- les limites principales sont la qualite des chunks, les metadonnees, la latence LM Studio et l'absence de deploiement production.
+
+La suite du document ci-dessous garde sa valeur historique, mais certains chiffres ont ete depasses par les evaluations du 15/05/2026.
+
 ## Informations generales
 
 - **Intitule du projet** : UCA Digital Assistant
@@ -300,6 +332,8 @@ La version actuelle peut donc etre presentee comme une **version stable de demon
 
 L'etat local observe montre que la base documentaire est deja construite et publiee.
 
+> Note 15/05/2026 : les chiffres ci-dessous correspondent a l'etat du 05/05/2026. Les derniers resultats valides sont ceux ajoutes dans la note de mise a jour en debut de document.
+
 Quelques indicateurs actuels :
 
 - 527 fichiers presents dans `data_storage`
@@ -449,4 +483,3 @@ Avant l'envoi final au professeur, il sera utile de :
 - ne pas inclure de cles API ni d'informations sensibles
 - presenter le SSO UCA comme une perspective et non comme une fonctionnalite actuelle
 - preciser que la version actuelle est une version stable de demonstration
-

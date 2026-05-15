@@ -1,68 +1,148 @@
 # UCA Digital Assistant
 
-![Python](https://img.shields.io/badge/Python-3.10%2B-blue?style=for-the-badge&logo=python)
-![Django](https://img.shields.io/badge/Django-4.x-092E20?style=for-the-badge&logo=django)
-![Qdrant](https://img.shields.io/badge/Qdrant-Vector_DB-FF4C4C?style=for-the-badge)
-![LangChain](https://img.shields.io/badge/LangChain-RAG-orange?style=for-the-badge)
-![Status](https://img.shields.io/badge/Status-Active-success)
-![License](https://img.shields.io/badge/License-MIT-green)
+Assistant universitaire intelligent pour l'Universite Cadi Ayyad, base sur une architecture **RAG** afin d'aider les etudiants a retrouver rapidement des informations fiables a partir de documents et services UCA.
 
-Assistant universitaire base sur une architecture RAG pour aider les etudiants de l'UCA a retrouver rapidement des informations fiables a partir de sources officielles.
+![Python](https://img.shields.io/badge/Python-3.10%2B-blue?style=for-the-badge&logo=python)
+![Django](https://img.shields.io/badge/Django-Web_App-092E20?style=for-the-badge&logo=django)
+![FAISS](https://img.shields.io/badge/FAISS-Vector_Search-blueviolet?style=for-the-badge)
+![BM25](https://img.shields.io/badge/BM25-Lexical_Search-orange?style=for-the-badge)
+![RAG](https://img.shields.io/badge/RAG-Retrieval_Augmented_Generation-success?style=for-the-badge)
+
+## Resume
+
+Le projet propose une application web Django avec authentification etudiante, interface de chat, historique des conversations, dashboard administrateur et module RAG complet.
+
+L'assistant ne se limite pas a appeler un modele de langage. Il construit une chaine documentaire :
+
+```text
+Documents UCA / Drive
+  -> ingestion
+  -> nettoyage
+  -> chunking
+  -> metadonnees
+  -> embeddings
+  -> FAISS + BM25
+  -> retrieval hybride
+  -> generation / fallback
+  -> reponse avec sources
+```
+
+## Etat actuel
+
+- Version locale de demonstration : `2026-05-15`
+- Commit de reference : `ce68ee2`
+- Backend web : Django
+- Recherche vectorielle : FAISS
+- Recherche lexicale : BM25
+- LLM local : LM Studio compatible API OpenAI
+- Corpus principal de test : documents Drive / services UCA
+
+## Resultats de validation
+
+| Element | Resultat |
+|---|---:|
+| Tests Django cibles | 59 tests OK |
+| Healthcheck RAG | ready = true |
+| Benchmark Drive - service top-1 | 92,31 % |
+| Benchmark Drive - reponses utiles | 61,54 % |
+| Benchmark contexte - reecriture correcte | 93,75 % |
+| Benchmark contexte - utilisation correcte du contexte | 93,75 % |
+
+Interpretation :
+
+- le retrieval est le point fort du projet ;
+- la generation fonctionne, mais reste limitee par LM Studio et le materiel local ;
+- le projet est un prototype avance et demonstrable, pas encore une solution production institutionnelle.
 
 ## Fonctionnalites
 
-- Ingestion de contenus HTML, PDF, DOCX, TXT et MD
-- Nettoyage, structuration et chunking semantique
-- Recherche hybride dense + BM25 avec reranking
-- Guardrails de retrieval et abstention
-- API Django REST
-- Interface chat etudiante avec authentification locale UCA
-- Historique persistant des conversations
-- Dashboard admin et health checks
+### Application web
 
-## Pourquoi ce projet
+- inscription et connexion etudiante ;
+- restriction possible aux domaines email UCA ;
+- chat protege par authentification ;
+- historique des conversations ;
+- gestion multi-conversations ;
+- affichage des sources ;
+- affichage du niveau de confiance ;
+- dashboard administrateur ;
+- endpoints de healthcheck.
 
-Le systeme vise a:
+### Module RAG
 
-- reduire les hallucinations en s'appuyant sur des documents reels
-- exposer les sources et le niveau de confiance
-- fournir une experience utile a un contexte etudiant UCA
-- separer clairement les etapes offline et online du pipeline RAG
+- ingestion de contenus HTML, PDF, DOCX, TXT et MD ;
+- extraction et nettoyage du texte ;
+- chunking semantique ;
+- enrichissement des metadonnees ;
+- indexation FAISS ;
+- corpus BM25 ;
+- recherche hybride dense + lexicale ;
+- reranking optionnel ;
+- guardrails de pertinence ;
+- abstention si le contexte documentaire est insuffisant ;
+- generation via LM Studio ;
+- fallback extractif si le LLM est lent ou indisponible.
 
 ## Architecture
 
 ```text
-Seed URLs / documents bruts
-  -> ingestion
-  -> preprocessing / nettoyage / chunking
-  -> indexing / BM25 / embeddings / publication
-  -> retrieval hybride + rerank + guardrails
-  -> generation de reponse
-  -> API Django + interface chat
+Etudiant
+  -> Interface chat
+  -> API Django
+  -> Contexte conversationnel
+  -> Retrieval hybride
+       -> FAISS
+       -> BM25
+       -> Guardrails
+  -> Prompt final
+  -> LM Studio / fallback extractif
+  -> Reponse + sources + confiance
 ```
 
-Documentation detaillee:
+Le projet separe deux phases :
 
-- `docs/RAG_ARCHITECTURE.md`
-- `docs/REFERENCE_VERSION.md`
-- `docs/DEMO_GUIDE.md`
-- `docs/SOUTENANCE_TECHNIQUE.md`
+### Phase offline
+
+```text
+Sources UCA / documents Drive
+  -> extraction
+  -> nettoyage
+  -> chunking
+  -> metadonnees
+  -> embeddings
+  -> index FAISS
+  -> corpus BM25
+```
+
+### Phase online
+
+```text
+Question utilisateur
+  -> analyse de la question
+  -> reecriture contextuelle si necessaire
+  -> retrieval FAISS + BM25
+  -> garde-fous
+  -> generation ou fallback
+  -> reponse avec sources
+```
 
 ## Structure du projet
 
 ```text
 uca_digital_assistant/
+|-- api_app/        # Vues Django, API, templates, statiques, tests
+|-- core/           # Configuration Django
+|-- rag_module/     # Ingestion, processing, indexing, retrieval, generation
+|-- docs/           # Documentation technique et historique
+|-- reunion/        # Supports rapport, reunion, soutenance et evaluation
+|-- data_storage/   # Donnees locales, index, rapports RAG (ignore git)
 |-- manage.py
-|-- core/
-|-- api_app/
-|-- rag_module/
-|-- docs/
 |-- requirements.txt
-|-- README.md
-`-- .env.example
+|-- docker-compose.yml
+`-- README.md
 ```
 
-## Installation
+## Installation locale
 
 ### 1. Cloner le depot
 
@@ -71,15 +151,21 @@ git clone https://github.com/AimadOufares/uca_digital_assistant.git
 cd uca_digital_assistant
 ```
 
-### 2. Creer l'environnement virtuel
+### 2. Creer et activer l'environnement virtuel
 
 ```bash
 python -m venv env
+```
 
-# Windows
+Windows :
+
+```bash
 env\Scripts\activate
+```
 
-# Linux / macOS
+Linux / macOS :
+
+```bash
 source env/bin/activate
 ```
 
@@ -89,22 +175,31 @@ source env/bin/activate
 pip install -r requirements.txt
 ```
 
-### 4. Preparer l'environnement
+### 4. Configurer l'environnement
+
+Windows :
 
 ```bash
-# Windows
 copy .env.example .env
+```
 
-# Linux / macOS
+Linux / macOS :
+
+```bash
 cp .env.example .env
 ```
 
-Variables importantes:
+Variables importantes :
 
-- `UCA_ALLOWED_EMAIL_DOMAINS`
-- `RAG_LLM_PROVIDER`
-- `LM_STUDIO_BASE_URL`
-- `RAG_LANGUAGE_DETECTOR`
+```text
+UCA_ALLOWED_EMAIL_DOMAINS
+RAG_LLM_PROVIDER
+LM_STUDIO_BASE_URL
+LM_STUDIO_API_KEY
+RAG_LM_STUDIO_MODEL
+RAG_VECTOR_BACKEND
+RAG_ACTIVE_INDEX_NAME
+```
 
 ### 5. Appliquer les migrations
 
@@ -112,59 +207,77 @@ Variables importantes:
 python manage.py migrate
 ```
 
-## Utilisation
-
-### Lancer l'application
+### 6. Lancer l'application
 
 ```bash
 python manage.py runserver
 ```
 
-Pages principales:
+Pages principales :
 
-- Inscription etudiante: `http://127.0.0.1:8000/signup/`
-- Connexion etudiante: `http://127.0.0.1:8000/login/`
-- Chat: `http://127.0.0.1:8000/chat/`
-- Health ready: `http://127.0.0.1:8000/api/health/ready/`
+- inscription : `http://127.0.0.1:8000/signup/`
+- connexion : `http://127.0.0.1:8000/login/`
+- chat : `http://127.0.0.1:8000/chat/`
+- dashboard admin : `http://127.0.0.1:8000/admin-dashboard/`
+- health ready : `http://127.0.0.1:8000/api/health/ready/`
 
-### Alimenter le RAG
+## Commandes utiles
 
-Commande la plus simple:
+### Verification Django
+
+```bash
+python manage.py check
+```
+
+### Tests applicatifs
+
+```bash
+python manage.py test api_app.tests --keepdb
+```
+
+### Healthcheck RAG
+
+```bash
+python manage.py rag_healthcheck --json
+```
+
+### Construire ou republier la base RAG
 
 ```bash
 python manage.py rag_build_kb --publish
 ```
 
-Commandes utiles:
+ou :
 
 ```bash
-python manage.py check
-python manage.py rag_healthcheck --json
 python manage.py rag_index --corpus published --publish
 ```
 
-## Espace etudiant
+### Benchmark Drive
 
-La v1 inclut:
-
-- authentification locale Django
-- restriction par email UCA
-- chat protege
-- historique personnel
-- multi-conversations de base
-- affichage des sources et de la confiance
-
-## Configuration RAG
-
-- Backend principal: FAISS hybride local
-- Backend alternatif possible: Qdrant
-- Embeddings recommandes: `BAAI/bge-m3`
-- LLM possible via LM Studio compatible OpenAI
-- Corpus `drive` inclus par defaut dans les builds publies si configure
-
-### Exemple LM Studio
+Retrieval seul :
 
 ```bash
+python -m rag_module.evaluation.evaluate_rag --benchmark drive --top-k 5 --skip-generation
+```
+
+Retrieval + generation :
+
+```bash
+python -m rag_module.evaluation.evaluate_rag --benchmark drive --top-k 5
+```
+
+### Benchmark contexte conversationnel
+
+```bash
+python -m rag_module.evaluation.evaluate_rag --benchmark context --top-k 5 --skip-generation
+```
+
+## Configuration LM Studio
+
+Exemple de configuration locale :
+
+```text
 RAG_LLM_PROVIDER=lmstudio
 LM_STUDIO_BASE_URL=http://127.0.0.1:1234/v1
 LM_STUDIO_API_KEY=lm-studio
@@ -175,68 +288,83 @@ RAG_REQUEST_TIMEOUT=20
 RAG_LM_STUDIO_MAX_TOKENS=420
 ```
 
-## Reproductibilite
+Remarque importante :
 
-Le projet utilise notamment:
+Les tests de generation ont ete realises sur un PC local avec Intel Core i7-8665U, 16 Go RAM et Intel UHD Graphics 620. La latence de generation doit donc etre interpretee comme une limite de l'environnement local, pas comme une faiblesse de l'architecture RAG.
 
-- `faiss-cpu`
-- `tiktoken`
-- `langdetect`
-- `Unidecode`
+## Documentation
 
-Verifier l'environnement avec:
+Documentation technique :
 
-```bash
-python manage.py check
-python manage.py test api_app.tests.ChatApiTests api_app.tests.StudentAuthTests
-python manage.py test api_app.tests.ProcessingAndIndexingTests api_app.tests.HealthLogicTests
+- `docs/README.md`
+- `docs/RAG_ARCHITECTURE.md`
+- `docs/DEMO_GUIDE.md`
+- `docs/REFERENCE_VERSION.md`
+- `docs/SOUTENANCE_TECHNIQUE.md`
+
+Supports de rapport, reunion et soutenance :
+
+- `reunion/analyse_evaluation_rapport_pfe.md`
+- `reunion/solution_developpee.md`
+- `reunion/drive_QR.md`
+- `reunion/plan_presentation_soutenance.md`
+- `reunion/questions_demo_sures.md`
+- `reunion/reponses_questions_jury.md`
+- `reunion/scripts_reunion.md`
+
+## Demonstration conseillee
+
+Questions stables :
+
+```text
+Ou consulter mes notes sur UC@Student ?
+Comment candidater sur PEDOC ?
+A quoi sert le CIP ?
+Comment acceder au calcul haute performance de UCA ?
+Ou trouver un accompagnement pour monter un projet de recherche ?
 ```
 
-## Deploiement demo
+Questions a utiliser plutot pour discuter les limites :
+
+```text
+A quoi sert UCAPLAT ?
+Comment deposer des devoirs sur UCAPLAT ?
+Comment suivre l'etat de mon diplome ?
+```
+
+## Limites actuelles
+
+- generation LM Studio lente sur PC sans GPU dedie ;
+- certaines reponses restent trop extractives ;
+- corpus documentaire encore a enrichir ;
+- metadonnees a harmoniser davantage ;
+- sources pas encore toutes cliquables ;
+- application encore locale, non durcie pour production ;
+- SSO institutionnel non integre.
+
+## Perspectives
+
+- enrichir les documents officiels ;
+- ameliorer le chunking et les metadonnees ;
+- ajouter un feedback utilisateur utile / non utile ;
+- rendre les sources plus exploitables ;
+- optimiser la generation LLM ;
+- migrer progressivement vers PostgreSQL + Qdrant ;
+- preparer un deploiement VPS ;
+- envisager une integration SSO UCA.
+
+## Deploiement de demonstration
 
 ```bash
 docker compose up --build
 ```
 
-Le `docker-compose.yml` fourni est pense pour une demonstration locale et non pour une production durcie.
-
-## Tests
-
-- API chat et auth: `python manage.py test api_app.tests.ChatApiTests api_app.tests.StudentAuthTests`
-- Offline / indexing / retrieval: `python manage.py test api_app.tests.ProcessingAndIndexingTests`
-- Health: `python manage.py test api_app.tests.HealthLogicTests`
-- Verification globale: `python manage.py check`
-
-## Roadmap
-
-- [x] Authentification etudiante UCA locale
-- [x] Historique des conversations
-- [x] Sources et confiance dans l'UI
-- [x] Docker/Compose de demonstration
-- [ ] UI plus avancee
-- [ ] Support multilingue plus pousse
-- [ ] Optimisation supplementaire des performances
-- [ ] Evolution eventuelle vers SSO UCA
-
-## Notes
-
-Dossiers typiquement ignores:
-
-- `env/`
-- `db.sqlite3`
-- `data_storage/`
-- `__pycache__/`
-
-Le projet a ete fortement refactorise pour separer:
-
-- `ingestion_utils.py` et `ingestion_quality.py`
-- `processing.py`, `text_quality.py` et `processing_cache.py`
-- `indexing.py` et `indexing_metadata.py`
-- `rag_search.py` et `query_intelligence.py`
+Le fichier `docker-compose.yml` est pense pour une demonstration locale. Une production institutionnelle demanderait une configuration plus robuste : serveur, securite, logs, sauvegardes, SSO et supervision.
 
 ## Auteur
 
 **Aimad Oufares**  
-Projet UCA Digital Assistant  
+Projet : UCA Digital Assistant  
 Universite Cadi Ayyad  
 Faculte des Sciences Semlalia Marrakech
+
