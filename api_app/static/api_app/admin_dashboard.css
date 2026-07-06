@@ -3,6 +3,143 @@ body.admin-page {
     background: var(--uca-bg);
 }
 
+.body.admin-page {
+    min-height: 100vh;
+    background: var(--uca-bg);
+}
+
+.admin-layout {
+    display: grid;
+    grid-template-columns: 220px minmax(0, 1fr);
+    gap: 10px;
+    width: min(1200px, 100%);
+    margin: 0 auto;
+    padding: 12px;
+}
+
+.admin-sidebar {
+    position: sticky;
+    top: 12px;
+    max-height: calc(100vh - 24px);
+    overflow: auto;
+    border: 1px solid var(--uca-border);
+    border-radius: var(--uca-radius-lg);
+    background: rgba(255, 255, 255, 0.98);
+    box-shadow: 0 14px 24px rgba(16, 32, 51, 0.07);
+}
+
+.sidebar-nav {
+    padding: 0 0 14px 0;
+}
+
+.sidebar-card {
+    display: grid;
+    gap: 8px;
+    padding: 10px;
+}
+
+.sidebar-card-title {
+    display: grid;
+    gap: 2px;
+    padding-bottom: 6px;
+    border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+}
+
+.sidebar-card-title span {
+    color: var(--uca-muted);
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+}
+
+.sidebar-card-title strong {
+    font-size: 0.92rem;
+    color: var(--uca-blue-dark);
+    font-weight: 800;
+}
+
+.sidebar-menu {
+    display: grid;
+    gap: 8px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+
+.sidebar-item {
+    display: block;
+}
+
+.sidebar-item.hero {
+    border-radius: var(--uca-radius-lg);
+    overflow: hidden;
+    background: linear-gradient(180deg, var(--uca-blue) 0%, #0f4a9a 100%);
+}
+
+.sidebar-item.hero .sidebar-link {
+    display: grid;
+    gap: 6px;
+    padding: 12px 12px;
+    color: white;
+}
+
+.sidebar-item.hero .sidebar-item-heading {
+    font-size: 0.75rem;
+    font-weight: 900;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+}
+
+.sidebar-item.hero .sidebar-item-text {
+    font-size: 0.9rem;
+    font-weight: 700;
+    line-height: 1.15;
+}
+
+.sidebar-link {
+    display: block;
+    padding: 12px 14px;
+    border-radius: var(--uca-radius-lg);
+    background: var(--uca-surface);
+    color: var(--uca-blue-dark);
+    text-decoration: none;
+    transition: background 0.2s ease, color 0.2s ease, transform 0.2s ease;
+    box-shadow: inset 0 0 0 1px rgba(36, 101, 179, 0.08);
+}
+
+.sidebar-link:hover,
+.sidebar-link.active {
+    background: var(--uca-blue-soft);
+    color: var(--uca-blue);
+}
+
+.sidebar-item.hero .sidebar-link:hover,
+.sidebar-item.hero .sidebar-link.active {
+    background: linear-gradient(180deg, var(--uca-blue) 0%, #0f4a9a 100%);
+    color: white;
+}
+
+.sidebar-link.active {
+    box-shadow: inset 4px 0 0 var(--uca-blue);
+}
+
+.sidebar-item-heading {
+    display: block;
+    margin-bottom: 3px;
+    font-size: 0.75rem;
+    font-weight: 800;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--uca-blue);
+}
+
+.sidebar-item-text {
+    display: block;
+    font-size: 0.95rem;
+    font-weight: 700;
+    line-height: 1.25;
+}
+
 .admin-topbar {
     position: sticky;
     top: 0;
@@ -39,8 +176,12 @@ body.admin-page {
 }
 
 .admin-section {
-    display: grid;
+    display: none;
     gap: 14px;
+}
+
+.admin-section.active {
+    display: grid;
 }
 
 .section-head {
@@ -311,6 +452,40 @@ tr:last-child td {
     gap: 14px;
 }
 
+.action-grid-4 {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.audit-actions .uca-btn {
+    min-width: 150px;
+}
+
+.audit-console {
+    max-height: 180px;
+    overflow: auto;
+    border: 1px solid var(--uca-border);
+    border-radius: var(--uca-radius);
+    background: #06182d;
+    color: #d8eaff;
+    padding: 12px;
+    font-family: Consolas, "Courier New", monospace;
+    font-size: 12px;
+    line-height: 1.55;
+}
+
+.audit-log-line {
+    padding: 2px 0;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.audit-log-line:last-child {
+    border-bottom: 0;
+}
+
+.audit-log-line.is-error {
+    color: #ffb4ac;
+}
+
 .status-badge {
     display: inline-flex;
     align-items: center;
@@ -437,7 +612,8 @@ tr:last-child td {
 
     .kpi-grid-4,
     .two-col,
-    .action-grid {
+    .action-grid,
+    .action-grid-4 {
         grid-template-columns: 1fr;
     }
 

@@ -140,8 +140,9 @@ async function loadDashboard() {
         }
         const payload = await response.json();
         renderDashboard(payload);
-        await loadDriveDocuments();
         hideLoader();
+        loadDriveDocuments();
+        loadConversationAudit();
     } catch (error) {
         renderLoaderError(error.message || "Chargement impossible.");
     }
@@ -297,25 +298,52 @@ function renderEvaluation(evaluation) {
     const rows = evaluation.rows || [];
     if (!rows.length) {
         body.appendChild(makeEmptyRow(5, "Aucun cas evalue."));
-        return;
     }
-    rows.forEach((item) => {
-        const match = Number(item.service_top1_match || 0) === 1;
-        const abstained = Number(item.abstained || 0) === 1;
-        const status = abstained ? "Abstention" : (match ? "OK" : "A corriger");
-        const klass = abstained ? "warn" : (match ? "ok" : "bad");
-        const row = document.createElement("tr");
-        row.append(
-            makeCell(item.question || "-"),
-            makeCell(item.expected_service || "-"),
-            makeCell(item.top1_service || "-")
-        );
-        const statusCell = document.createElement("td");
-        statusCell.appendChild(makePill(status, klass));
-        row.append(statusCell, makeCell(item.top1_source || "-"));
-        body.appendChild(row);
-    });
 }
+
+function activateSection(sectionId) {
+    const sections = document.querySelectorAll('.admin-shell .admin-section');
+    sections.forEach((section) => section.classList.toggle('active', section.dataset.section === sectionId));
+}
+
+function activateSidebarLink(link) {
+    const links = document.querySelectorAll('.sidebar-link');
+    links.forEach((item) => item.classList.toggle('active', item === link));
+    const sectionId = link.dataset.section || link.getAttribute('href')?.slice(1);
+    if (sectionId) {
+        activateSection(sectionId);
+        window.history.replaceState(null, '', `#${sectionId}`);
+    }
+}
+
+function setupSidebarNavigation() {
+    const links = Array.from(document.querySelectorAll('.sidebar-link'));
+    if (!links.length) return;
+
+    const activateTarget = (hash) => {
+        const target = links.find((item) => item.getAttribute('href') === hash);
+        if (target) {
+            activateSidebarLink(target);
+        }
+    };
+
+    links.forEach((link) => {
+        link.addEventListener('click', () => {
+            activateSidebarLink(link);
+        });
+    });
+
+    if (window.location.hash) {
+        activateTarget(window.location.hash);
+    } else {
+        activateSidebarLink(links[0]);
+    }
+}
+
+window.addEventListener('DOMContentLoaded', () => {
+    setupSidebarNavigation();
+    loadDashboard();
+});
 
 async function loadDriveDocuments() {
     const body = byId("drive-doc-table-body");
@@ -453,6 +481,7 @@ async function refreshDashboard() {
     const payload = await response.json();
     renderDashboard(payload);
     await loadDriveDocuments();
+    await loadConversationAudit();
 }
 
 function bindAction(id, handler) {
@@ -460,8 +489,101 @@ function bindAction(id, handler) {
     if (node) node.addEventListener("click", handler);
 }
 
+function appendAuditLog(message, isError = false) {
+    const consoleBox = byId("audit-console");
+    if (!consoleBox) return;
+    const line = document.createElement("div");
+    line.className = isError ? "audit-log-line is-error" : "audit-log-line";
+    line.textContent = `[${new Date().toLocaleTimeString("fr-FR")}] ${message}`;
+    if (consoleBox.textContent === "Aucun audit lance.") {
+        clearNode(consoleBox);
+    }
+    consoleBox.appendChild(line);
+    consoleBox.scrollTop = consoleBox.scrollHeight;
+}
+
+async function runAuditTask(task, button) {
+    if (!task || !button) return;
+    const originalText = button.textContent;
+    button.disabled = true;
+    button.textContent = "En cours...";
+    appendAuditLog(`Lancement ${originalText}`);
+    try {
+        const response = await fetch(`/api/run-audit/${encodeURIComponent(task)}/`, {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+                "X-CSRFToken": getCookie("csrftoken"),
+            },
+            body: JSON.stringify({}),
+        });
+        const payload = await response.json();
+        if (!response.ok) {
+            throw new Error(payload.detail || payload.error || "Audit impossible.");
+        }
+        appendAuditLog(`${payload.label || originalText} termine en ${payload.elapsed_s || 0}s`);
+        await refreshDashboard();
+    } catch (error) {
+        appendAuditLog(`${originalText}: ${error.message || "erreur inconnue"}`, true);
+    } finally {
+        button.disabled = false;
+        button.textContent = originalText;
+    }
+}
+
+function bindAuditActions() {
+    document.querySelectorAll("[data-audit-task]").forEach((button) => {
+        button.addEventListener("click", () => runAuditTask(button.dataset.auditTask, button));
+    });
+}
+
+async function loadConversationAudit() {
+    const body = byId("conversation-audit-table-body");
+    if (!body) return;
+    try {
+        const response = await fetch("/api/admin-conversations/");
+        if (response.status === 403) {
+            body.replaceChildren(makeEmptyRow(6, "Acces refuse."));
+            return;
+        }
+        if (!response.ok) {
+            throw new Error("Chargement impossible.");
+        }
+        const payload = await response.json();
+        const summary = payload.summary || {};
+        setText("conv-active", String(summary.active_conversations || 0));
+        setText("conv-messages", String(summary.total_messages || 0));
+        setText("conv-answers", String(summary.assistant_answers || 0));
+        setText("conv-source-coverage", percent(summary.source_coverage));
+
+        clearNode(body);
+        const conversations = payload.recent || [];
+        if (!conversations.length) {
+            body.appendChild(makeEmptyRow(6, "Aucune conversation active."));
+            return;
+        }
+        conversations.forEach((item) => {
+            const row = document.createElement("tr");
+            const sourceLabel = `${item.source_answer_count || 0}/${item.assistant_count || 0}`;
+            row.append(
+                makeCell(item.user || "-"),
+                makeCell(item.title || "-"),
+                makeCell(String(item.message_count || 0)),
+                makeCell(sourceLabel),
+                makeCell(formatDate(item.last_message_at)),
+                makeCell(item.preview || "-")
+            );
+            body.appendChild(row);
+        });
+    } catch (error) {
+        clearNode(body);
+        body.appendChild(makeEmptyRow(6, "Erreur de chargement des conversations."));
+    }
+}
+
 bindAction("upload-drive-btn", uploadDriveDocument);
 bindAction("rebuild-drive-btn", rebuildDrive);
+bindAction("rebuild-drive-btn-bottom", rebuildDrive);
 bindAction("evaluate-drive-btn", evaluateDrive);
-
-loadDashboard();
+bindAction("evaluate-drive-btn-bottom", evaluateDrive);
+bindAuditActions();

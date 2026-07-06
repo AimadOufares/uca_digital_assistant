@@ -39,8 +39,10 @@
         </div>
     </header>
 
-    <main class="admin-shell">
-        <section class="admin-section system-summary" aria-labelledby="system-title">
+    <div class="admin-layout">
+        {% include 'api_app/_sidebar.html' %}
+        <main class="admin-shell">
+        <section class="admin-section active system-summary" data-section="system-title" aria-labelledby="system-title">
             <div class="section-head">
                 <div>
                     <p class="section-kicker">Etat global</p>
@@ -87,7 +89,7 @@
             </div>
         </section>
 
-        <section class="admin-section" aria-labelledby="corpus-title">
+        <section class="admin-section" data-section="corpus-title" aria-labelledby="corpus-title">
             <div class="section-head">
                 <div>
                     <p class="section-kicker">Corpus drive</p>
@@ -132,7 +134,7 @@
             </div>
         </section>
 
-        <section class="admin-section" aria-labelledby="quality-title">
+        <section class="admin-section" data-section="quality-title" aria-labelledby="quality-title">
             <div class="section-head">
                 <div>
                     <p class="section-kicker">Qualite</p>
@@ -193,13 +195,24 @@
             </div>
         </section>
 
-        <section class="admin-section" aria-labelledby="benchmark-title">
+        <section class="admin-section" data-section="benchmark-title" aria-labelledby="benchmark-title">
             <div class="section-head">
                 <div>
                     <p class="section-kicker">Benchmark</p>
                     <h2 id="benchmark-title">Evaluation metier drive</h2>
                 </div>
             </div>
+            <article class="panel stack">
+                <p>Relance les rapports sans passer par le terminal. Les traitements longs affichent leur statut dans la console.</p>
+                <div class="actions audit-actions">
+                    <button class="uca-btn uca-btn-secondary" type="button" id="run-data-audit-btn" data-audit-task="data_audit">Data audit</button>
+                    <button class="uca-btn uca-btn-secondary" type="button" id="run-raw-quality-btn" data-audit-task="raw_quality">Raw quality</button>
+                    <button class="uca-btn uca-btn-secondary" type="button" id="run-rag-eval-btn" data-audit-task="rag_eval">Benchmark drive</button>
+                    <button class="uca-btn uca-btn-secondary" type="button" id="run-context-eval-btn" data-audit-task="context_eval">Benchmark contextuel</button>
+                    <button class="uca-btn uca-btn-secondary" type="button" id="run-rag-full-btn" data-audit-task="rag_eval_full">Benchmark complet</button>
+                </div>
+                <div id="audit-console" class="audit-console" aria-live="polite">Aucun audit lance.</div>
+            </article>
             <div class="notice" id="eval-summary-box">Aucun benchmark drive disponible.</div>
             <div class="kpi-grid kpi-grid-4">
                 <article class="kpi-card">
@@ -247,14 +260,78 @@
             </article>
         </section>
 
-        <section class="admin-section" aria-labelledby="actions-title">
+        <section class="admin-section" data-section="conversation-audit-title" aria-labelledby="conversation-audit-title">
+            <div class="section-head">
+                <div>
+                    <p class="section-kicker">Audit conversations</p>
+                    <h2 id="conversation-audit-title">Conversations et sources</h2>
+                </div>
+            </div>
+            <div class="kpi-grid kpi-grid-4">
+                <article class="kpi-card">
+                    <span class="kpi-label">Conversations actives</span>
+                    <strong id="conv-active">-</strong>
+                    <p>Historique etudiant actif.</p>
+                </article>
+                <article class="kpi-card">
+                    <span class="kpi-label">Messages</span>
+                    <strong id="conv-messages">-</strong>
+                    <p>Total des echanges stockes.</p>
+                </article>
+                <article class="kpi-card">
+                    <span class="kpi-label">Reponses assistant</span>
+                    <strong id="conv-answers">-</strong>
+                    <p>Messages produits par le RAG.</p>
+                </article>
+                <article class="kpi-card">
+                    <span class="kpi-label">Reponses sourcees</span>
+                    <strong id="conv-source-coverage">-</strong>
+                    <p>Part des reponses avec sources.</p>
+                </article>
+            </div>
+            <article class="panel">
+                <div class="table-head">
+                    <h3>Conversations recentes</h3>
+                    <p>Utilisateur, titre, volume et dernier message</p>
+                </div>
+                <div class="table-wrap">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Utilisateur</th>
+                                <th>Titre</th>
+                                <th>Messages</th>
+                                <th>Sources</th>
+                                <th>Dernier message</th>
+                                <th>Apercu</th>
+                            </tr>
+                        </thead>
+                        <tbody id="conversation-audit-table-body">
+                            <tr><td colspan="6" class="empty">Chargement...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </article>
+        </section>
+
+        <section class="admin-section" data-section="actions-title" aria-labelledby="actions-title">
             <div class="section-head">
                 <div>
                     <p class="section-kicker">Maintenance</p>
-                    <h2 id="actions-title">Etat technique</h2>
+                    <h2 id="actions-title">Actions administrateur</h2>
                 </div>
             </div>
-            <div class="action-grid">
+            <div class="action-grid action-grid-4">
+                <article class="panel stack">
+                    <h3>Rebuild</h3>
+                    <p>Rejoue processing + indexation publiee pour le corpus drive.</p>
+                    <button class="uca-btn uca-btn-secondary" type="button" id="rebuild-drive-btn-bottom">Relancer rebuild drive</button>
+                </article>
+                <article class="panel stack">
+                    <h3>Benchmark drive</h3>
+                    <p>Regenere le dernier rapport d'evaluation metier.</p>
+                    <button class="uca-btn uca-btn-secondary" type="button" id="evaluate-drive-btn-bottom">Relancer benchmark drive</button>
+                </article>
                 <article class="panel stack">
                     <h3>Pipeline incremental</h3>
                     <p>Le rebuild drive traite seulement les documents nouveaux ou modifies avant de republier l'index.</p>
@@ -270,6 +347,7 @@
             </div>
         </section>
     </main>
+    </div>
 
     <script src="{% static 'api_app/admin_dashboard.js' %}?v=20260509-dashboard-cleanup" defer></script>
 </body>

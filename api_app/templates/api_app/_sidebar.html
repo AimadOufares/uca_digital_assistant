@@ -1,0 +1,66 @@
+{% load static %}
+<aside class="admin-sidebar" aria-label="Navigation administrateur">
+    <div class="sidebar-card">
+        <div class="sidebar-card-title">
+            <span>Dashboard</span>
+            <strong>Supervision RAG</strong>
+        </div>
+        <nav class="sidebar-nav">
+            <ul class="sidebar-menu">
+                {% if can_view_global %}
+                <li class="sidebar-item hero">
+                    <a href="#system-title" class="sidebar-link active" data-section="system-title">
+                        <span class="sidebar-item-heading">État global</span>
+                        <span class="sidebar-item-text">Système RAG actif</span>
+                    </a>
+                </li>
+                {% endif %}
+
+                {% if can_view_corpus %}
+                <li class="sidebar-item">
+                    <a href="#corpus-title" class="sidebar-link" data-section="corpus-title">
+                        <span class="sidebar-item-heading">Corpus drive</span>
+                        <span class="sidebar-item-text">Documents et publication</span>
+                    </a>
+                </li>
+                {% endif %}
+
+                {% if can_view_quality %}
+                <li class="sidebar-item">
+                    <a href="#quality-title" class="sidebar-link" data-section="quality-title">
+                        <span class="sidebar-item-heading">Qualité</span>
+                        <span class="sidebar-item-text">Couverture documentaire</span>
+                    </a>
+                </li>
+                {% endif %}
+
+                {% if can_view_benchmark %}
+                <li class="sidebar-item">
+                    <a href="#benchmark-title" class="sidebar-link" data-section="benchmark-title">
+                        <span class="sidebar-item-heading">Benchmark</span>
+                        <span class="sidebar-item-text">Évaluation métier drive</span>
+                    </a>
+                </li>
+                {% endif %}
+
+                {% if can_view_maintenance %}
+                <li class="sidebar-item">
+                    <a href="#actions-title" class="sidebar-link" data-section="actions-title">
+                        <span class="sidebar-item-heading">Maintenance</span>
+                        <span class="sidebar-item-text">État technique</span>
+                    </a>
+                </li>
+                {% endif %}
+
+                {% if can_view_quality %}
+                <li class="sidebar-item">
+                    <a href="#conversation-audit-title" class="sidebar-link" data-section="conversation-audit-title">
+                        <span class="sidebar-item-heading">Conversations</span>
+                        <span class="sidebar-item-text">Audit des conversations</span>
+                    </a>
+                </li>
+                {% endif %}
+            </ul>
+        </nav>
+    </div>
+</aside>
