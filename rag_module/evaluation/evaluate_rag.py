@@ -66,6 +66,31 @@ DRIVE_EVAL_SET: List[Dict] = [
     {"question": "Ou trouver un accompagnement pour monter un projet de recherche ?", "keywords": ["accompagnement", "projet de recherche", "soutien"], "expected_doc_types": ["recherche"], "expected_service": "Soutien-Recherche"},
 ]
 
+def load_benchmark_set(benchmark: str) -> List[Dict]:
+    if benchmark == "context":
+        return []
+    file_path = Path(__file__).parent / f"{benchmark}_eval_dataset.json"
+    if not file_path.exists():
+        initial_data = DRIVE_EVAL_SET if benchmark == "drive" else EVAL_SET
+        try:
+            with open(file_path, "w", encoding="utf-8") as f:
+                json.dump(initial_data, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+        return initial_data
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return DRIVE_EVAL_SET if benchmark == "drive" else EVAL_SET
+
+def save_benchmark_set(benchmark: str, dataset: List[Dict]) -> None:
+    if benchmark == "context":
+        return
+    file_path = Path(__file__).parent / f"{benchmark}_eval_dataset.json"
+    with open(file_path, "w", encoding="utf-8") as f:
+        json.dump(dataset, f, ensure_ascii=False, indent=2)
+
 BENCHMARK_SETS: Dict[str, List[Dict]] = {
     "generic": EVAL_SET,
     "drive": DRIVE_EVAL_SET,
@@ -427,7 +452,7 @@ def evaluate(top_k: int, run_generation: bool, benchmark: str = "drive") -> Dict
     if benchmark == "context":
         return evaluate_context(top_k=max(1, top_k))
 
-    eval_rows = BENCHMARK_SETS.get(benchmark, DRIVE_EVAL_SET)
+    eval_rows = load_benchmark_set(benchmark)
     rows = []
     for case in eval_rows:
         question = case["question"]

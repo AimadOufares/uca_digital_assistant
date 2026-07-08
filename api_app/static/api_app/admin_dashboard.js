@@ -184,25 +184,54 @@ function renderDashboard(payload) {
     const readyBadge = byId("ready-badge");
     if (readyBadge) readyBadge.className = readyBadgeClass(system);
     setText("ready-label", system.ready ? "Systeme pret" : "Systeme a verifier");
-    setText("meta-llm", llmConfig.chat_model || "-");
+    
+    // Meta Grid - Enhanced LLM info with state and provider
+    const llm = system.llm || {};
+    const llmState = llm.state || "unknown";
+    const llmProvider = llmConfig.provider || "unknown";
+    const llmModelWithState = `${llmConfig.chat_model || "-"} (${llmState})`;
+    setText("meta-llm", llmModelWithState);
+    
     setText("meta-embedding", activeIndex.embedding_model || "-");
-    setText("meta-build", activeIndex.build_id || "-");
+    
+    // Build with timestamp
+    const buildDate = activeIndex.manifest_updated_at 
+        ? formatDate(activeIndex.manifest_updated_at).split(' ').slice(0, 2).join(' ')
+        : "";
+    const buildDisplay = activeIndex.build_id ? `${activeIndex.build_id} ${buildDate ? '(' + buildDate + ')' : ''}` : "-";
+    setText("meta-build", buildDisplay.trim());
+    
     setText("meta-sync", driveSync.status || "-");
 
-    setText("kpi-ready", system.ready ? "Oui" : "Non");
+    // KPI Grid - System Ready with Check Details
+    const checks = system.checks || {};
+    const systemStatus = system.ready ? "✓ Operationnel" : "⚠ Non pret";
+    setText("kpi-ready", systemStatus);
     setText("kpi-ready-sub", system.ready ? "Service disponible pour les reponses." : "Verification requise.");
+    
+    // Show check details
+    const checksBox = byId("kpi-ready-checks");
+    if (checksBox) {
+        checksBox.style.display = "block";
+        const dbStatus = checks.database_ready ? "✓ DB" : "✗ DB";
+        const vectorStatus = checks.vector_store_ready ? "✓ Index" : "✗ Index";
+        const llmStatus = checks.llm_ready ? "✓ LLM" : "✗ LLM";
+        setText("kpi-check-db", dbStatus);
+        setText("kpi-check-vector", vectorStatus);
+        setText("kpi-check-llm", llmStatus);
+    }
+    
+    // KPI Grid - Index Published (was "Build actif")
     setText("kpi-build", activeIndex.build_id || "-");
-    setText("kpi-build-sub", activeIndex.manifest_updated_at ? `Publie le ${formatDate(activeIndex.manifest_updated_at)}` : "Aucun build publie detecte.");
+    setText("kpi-build-sub", activeIndex.manifest_updated_at 
+        ? `Publie ${formatDate(activeIndex.manifest_updated_at)}`
+        : "Aucun build publie.");
+    
+    // KPI Grid - Chunks and Sources (unchanged)
     setText("kpi-chunks", String(activeIndex.chunk_count || 0));
     setText("kpi-sources", String(activeIndex.source_count || 0));
     setText("kpi-drive-docs", String(driveSync.document_count || 0));
-    if (evaluation.summary) {
-        setText("kpi-benchmark", evaluation.benchmark || "drive");
-        setText("kpi-benchmark-sub", `${evaluation.questions_evaluated || 0} questions evaluees`);
-    } else {
-        setText("kpi-benchmark", "-");
-        setText("kpi-benchmark-sub", "Aucun benchmark charge.");
-    }
+    
     setText("admin-index-note", activeIndex.build_id ? `Build ${activeIndex.build_id} - ${activeIndex.embedding_model || "-"}` : "Aucun index publie detecte.");
 
     renderDriveSync(driveSync);
@@ -218,9 +247,86 @@ function renderDashboard(payload) {
         .filter((item) => item[0] && item[0] !== "unknown");
     setText("quality-services", String(rankedServices.length));
     renderServicesTable(rankedServices);
+    renderQualityBreakdowns(quality);
 
     renderAuditSummary(latestReports);
     renderEvaluation(evaluation);
+}
+
+function renderQualityBreakdowns(quality) {
+    const flagsList = byId("quality-flags-list");
+    if (flagsList) {
+        clearNode(flagsList);
+        const counts = quality.quality?.flag_counts || {};
+        const translations = {
+            lang_not_allowed: "Langue non autorisée",
+            lang_conf_low: "Confiance linguistique faible",
+            too_short_words: "Fichiers trop courts (mots)",
+            too_short_chars: "Fichiers trop courts (caractères)",
+            off_topic: "Hors-sujet / Hors-scope",
+            quality_score_low: "Qualité de texte dégradée",
+            lexical_diversity_low: "Faible diversité lexicale"
+        };
+        const entries = Object.entries(counts).sort((a, b) => b[1] - a[1]);
+        if (!entries.length) {
+            const row = document.createElement("div");
+            row.className = "metric-row";
+            row.innerHTML = "<span>Aucun signal de qualité détecté</span><strong>0</strong>";
+            flagsList.appendChild(row);
+        } else {
+            entries.forEach(([key, count]) => {
+                const label = translations[key] || key;
+                const row = document.createElement("div");
+                row.className = "metric-row";
+                const left = document.createElement("span");
+                const right = document.createElement("strong");
+                left.textContent = label;
+                right.textContent = String(count);
+                if (count > 0) {
+                    right.style.color = "var(--uca-danger)";
+                }
+                row.append(left, right);
+                flagsList.appendChild(row);
+            });
+        }
+    }
+
+    const formatsList = byId("document-formats-list");
+    if (formatsList) {
+        clearNode(formatsList);
+        
+        // Formats / Extensions
+        const exts = quality.summary?.extensions || {};
+        Object.entries(exts).forEach(([ext, count]) => {
+            const row = document.createElement("div");
+            row.className = "metric-row";
+            const left = document.createElement("span");
+            const right = document.createElement("strong");
+            left.textContent = `Format ${ext.toUpperCase()}`;
+            right.textContent = `${count} fichier(s)`;
+            row.append(left, right);
+            formatsList.appendChild(row);
+        });
+
+        // Langues
+        const langs = quality.summary?.languages || {};
+        const langNames = {
+            fr: "Français",
+            ar: "Arabe",
+            en: "Anglais",
+            unknown: "Non déterminée"
+        };
+        Object.entries(langs).forEach(([lang, count]) => {
+            const row = document.createElement("div");
+            row.className = "metric-row";
+            const left = document.createElement("span");
+            const right = document.createElement("strong");
+            left.textContent = `Langue : ${langNames[lang] || lang}`;
+            right.textContent = `${count} fichier(s)`;
+            row.append(left, right);
+            formatsList.appendChild(row);
+        });
+    }
 }
 
 function renderDriveSync(driveSync) {
@@ -264,7 +370,6 @@ function renderAuditSummary(latestReports) {
     const rows = [
         ["Audit de donnees", latestReports.data_audit],
         ["Audit raw quality", latestReports.raw_quality_audit],
-        ["Benchmark drive", latestReports.rag_eval],
     ].map(([label, bundle]) => [
         label,
         bundle?.available ? formatDate(bundle.updated_at) : "Non disponible",
@@ -277,19 +382,23 @@ function renderEvaluation(evaluation) {
     if (!evaluation || !evaluation.summary) {
         setText("eval-summary-box", "Aucun benchmark drive disponible.");
         setText("eval-service-accuracy", "-");
-        setText("eval-best-match", "-");
+        setText("eval-hit-rate", "-");
+        setText("eval-precision", "-");
+        setText("eval-coverage", "-");
         setText("eval-abstention", "-");
         setText("eval-latency", "-");
         if (body) {
             clearNode(body);
-            body.appendChild(makeEmptyRow(5, "Aucun benchmark charge."));
+            body.appendChild(makeEmptyRow(7, "Aucun benchmark charge."));
         }
         return;
     }
     const summary = evaluation.summary;
-    setText("eval-summary-box", `Benchmark ${evaluation.benchmark || "drive"} - ${evaluation.questions_evaluated || 0} questions evaluees`);
+    setText("eval-summary-box", `Benchmark ${evaluation.benchmark || "drive"} — ${evaluation.questions_evaluated || 0} questions évaluées`);
     setText("eval-service-accuracy", percent(summary.service_top1_accuracy));
-    setText("eval-best-match", percent(summary.best_match_score_avg));
+    setText("eval-hit-rate", percent(summary.hit_at_k_rate));
+    setText("eval-precision", percent(summary.precision_at_k_avg));
+    setText("eval-coverage", percent(summary.coverage_at_k_avg));
     setText("eval-abstention", percent(summary.abstention_rate));
     setText("eval-latency", `${fixed(summary.retrieval_latency_ms_avg, 0)} ms`);
 
@@ -297,7 +406,66 @@ function renderEvaluation(evaluation) {
     clearNode(body);
     const rows = evaluation.rows || [];
     if (!rows.length) {
-        body.appendChild(makeEmptyRow(5, "Aucun cas evalue."));
+        body.appendChild(makeEmptyRow(8, "Aucun cas évalué."));
+    } else {
+        rows.forEach((row) => {
+            const tr = document.createElement("tr");
+
+            const isMatch = Number(row.service_top1_match) === 1;
+            const statusPill = makePill(isMatch ? "Correct" : "Erreur", isMatch ? "ok" : "bad");
+            const statusCell = document.createElement("td");
+            statusCell.appendChild(statusPill);
+
+            const actionCell = document.createElement("td");
+            const deleteBtn = document.createElement("button");
+            deleteBtn.className = "uca-btn";
+            deleteBtn.style.padding = "4px 8px";
+            deleteBtn.style.fontSize = "11px";
+            deleteBtn.style.borderRadius = "var(--uca-radius)";
+            deleteBtn.style.border = "1px solid var(--uca-danger)";
+            deleteBtn.style.color = "var(--uca-danger)";
+            deleteBtn.style.background = "transparent";
+            deleteBtn.style.cursor = "pointer";
+            deleteBtn.textContent = "Supprimer";
+            deleteBtn.addEventListener("click", async () => {
+                if (confirm(`Voulez-vous vraiment supprimer la question : "${row.question}" ?`)) {
+                    deleteBtn.disabled = true;
+                    try {
+                        const response = await fetch("/api/benchmark/delete-question/", {
+                            method: "POST",
+                            headers: {
+                                "Content-Type": "application/json",
+                                "X-CSRFToken": getCookie("csrftoken"),
+                            },
+                            body: JSON.stringify({
+                                benchmark: "drive",
+                                question: row.question
+                            }),
+                        });
+                        const resData = await response.json();
+                        if (!response.ok) throw new Error(resData.detail || "Échec de la suppression");
+                        await refreshDashboard();
+                    } catch (err) {
+                        alert(err.message);
+                    } finally {
+                        deleteBtn.disabled = false;
+                    }
+                }
+            });
+            actionCell.appendChild(deleteBtn);
+
+            tr.append(
+                makeCell(row.question || "-"),
+                makeCell(row.expected_service || "-"),
+                makeCell(row.top1_service || "-"),
+                statusCell,
+                makeCell(percent(row.precision_at_k)),
+                makeCell(row.latency_ms != null ? `${Math.round(row.latency_ms)} ms` : "-"),
+                makeCell(row.top1_source || "-"),
+                actionCell
+            );
+            body.appendChild(tr);
+        });
     }
 }
 
@@ -370,12 +538,23 @@ async function loadDriveDocuments() {
                 makeCell(formatDate(Number(doc.updated_at || 0) * 1000))
             );
             const actionCell = document.createElement("td");
-            const button = document.createElement("button");
-            button.className = "uca-btn uca-btn-danger";
-            button.type = "button";
-            button.textContent = "Supprimer";
-            button.addEventListener("click", () => deleteDriveDocument(doc.name || ""));
-            actionCell.appendChild(button);
+            actionCell.style.cssText = "display:flex; gap:0.5rem; align-items:center; flex-wrap:wrap;";
+
+            const downloadBtn = document.createElement("button");
+            downloadBtn.className = "uca-btn uca-btn-secondary";
+            downloadBtn.type = "button";
+            downloadBtn.textContent = "Télécharger";
+            downloadBtn.title = "Télécharger ce document";
+            downloadBtn.addEventListener("click", () => downloadDriveDocument(doc.name || ""));
+            actionCell.appendChild(downloadBtn);
+
+            const deleteBtn = document.createElement("button");
+            deleteBtn.className = "uca-btn uca-btn-danger";
+            deleteBtn.type = "button";
+            deleteBtn.textContent = "Supprimer";
+            deleteBtn.title = "Supprimer définitivement ce document du corpus";
+            deleteBtn.addEventListener("click", () => deleteDriveDocument(doc.name || ""));
+            actionCell.appendChild(deleteBtn);
             row.appendChild(actionCell);
             body.appendChild(row);
         });
@@ -410,6 +589,32 @@ async function uploadDriveDocument() {
     }
 }
 
+async function downloadDriveDocument(filename) {
+    if (!filename) return;
+    try {
+        const encodedName = encodeURIComponent(filename);
+        const response = await fetch(`/api/drive-documents/${encodedName}/download/`, {
+            method: "GET",
+        });
+        if (!response.ok) {
+            const payload = await response.json();
+            throw new Error(payload.detail || "Téléchargement impossible.");
+        }
+        const blob = await response.blob();
+        const url = window.URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = filename;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        window.URL.revokeObjectURL(url);
+        setActionStatus(`${filename} téléchargé avec succès.`);
+    } catch (error) {
+        setActionStatus(error.message || "Erreur pendant le téléchargement.", true);
+    }
+}
+
 async function deleteDriveDocument(filename) {
     if (!filename) return;
     if (!window.confirm(`Supprimer ${filename} du corpus drive ?`)) return;
@@ -429,8 +634,15 @@ async function deleteDriveDocument(filename) {
     }
 }
 
-async function rebuildDrive() {
-    setActionStatus("Rebuild drive en cours : processing + indexation publiee...");
+async function rebuildDrive(clearCache = false) {
+    if (clearCache) {
+        if (!window.confirm("Êtes-vous sûr de vouloir réinitialiser le cache et recalculer tous les documents à zéro ? Cela peut prendre plusieurs minutes.")) {
+            return;
+        }
+        setActionStatus("Rebuild à zéro en cours : réinitialisation du cache + traitement complet...");
+    } else {
+        setActionStatus("Rebuild drive en cours : processing + indexation publiee...");
+    }
     renderProcessingSummary(null);
     try {
         const response = await fetch("/api/drive-rebuild/", {
@@ -439,7 +651,7 @@ async function rebuildDrive() {
                 "Content-Type": "application/json",
                 "X-CSRFToken": getCookie("csrftoken"),
             },
-            body: JSON.stringify({}),
+            body: JSON.stringify({ clear_cache: clearCache }),
         });
         const payload = await response.json();
         if (!response.ok) throw new Error(payload.detail || "Echec du rebuild drive.");
@@ -489,13 +701,17 @@ function bindAction(id, handler) {
     if (node) node.addEventListener("click", handler);
 }
 
-function appendAuditLog(message, isError = false) {
-    const consoleBox = byId("audit-console");
+const QUALITY_AUDIT_TASKS = new Set(["data_audit", "raw_quality"]);
+
+function appendAuditLog(message, isError = false, consoleId = "audit-console") {
+    const consoleBox = byId(consoleId);
     if (!consoleBox) return;
     const line = document.createElement("div");
     line.className = isError ? "audit-log-line is-error" : "audit-log-line";
     line.textContent = `[${new Date().toLocaleTimeString("fr-FR")}] ${message}`;
-    if (consoleBox.textContent === "Aucun audit lance.") {
+    if (consoleBox.firstChild && consoleBox.children.length === 0) {
+        clearNode(consoleBox);
+    } else if (!consoleBox.querySelector(".audit-log-line")) {
         clearNode(consoleBox);
     }
     consoleBox.appendChild(line);
@@ -504,10 +720,11 @@ function appendAuditLog(message, isError = false) {
 
 async function runAuditTask(task, button) {
     if (!task || !button) return;
+    const consoleId = QUALITY_AUDIT_TASKS.has(task) ? "quality-audit-console" : "audit-console";
     const originalText = button.textContent;
     button.disabled = true;
     button.textContent = "En cours...";
-    appendAuditLog(`Lancement ${originalText}`);
+    appendAuditLog(`Lancement ${originalText}`, false, consoleId);
     try {
         const response = await fetch(`/api/run-audit/${encodeURIComponent(task)}/`, {
             method: "POST",
@@ -521,10 +738,10 @@ async function runAuditTask(task, button) {
         if (!response.ok) {
             throw new Error(payload.detail || payload.error || "Audit impossible.");
         }
-        appendAuditLog(`${payload.label || originalText} termine en ${payload.elapsed_s || 0}s`);
+        appendAuditLog(`${payload.label || originalText} terminé en ${payload.elapsed_s || 0}s`, false, consoleId);
         await refreshDashboard();
     } catch (error) {
-        appendAuditLog(`${originalText}: ${error.message || "erreur inconnue"}`, true);
+        appendAuditLog(`${originalText}: ${error.message || "erreur inconnue"}`, true, consoleId);
     } finally {
         button.disabled = false;
         button.textContent = originalText;
@@ -543,7 +760,7 @@ async function loadConversationAudit() {
     try {
         const response = await fetch("/api/admin-conversations/");
         if (response.status === 403) {
-            body.replaceChildren(makeEmptyRow(6, "Acces refuse."));
+            body.replaceChildren(makeEmptyRow(8, "Accès refusé."));
             return;
         }
         if (!response.ok) {
@@ -552,24 +769,31 @@ async function loadConversationAudit() {
         const payload = await response.json();
         const summary = payload.summary || {};
         setText("conv-active", String(summary.active_conversations || 0));
+        setText("conv-archived", String(summary.archived_conversations || 0));
         setText("conv-messages", String(summary.total_messages || 0));
         setText("conv-answers", String(summary.assistant_answers || 0));
+        setText("conv-with-sources", String(summary.answers_with_sources || 0));
         setText("conv-source-coverage", percent(summary.source_coverage));
 
         clearNode(body);
         const conversations = payload.recent || [];
         if (!conversations.length) {
-            body.appendChild(makeEmptyRow(6, "Aucune conversation active."));
+            body.appendChild(makeEmptyRow(8, "Aucune conversation active."));
             return;
         }
         conversations.forEach((item) => {
             const row = document.createElement("tr");
-            const sourceLabel = `${item.source_answer_count || 0}/${item.assistant_count || 0}`;
+            const assistantCount = item.assistant_count || 0;
+            const sourceCount = item.source_answer_count || 0;
+            const sourceLabel = `${sourceCount} / ${assistantCount}`;
+            const sourceRate = assistantCount > 0 ? sourceCount / assistantCount : 0;
             row.append(
                 makeCell(item.user || "-"),
                 makeCell(item.title || "-"),
                 makeCell(String(item.message_count || 0)),
+                makeCell(String(assistantCount)),
                 makeCell(sourceLabel),
+                makeCell(percent(sourceRate)),
                 makeCell(formatDate(item.last_message_at)),
                 makeCell(item.preview || "-")
             );
@@ -577,13 +801,130 @@ async function loadConversationAudit() {
         });
     } catch (error) {
         clearNode(body);
-        body.appendChild(makeEmptyRow(6, "Erreur de chargement des conversations."));
+        body.appendChild(makeEmptyRow(8, "Erreur de chargement des conversations."));
+    }
+}
+
+async function testBenchmarkQuestion() {
+    const questionInput = byId("new-question");
+    const expectedServiceInput = byId("new-expected-service");
+    const keywordsInput = byId("new-keywords");
+    const testResultBox = byId("test-result-box");
+    const testResultTbody = byId("test-result-tbody");
+    const testBtn = byId("test-question-btn");
+
+    if (!questionInput || !questionInput.value.trim()) {
+        alert("Veuillez saisir une question.");
+        return;
+    }
+    
+    testBtn.disabled = true;
+    testBtn.textContent = "Test en cours...";
+    try {
+        const response = await fetch("/api/benchmark/test-question/", {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+                "X-CSRFToken": getCookie("csrftoken"),
+            },
+            body: JSON.stringify({
+                question: questionInput.value.trim(),
+                expected_service: expectedServiceInput ? expectedServiceInput.value.trim() : "",
+                keywords: keywordsInput ? keywordsInput.value.trim() : "",
+            }),
+        });
+        const row = await response.json();
+        if (!response.ok) throw new Error(row.detail || "Échec du test en direct");
+        
+        testResultTbody.replaceChildren();
+        const tr = document.createElement("tr");
+        const isMatch = Number(row.service_top1_match) === 1;
+        const statusPill = makePill(isMatch ? "Correct" : "Erreur", isMatch ? "ok" : "bad");
+        const statusCell = document.createElement("td");
+        statusCell.appendChild(statusPill);
+        
+        tr.append(
+            makeCell(row.question || "-"),
+            makeCell(row.expected_service || "-"),
+            makeCell(row.top1_service || "-"),
+            statusCell,
+            makeCell(percent(row.precision_at_k)),
+            makeCell(row.latency_ms != null ? `${Math.round(row.latency_ms)} ms` : "-"),
+            makeCell(row.top1_source || "-")
+        );
+        testResultTbody.appendChild(tr);
+        testResultBox.style.display = "block";
+    } catch (err) {
+        alert(err.message);
+    } finally {
+        testBtn.disabled = false;
+        testBtn.textContent = "Tester en direct";
+    }
+}
+
+async function addBenchmarkQuestion(e) {
+    if (e) e.preventDefault();
+    const questionInput = byId("new-question");
+    const expectedServiceInput = byId("new-expected-service");
+    const keywordsInput = byId("new-keywords");
+    const addBtn = byId("add-question-btn");
+    
+    if (!questionInput || !questionInput.value.trim()) {
+        alert("Veuillez saisir une question.");
+        return;
+    }
+    if (!expectedServiceInput || !expectedServiceInput.value.trim()) {
+        alert("Veuillez spécifier le service attendu.");
+        return;
+    }
+    
+    addBtn.disabled = true;
+    addBtn.textContent = "Ajout en cours...";
+    try {
+        const response = await fetch("/api/benchmark/add-question/", {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+                "X-CSRFToken": getCookie("csrftoken"),
+            },
+            body: JSON.stringify({
+                benchmark: "drive",
+                question: questionInput.value.trim(),
+                expected_service: expectedServiceInput.value.trim(),
+                keywords: keywordsInput ? keywordsInput.value.trim() : "",
+            }),
+        });
+        const resData = await response.json();
+        if (!response.ok) throw new Error(resData.detail || "Échec de l'ajout");
+        
+        alert("Question ajoutée avec succès au benchmark !");
+        questionInput.value = "";
+        expectedServiceInput.value = "";
+        if (keywordsInput) keywordsInput.value = "";
+        
+        const testResultBox = byId("test-result-box");
+        if (testResultBox) testResultBox.style.display = "none";
+        
+        await refreshDashboard();
+    } catch (err) {
+        alert(err.message);
+    } finally {
+        addBtn.disabled = false;
+        addBtn.textContent = "Ajouter au benchmark";
     }
 }
 
 bindAction("upload-drive-btn", uploadDriveDocument);
-bindAction("rebuild-drive-btn", rebuildDrive);
-bindAction("rebuild-drive-btn-bottom", rebuildDrive);
+bindAction("rebuild-drive-btn", () => rebuildDrive(false));
+bindAction("rebuild-zero-btn", () => rebuildDrive(true));
+bindAction("rebuild-drive-btn-bottom", () => rebuildDrive(false));
 bindAction("evaluate-drive-btn", evaluateDrive);
 bindAction("evaluate-drive-btn-bottom", evaluateDrive);
+bindAction("test-question-btn", testBenchmarkQuestion);
+
+const addQuestionForm = byId("add-test-question-form");
+if (addQuestionForm) {
+    addQuestionForm.addEventListener("submit", addBenchmarkQuestion);
+}
+
 bindAuditActions();

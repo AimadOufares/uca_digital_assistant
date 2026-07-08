@@ -55,36 +55,36 @@
                     <div class="meta-row"><span>Drive</span><strong id="meta-sync">-</strong></div>
                 </div>
             </div>
-            <div class="kpi-grid kpi-grid-6">
+            <div class="kpi-grid kpi-grid-5">
                 <article class="kpi-card">
                     <span class="kpi-label">Systeme pret</span>
                     <strong id="kpi-ready">-</strong>
                     <p id="kpi-ready-sub">Etat global du service.</p>
+                    <div id="kpi-ready-checks" class="kpi-checks" style="display: none; margin-top: 10px; font-size: 0.8rem; color: var(--uca-muted);">
+                        <span id="kpi-check-db">DB: -</span> • 
+                        <span id="kpi-check-vector">Index: -</span> • 
+                        <span id="kpi-check-llm">LLM: -</span>
+                    </div>
                 </article>
                 <article class="kpi-card">
-                    <span class="kpi-label">Build actif</span>
+                    <span class="kpi-label">Index publie</span>
                     <strong id="kpi-build">-</strong>
-                    <p id="kpi-build-sub">Index publie actuellement utilise.</p>
+                    <p id="kpi-build-sub">Build ID avec date.</p>
                 </article>
                 <article class="kpi-card">
-                    <span class="kpi-label">Chunks publies</span>
+                    <span class="kpi-label">Chunks indexes</span>
                     <strong id="kpi-chunks">-</strong>
-                    <p>Volume indexe.</p>
+                    <p>Volume total publie.</p>
                 </article>
                 <article class="kpi-card">
-                    <span class="kpi-label">Sources indexees</span>
+                    <span class="kpi-label">Sources documentaires</span>
                     <strong id="kpi-sources">-</strong>
                     <p>Documents distincts.</p>
                 </article>
                 <article class="kpi-card">
                     <span class="kpi-label">Documents drive</span>
                     <strong id="kpi-drive-docs">-</strong>
-                    <p>Corpus administrable.</p>
-                </article>
-                <article class="kpi-card">
-                    <span class="kpi-label">Dernier benchmark</span>
-                    <strong id="kpi-benchmark">-</strong>
-                    <p id="kpi-benchmark-sub">Benchmark charge.</p>
+                    <p>Fichiers bruts a traiter.</p>
                 </article>
             </div>
         </section>
@@ -94,6 +94,7 @@
                 <div>
                     <p class="section-kicker">Corpus drive</p>
                     <h2 id="corpus-title">Documents et publication</h2>
+                    <p class="section-desc">Gestion des documents : publication, indexation et évaluation de la couverture.</p>
                 </div>
             </div>
             <div class="two-col">
@@ -105,6 +106,7 @@
                     </div>
                     <div class="actions">
                         <button class="uca-btn uca-btn-secondary" type="button" id="rebuild-drive-btn">Rebuild drive</button>
+                        <button class="uca-btn uca-btn-secondary" type="button" id="rebuild-zero-btn" title="Réinitialise l'index et retraite tous les documents">Rebuild à zéro</button>
                         <button class="uca-btn uca-btn-secondary" type="button" id="evaluate-drive-btn">Benchmark drive</button>
                     </div>
                     <div class="notice" id="drive-action-status">Aucun traitement en cours.</div>
@@ -112,7 +114,7 @@
                 </article>
                 <article class="panel">
                     <div class="table-head">
-                        <h3>Documents presents</h3>
+                        <h3>Documents du corpus</h3>
                         <p id="drive-doc-count">0 document</p>
                     </div>
                     <div class="table-wrap">
@@ -121,8 +123,8 @@
                                 <tr>
                                     <th>Nom</th>
                                     <th>Taille</th>
-                                    <th>Mise a jour</th>
-                                    <th>Action</th>
+                                    <th>Mise à jour</th>
+                                    <th>Actions</th>
                                 </tr>
                             </thead>
                             <tbody id="drive-doc-table-body">
@@ -137,8 +139,9 @@
         <section class="admin-section" data-section="quality-title" aria-labelledby="quality-title">
             <div class="section-head">
                 <div>
-                    <p class="section-kicker">Qualite</p>
+                    <p class="section-kicker">Qualité</p>
                     <h2 id="quality-title">Couverture documentaire</h2>
+                    <p class="section-desc">Analyse de la qualité des documents et couverture par service. Audit brut et structuré.</p>
                 </div>
             </div>
             <div class="kpi-grid kpi-grid-4">
@@ -180,16 +183,40 @@
                         </table>
                     </div>
                 </article>
-                <article class="panel">
+                <article class="panel stack">
                     <div class="table-head">
-                        <h3>Rapports disponibles</h3>
-                        <p>Dernieres generations</p>
+                        <h3>Rapports & Audits qualité</h3>
+                        <p>Générations disponibles — relancer sans passer par le terminal</p>
                     </div>
                     <div class="metrics-list" id="audit-summary-list"></div>
+                    <div class="actions">
+                        <button class="uca-btn uca-btn-secondary" type="button" id="run-data-audit-btn" data-audit-task="data_audit">Data audit</button>
+                        <button class="uca-btn uca-btn-secondary" type="button" id="run-raw-quality-btn" data-audit-task="raw_quality">Raw quality</button>
+                    </div>
+                    <div id="quality-audit-console" class="audit-console" aria-live="polite">Aucun audit lancé.</div>
                     <div class="report-links">
-                        <a href="/api/reports/data_audit/latest/" target="_blank" rel="noopener">Data audit</a>
-                        <a href="/api/reports/raw_quality_audit/latest/" target="_blank" rel="noopener">Audit raw</a>
-                        <a href="/api/reports/rag_eval/latest/" target="_blank" rel="noopener">Benchmark drive</a>
+                        <a href="/api/reports/data_audit/latest/" target="_blank" rel="noopener">Voir rapport Data audit</a>
+                        <a href="/api/reports/raw_quality_audit/latest/" target="_blank" rel="noopener">Voir rapport Raw quality</a>
+                    </div>
+                </article>
+            </div>
+            <div class="two-col" style="margin-top: 14px;">
+                <article class="panel">
+                    <div class="table-head">
+                        <h3>Détails des alertes qualité</h3>
+                        <p>Anomalies détectées dans le corpus raw</p>
+                    </div>
+                    <div class="metrics-list" id="quality-flags-list">
+                        <div class="metric-row"><span class="empty">Chargement...</span></div>
+                    </div>
+                </article>
+                <article class="panel">
+                    <div class="table-head">
+                        <h3>Formats & Langues</h3>
+                        <p>Extensions et langues du corpus</p>
+                    </div>
+                    <div class="metrics-list" id="document-formats-list">
+                        <div class="metric-row"><span class="empty">Chargement...</span></div>
                     </div>
                 </article>
             </div>
@@ -199,31 +226,43 @@
             <div class="section-head">
                 <div>
                     <p class="section-kicker">Benchmark</p>
-                    <h2 id="benchmark-title">Evaluation metier drive</h2>
+                    <h2 id="benchmark-title">Évaluation métier</h2>
+                    <p class="section-desc">Test de qualité : précision service, couverture documentaire, performance retrieval.</p>
                 </div>
             </div>
             <article class="panel stack">
-                <p>Relance les rapports sans passer par le terminal. Les traitements longs affichent leur statut dans la console.</p>
+                <p>Relance les benchmarks sans passer par le terminal. Les traitements affichent leur statut en temps réel.</p>
                 <div class="actions audit-actions">
-                    <button class="uca-btn uca-btn-secondary" type="button" id="run-data-audit-btn" data-audit-task="data_audit">Data audit</button>
-                    <button class="uca-btn uca-btn-secondary" type="button" id="run-raw-quality-btn" data-audit-task="raw_quality">Raw quality</button>
                     <button class="uca-btn uca-btn-secondary" type="button" id="run-rag-eval-btn" data-audit-task="rag_eval">Benchmark drive</button>
                     <button class="uca-btn uca-btn-secondary" type="button" id="run-context-eval-btn" data-audit-task="context_eval">Benchmark contextuel</button>
                     <button class="uca-btn uca-btn-secondary" type="button" id="run-rag-full-btn" data-audit-task="rag_eval_full">Benchmark complet</button>
                 </div>
-                <div id="audit-console" class="audit-console" aria-live="polite">Aucun audit lance.</div>
+                <div id="audit-console" class="audit-console" aria-live="polite">Aucun benchmark lancé.</div>
+                <div class="report-links">
+                    <a href="/api/reports/rag_eval/latest/" target="_blank" rel="noopener">Voir dernier rapport benchmark</a>
+                </div>
             </article>
             <div class="notice" id="eval-summary-box">Aucun benchmark drive disponible.</div>
-            <div class="kpi-grid kpi-grid-4">
+            <div class="kpi-grid kpi-grid-6">
                 <article class="kpi-card">
                     <span class="kpi-label">Service top-1</span>
                     <strong id="eval-service-accuracy">-</strong>
-                    <p>Precision service.</p>
+                    <p>Précision service.</p>
                 </article>
                 <article class="kpi-card">
-                    <span class="kpi-label">Best match</span>
-                    <strong id="eval-best-match">-</strong>
-                    <p>Qualite du meilleur chunk.</p>
+                    <span class="kpi-label">Hit rate</span>
+                    <strong id="eval-hit-rate">-</strong>
+                    <p>Document attendu retrouvé.</p>
+                </article>
+                <article class="kpi-card">
+                    <span class="kpi-label">Précision@k</span>
+                    <strong id="eval-precision">-</strong>
+                    <p>Chunks pertinents dans top-k.</p>
+                </article>
+                <article class="kpi-card">
+                    <span class="kpi-label">Couverture@k</span>
+                    <strong id="eval-coverage">-</strong>
+                    <p>Docs attendus couverts.</p>
                 </article>
                 <article class="kpi-card">
                     <span class="kpi-label">Abstention</span>
@@ -238,8 +277,8 @@
             </div>
             <article class="panel">
                 <div class="table-head">
-                    <h3>Cas testes</h3>
-                    <p>Question, service attendu, service trouve et source top-1</p>
+                    <h3>Cas testés</h3>
+                    <p>Question, service attendu, service trouvé, précision et source top-1</p>
                 </div>
                 <div class="table-wrap">
                     <table>
@@ -247,15 +286,66 @@
                             <tr>
                                 <th>Question</th>
                                 <th>Service attendu</th>
-                                <th>Service trouve</th>
-                                <th>Statut</th>
-                                <th>Source top-1</th>
+                                <th>Service trouvé</th>
+                                 <th>Statut</th>
+                                 <th>Précision@k</th>
+                                 <th>Latence (ms)</th>
+                                 <th>Source top-1</th>
+                                 <th>Action</th>
                             </tr>
                         </thead>
                         <tbody id="eval-table-body">
-                            <tr><td colspan="5" class="empty">Aucun benchmark charge.</td></tr>
+                            <tr><td colspan="8" class="empty">Aucun benchmark chargé.</td></tr>
                         </tbody>
                     </table>
+                </div>
+            </article>
+            <article class="panel">
+                <div class="table-head">
+                    <h3>Ajouter &amp; Tester une question</h3>
+                    <p>Saisissez une question pour l'évaluer en direct ou l'ajouter définitivement au benchmark.</p>
+                </div>
+                <form id="add-test-question-form" class="stack" style="margin-top: 14px;">
+                    <div class="two-col">
+                        <div class="stack" style="gap: 6px;">
+                            <label for="new-question" style="font-size: 12px; font-weight: 750; color: var(--uca-blue-dark);">Question *</label>
+                            <input class="file-input" type="text" id="new-question" placeholder="Ex: Comment s'inscrire en master ?" required style="flex: 1 1 100%;">
+                        </div>
+                        <div class="stack" style="gap: 6px;">
+                            <label for="new-expected-service" style="font-size: 12px; font-weight: 750; color: var(--uca-blue-dark);">Service attendu *</label>
+                            <input class="file-input" type="text" id="new-expected-service" placeholder="Ex: PEDOC" required style="flex: 1 1 100%;">
+                        </div>
+                    </div>
+                    <div class="two-col" style="margin-top: 10px;">
+                        <div class="stack" style="gap: 6px;">
+                            <label for="new-keywords" style="font-size: 12px; font-weight: 750; color: var(--uca-blue-dark);">Mots-clés (séparés par des virgules)</label>
+                            <input class="file-input" type="text" id="new-keywords" placeholder="Ex: candidature, doctorat, dates" style="flex: 1 1 100%;">
+                        </div>
+                        <div class="actions" style="margin-top: 24px; justify-content: flex-end; gap: 10px;">
+                            <button class="uca-btn uca-btn-secondary" type="button" id="test-question-btn">Tester en direct</button>
+                            <button class="uca-btn uca-btn-primary" type="submit" id="add-question-btn">Ajouter au benchmark</button>
+                        </div>
+                    </div>
+                </form>
+                <div id="test-result-box" class="notice" style="margin-top: 14px; display: none;">
+                    <strong>Résultat du test en direct :</strong>
+                    <div class="table-wrap" style="margin-top: 8px;">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>Question</th>
+                                    <th>Service attendu</th>
+                                    <th>Service trouvé</th>
+                                    <th>Statut</th>
+                                    <th>Précision@k</th>
+                                    <th>Latence</th>
+                                    <th>Source top-1</th>
+                                </tr>
+                            </thead>
+                            <tbody id="test-result-tbody">
+                            </tbody>
+                        </table>
+                    </div>
                 </div>
             </article>
         </section>
@@ -264,35 +354,57 @@
             <div class="section-head">
                 <div>
                     <p class="section-kicker">Audit conversations</p>
-                    <h2 id="conversation-audit-title">Conversations et sources</h2>
+                    <h2 id="conversation-audit-title">Gestion des conversations</h2>
+                    <p class="section-desc">Recherchez, filtrez, archivez ou supprimez les sessions étudiants.</p>
                 </div>
             </div>
-            <div class="kpi-grid kpi-grid-4">
+            <div class="kpi-grid kpi-grid-6">
                 <article class="kpi-card">
                     <span class="kpi-label">Conversations actives</span>
                     <strong id="conv-active">-</strong>
-                    <p>Historique etudiant actif.</p>
+                    <p>Sessions étudiants non archivées.</p>
                 </article>
                 <article class="kpi-card">
-                    <span class="kpi-label">Messages</span>
+                    <span class="kpi-label">Archivées</span>
+                    <strong id="conv-archived">-</strong>
+                    <p>Conversations clôturées.</p>
+                </article>
+                <article class="kpi-card">
+                    <span class="kpi-label">Messages totaux</span>
                     <strong id="conv-messages">-</strong>
-                    <p>Total des echanges stockes.</p>
+                    <p>Tous échanges confondus.</p>
                 </article>
                 <article class="kpi-card">
-                    <span class="kpi-label">Reponses assistant</span>
+                    <span class="kpi-label">Réponses RAG</span>
                     <strong id="conv-answers">-</strong>
-                    <p>Messages produits par le RAG.</p>
+                    <p>Réponses produites par l'assistant.</p>
                 </article>
                 <article class="kpi-card">
-                    <span class="kpi-label">Reponses sourcees</span>
+                    <span class="kpi-label">Avec sources</span>
+                    <strong id="conv-with-sources">-</strong>
+                    <p>Réponses citant au moins une source.</p>
+                </article>
+                <article class="kpi-card">
+                    <span class="kpi-label">Taux sources</span>
                     <strong id="conv-source-coverage">-</strong>
-                    <p>Part des reponses avec sources.</p>
+                    <p>Couverture documentaire RAG.</p>
                 </article>
             </div>
             <article class="panel">
-                <div class="table-head">
-                    <h3>Conversations recentes</h3>
-                    <p>Utilisateur, titre, volume et dernier message</p>
+                <div class="table-head" style="flex-wrap: wrap; gap: 12px;">
+                    <div>
+                        <h3>Conversations</h3>
+                        <p id="conv-table-info">Chargement...</p>
+                    </div>
+                    <div class="actions" style="margin-left: auto; gap: 8px; flex-wrap: wrap;">
+                        <input type="text" id="conv-search-input" class="file-input" placeholder="Rechercher utilisateur ou titre…" style="width: 220px; padding: 6px 10px; font-size: 13px;">
+                        <div class="conv-filter-tabs" id="conv-filter-tabs" role="tablist">
+                            <button class="conv-tab active" data-status="active" role="tab" aria-selected="true">Actives</button>
+                            <button class="conv-tab" data-status="archived" role="tab" aria-selected="false">Archivées</button>
+                            <button class="conv-tab" data-status="all" role="tab" aria-selected="false">Toutes</button>
+                        </div>
+                        <button class="uca-btn uca-btn-secondary" type="button" id="conv-refresh-btn" title="Actualiser">↺ Actualiser</button>
+                    </div>
                 </div>
                 <div class="table-wrap">
                     <table>
@@ -301,15 +413,22 @@
                                 <th>Utilisateur</th>
                                 <th>Titre</th>
                                 <th>Messages</th>
-                                <th>Sources</th>
+                                <th>Réponses RAG</th>
+                                <th>Taux sources</th>
                                 <th>Dernier message</th>
-                                <th>Apercu</th>
+                                <th>Statut</th>
+                                <th>Actions</th>
                             </tr>
                         </thead>
                         <tbody id="conversation-audit-table-body">
-                            <tr><td colspan="6" class="empty">Chargement...</td></tr>
+                            <tr><td colspan="8" class="empty">Chargement...</td></tr>
                         </tbody>
                     </table>
+                </div>
+                <div class="conv-pagination" id="conv-pagination" style="display:none;">
+                    <button class="uca-btn uca-btn-secondary" type="button" id="conv-prev-btn" disabled>← Précédent</button>
+                    <span id="conv-page-info" style="font-size: 13px; color: var(--uca-muted);"></span>
+                    <button class="uca-btn uca-btn-secondary" type="button" id="conv-next-btn" disabled>Suivant →</button>
                 </div>
             </article>
         </section>
@@ -349,6 +468,6 @@
     </main>
     </div>
 
-    <script src="{% static 'api_app/admin_dashboard.js' %}?v=20260509-dashboard-cleanup" defer></script>
+    <script src="{% static 'api_app/admin_dashboard.js' %}?v=20260708-conv-audit-v2" defer></script>
 </body>
 </html>

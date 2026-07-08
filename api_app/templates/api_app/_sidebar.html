@@ -1,66 +1,151 @@
 {% load static %}
-<aside class="admin-sidebar" aria-label="Navigation administrateur">
-    <div class="sidebar-card">
-        <div class="sidebar-card-title">
-            <span>Dashboard</span>
-            <strong>Supervision RAG</strong>
+<aside class="admin-sidebar" aria-label="Navigation du dashboard administrateur">
+    <!-- Sidebar Header -->
+    <div class="sidebar-header">
+        <div class="sidebar-branding">
+            <div class="sidebar-icon-container">
+                <svg class="sidebar-icon-logo" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M12 2l9 5v6c0 7-9 9-9 9s-9-2-9-9v-6l9-5z"></path>
+                </svg>
+            </div>
+            <div class="sidebar-text">
+                <span class="sidebar-subtitle">Admin</span>
+                <strong class="sidebar-title">Dashboard RAG</strong>
+            </div>
         </div>
-        <nav class="sidebar-nav">
+    </div>
+
+    <!-- Main Navigation -->
+    <nav class="sidebar-nav" role="navigation">
+        <!-- Section: Supervision -->
+        <div class="sidebar-section">
+            <div class="sidebar-section-label">Supervision</div>
             <ul class="sidebar-menu">
                 {% if can_view_global %}
                 <li class="sidebar-item hero">
-                    <a href="#system-title" class="sidebar-link active" data-section="system-title">
-                        <span class="sidebar-item-heading">État global</span>
-                        <span class="sidebar-item-text">Système RAG actif</span>
-                    </a>
-                </li>
-                {% endif %}
-
-                {% if can_view_corpus %}
-                <li class="sidebar-item">
-                    <a href="#corpus-title" class="sidebar-link" data-section="corpus-title">
-                        <span class="sidebar-item-heading">Corpus drive</span>
-                        <span class="sidebar-item-text">Documents et publication</span>
-                    </a>
-                </li>
-                {% endif %}
-
-                {% if can_view_quality %}
-                <li class="sidebar-item">
-                    <a href="#quality-title" class="sidebar-link" data-section="quality-title">
-                        <span class="sidebar-item-heading">Qualité</span>
-                        <span class="sidebar-item-text">Couverture documentaire</span>
-                    </a>
-                </li>
-                {% endif %}
-
-                {% if can_view_benchmark %}
-                <li class="sidebar-item">
-                    <a href="#benchmark-title" class="sidebar-link" data-section="benchmark-title">
-                        <span class="sidebar-item-heading">Benchmark</span>
-                        <span class="sidebar-item-text">Évaluation métier drive</span>
-                    </a>
-                </li>
-                {% endif %}
-
-                {% if can_view_maintenance %}
-                <li class="sidebar-item">
-                    <a href="#actions-title" class="sidebar-link" data-section="actions-title">
-                        <span class="sidebar-item-heading">Maintenance</span>
-                        <span class="sidebar-item-text">État technique</span>
-                    </a>
-                </li>
-                {% endif %}
-
-                {% if can_view_quality %}
-                <li class="sidebar-item">
-                    <a href="#conversation-audit-title" class="sidebar-link" data-section="conversation-audit-title">
-                        <span class="sidebar-item-heading">Conversations</span>
-                        <span class="sidebar-item-text">Audit des conversations</span>
+                    <a href="#system-title" class="sidebar-link active" data-section="system-title" role="button">
+                        <svg class="sidebar-link-icon" viewBox="0 0 24 24" fill="currentColor">
+                            <path d="M13 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V9z"></path>
+                            <polyline points="13 2 13 9 20 9"></polyline>
+                        </svg>
+                        <span class="sidebar-link-content">
+                            <span class="sidebar-link-heading">État global</span>
+                            <span class="sidebar-link-description">Système RAG actif</span>
+                        </span>
                     </a>
                 </li>
                 {% endif %}
             </ul>
-        </nav>
+        </div>
+
+        <!-- Section: Gestion -->
+        {% if can_view_corpus or can_view_quality %}
+        <div class="sidebar-section">
+            <div class="sidebar-section-label">Gestion</div>
+            <ul class="sidebar-menu">
+                {% if can_view_corpus %}
+                <li class="sidebar-item">
+                    <a href="#corpus-title" class="sidebar-link" data-section="corpus-title" role="button">
+                        <svg class="sidebar-link-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
+                        </svg>
+                        <span class="sidebar-link-content">
+                            <span class="sidebar-link-heading">Corpus Drive</span>
+                            <span class="sidebar-link-description">Documents et indexation</span>
+                        </span>
+                    </a>
+                </li>
+                {% endif %}
+
+                {% if can_view_quality %}
+                <li class="sidebar-item">
+                    <a href="#quality-title" class="sidebar-link" data-section="quality-title" role="button">
+                        <svg class="sidebar-link-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M9 11l3 3L22 4"></path>
+                            <path d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                        </svg>
+                        <span class="sidebar-link-content">
+                            <span class="sidebar-link-heading">Qualité</span>
+                            <span class="sidebar-link-description">Couverture documentaire</span>
+                        </span>
+                    </a>
+                </li>
+                {% endif %}
+            </ul>
+        </div>
+        {% endif %}
+
+        <!-- Section: Analyse -->
+        {% if can_view_benchmark or can_view_quality %}
+        <div class="sidebar-section">
+            <div class="sidebar-section-label">Analyse</div>
+            <ul class="sidebar-menu">
+                {% if can_view_benchmark %}
+                <li class="sidebar-item">
+                    <a href="#benchmark-title" class="sidebar-link" data-section="benchmark-title" role="button">
+                        <svg class="sidebar-link-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <line x1="12" y1="2" x2="12" y2="22"></line>
+                            <path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"></path>
+                        </svg>
+                        <span class="sidebar-link-content">
+                            <span class="sidebar-link-heading">Benchmark</span>
+                            <span class="sidebar-link-description">Évaluation performances</span>
+                        </span>
+                    </a>
+                </li>
+                {% endif %}
+
+                {% if can_view_quality %}
+                <li class="sidebar-item">
+                    <a href="#conversation-audit-title" class="sidebar-link" data-section="conversation-audit-title" role="button">
+                        <svg class="sidebar-link-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path>
+                            <circle cx="9" cy="7" r="4"></circle>
+                            <path d="M23 21v-2a4 4 0 0 0-3-3.87"></path>
+                            <path d="M16 3.13a4 4 0 0 1 0 7.75"></path>
+                        </svg>
+                        <span class="sidebar-link-content">
+                            <span class="sidebar-link-heading">Conversations</span>
+                            <span class="sidebar-link-description">Audit et analytics</span>
+                        </span>
+                    </a>
+                </li>
+                {% endif %}
+            </ul>
+        </div>
+        {% endif %}
+
+        <!-- Section: Système -->
+        {% if can_view_maintenance %}
+        <div class="sidebar-section">
+            <div class="sidebar-section-label">Système</div>
+            <ul class="sidebar-menu">
+                <li class="sidebar-item">
+                    <a href="#actions-title" class="sidebar-link" data-section="actions-title" role="button">
+                        <svg class="sidebar-link-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <circle cx="12" cy="12" r="1"></circle>
+                            <circle cx="19" cy="12" r="1"></circle>
+                            <circle cx="5" cy="12" r="1"></circle>
+                        </svg>
+                        <span class="sidebar-link-content">
+                            <span class="sidebar-link-heading">Maintenance</span>
+                            <span class="sidebar-link-description">Configuration système</span>
+                        </span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        {% endif %}
+    </nav>
+
+    <!-- Sidebar Footer -->
+    <div class="sidebar-footer">
+        <a href="/api/health/ready/" class="sidebar-footer-link" target="_blank" rel="noopener" aria-label="Vérifier le statut du système">
+            <svg class="sidebar-footer-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <circle cx="12" cy="12" r="10"></circle>
+                <polyline points="12 6 12 12 16 14"></polyline>
+            </svg>
+            <span>Health Check</span>
+        </a>
     </div>
 </aside>

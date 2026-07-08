@@ -728,6 +728,89 @@ class DriveDocumentsApiTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         mocked_latest_report.assert_called_once_with("rag_eval")
 
+    def test_drive_document_download_endpoint_returns_file(self):
+        root = Path.cwd() / ".tmp_test_drive_docs_download"
+        if root.exists():
+            shutil.rmtree(root)
+        root.mkdir(exist_ok=True)
+        try:
+            drive_dir = root / "drive"
+            drive_dir.mkdir()
+            test_file = drive_dir / "doc-download-test.txt"
+            test_file.write_bytes(b"Fichier test pour le download")
+            
+            with patch("api_app.views.get_runtime_settings") as mocked_runtime:
+                mocked_runtime.return_value.rag_raw_drive_dir = drive_dir
+                self.client.force_login(self.admin_user)
+                
+                # Check normal download
+                url = reverse("api-drive-document-download", kwargs={"filename": "doc-download-test.txt"})
+                response = self.client.get(url)
+                
+                self.assertEqual(response.status_code, status.HTTP_200_OK)
+                self.assertEqual(b"".join(response.streaming_content), b"Fichier test pour le download")
+                self.assertEqual(
+                    response.headers["Content-Disposition"],
+                    'attachment; filename="doc-download-test.txt"'
+                )
+
+                # Check download of non-existent file
+                url_fail = reverse("api-drive-document-download", kwargs={"filename": "non-existent.txt"})
+                response_fail = self.client.get(url_fail)
+                self.assertEqual(response_fail.status_code, status.HTTP_404_NOT_FOUND)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    @patch("api_app.views.run_indexing")
+    @patch("api_app.views.run_processing")
+    def test_drive_rebuild_endpoint_with_clear_cache(self, mocked_processing, mocked_indexing):
+        mocked_processing.return_value = {"status": "ok", "step": "processing", "corpus": "drive"}
+        mocked_indexing.return_value = MagicMock(
+            backend="faiss",
+            build_id="build-test",
+            chunk_count=33,
+            published=True,
+        )
+        
+        root = Path.cwd() / ".tmp_test_drive_rebuild_clear"
+        if root.exists():
+            shutil.rmtree(root)
+        root.mkdir(exist_ok=True)
+        try:
+            drive_dir = root / "drive"
+            drive_dir.mkdir()
+            processed_dir = root / "processed_drive"
+            processed_dir.mkdir()
+            cache_dir = root / "cache"
+            cache_dir.mkdir()
+            
+            # create dummy cache file and processed file
+            cache_file = cache_dir / "file_cache_drive.json"
+            cache_file.write_text("{}", encoding="utf-8")
+            dummy_processed = processed_dir / "dummy_chunk.json"
+            dummy_processed.write_text("{}", encoding="utf-8")
+            
+            with patch("api_app.views.get_runtime_settings") as mocked_runtime:
+                mocked_runtime.return_value.rag_processed_drive_dir = processed_dir
+                mocked_runtime.return_value.rag_cache_dir = cache_dir
+                self.client.force_login(self.admin_user)
+                
+                response = self.client.post(
+                    reverse("api-drive-rebuild"),
+                    {"clear_cache": True},
+                    format="json"
+                )
+                
+                self.assertEqual(response.status_code, status.HTTP_200_OK)
+                # Verify they were deleted
+                self.assertFalse(cache_file.exists())
+                self.assertFalse(dummy_processed.exists())
+                
+                mocked_processing.assert_called_once_with(corpus="drive")
+                mocked_indexing.assert_called_once_with(corpus="published", publish=True)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
 
 class IngestionPolicyTests(APITestCase):
     def test_fast_default_seeds_are_subset_of_extended(self):
@@ -1255,3 +1338,82 @@ class ProcessingAndIndexingTests(APITestCase):
         self.assertEqual(kwargs["corpus"], "published")
         self.assertTrue(kwargs["publish"])
         mocked_invalidate.assert_called_once()
+
+
+class BenchmarkApiTests(APITestCase):
+    def setUp(self):
+        super().setUp()
+        self.admin_user = get_user_model().objects.create_superuser(
+            username="admin-test",
+            email="admin@uca.ac.ma",
+            password="Secret12345!",
+        )
+        self.student_user = get_user_model().objects.create_user(
+            username="etudiant-test2",
+            email="etudiant2@uca.ac.ma",
+            password="Secret12345!",
+        )
+
+    def test_benchmark_endpoints_forbidden_for_students(self):
+        self.client.force_login(self.student_user)
+        res_del = self.client.post(reverse("api-benchmark-delete-question"), {"question": "x"}, format="json")
+        res_add = self.client.post(reverse("api-benchmark-add-question"), {"question": "x", "expected_service": "x"}, format="json")
+        res_tst = self.client.post(reverse("api-benchmark-test-question"), {"question": "x"}, format="json")
+        self.assertEqual(res_del.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(res_add.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(res_tst.status_code, status.HTTP_403_FORBIDDEN)
+
+    @patch("api_app.views.load_benchmark_set")
+    @patch("api_app.views.save_benchmark_set")
+    def test_delete_benchmark_question_success(self, mock_save, mock_load):
+        mock_load.return_value = [
+            {"question": "Q1", "expected_service": "S1"},
+            {"question": "Q2", "expected_service": "S2"}
+        ]
+        self.client.force_login(self.admin_user)
+        response = self.client.post(reverse("api-benchmark-delete-question"), {"question": "Q1"}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        mock_save.assert_called_once_with("drive", [{"question": "Q2", "expected_service": "S2"}])
+
+    @patch("api_app.views.load_benchmark_set")
+    @patch("api_app.views.save_benchmark_set")
+    def test_add_benchmark_question_success(self, mock_save, mock_load):
+        mock_load.return_value = [{"question": "Q1", "expected_service": "S1"}]
+        self.client.force_login(self.admin_user)
+        response = self.client.post(
+            reverse("api-benchmark-add-question"),
+            {"question": "Q2", "expected_service": "S2", "keywords": "k1, k2"},
+            format="json"
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        mock_save.assert_called_once()
+        saved_list = mock_save.call_args[0][1]
+        self.assertEqual(len(saved_list), 2)
+        self.assertEqual(saved_list[1]["question"], "Q2")
+        self.assertEqual(saved_list[1]["expected_service"], "S2")
+        self.assertEqual(saved_list[1]["keywords"], ["k1", "k2"])
+
+    @patch("api_app.views._retrieval_metrics")
+    def test_test_benchmark_question_success(self, mock_retrieval_metrics):
+        mock_retrieval_metrics.return_value = {
+            "top1_service": "S1",
+            "service_top1_match": 1,
+            "precision_at_k": 0.8,
+            "latency_ms": 150.0,
+            "top1_source": "doc1.txt"
+        }
+        self.client.force_login(self.admin_user)
+        response = self.client.post(
+            reverse("api-benchmark-test-question"),
+            {"question": "Q_test", "expected_service": "S1", "keywords": "k1"},
+            format="json"
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        payload = response.json()
+        self.assertEqual(payload["question"], "Q_test")
+        self.assertEqual(payload["expected_service"], "S1")
+        self.assertEqual(payload["top1_service"], "S1")
+        self.assertEqual(payload["service_top1_match"], 1)
+        self.assertEqual(payload["precision_at_k"], 0.8)
+        self.assertEqual(payload["latency_ms"], 150.0)
+        self.assertEqual(payload["top1_source"], "doc1.txt")

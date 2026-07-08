@@ -1,13 +1,15 @@
 import logging
 from pathlib import Path
 import re
+from threading import Lock
+from time import monotonic
 from urllib.parse import urlparse
 
 from django.contrib.auth import login
 from django.contrib.auth.mixins import LoginRequiredMixin, UserPassesTestMixin
 from django.contrib.auth.views import LoginView, LogoutView
-from django.db.models import Count, Max
-from django.http import HttpResponseRedirect
+from django.db.models import Count, Max, Q
+from django.http import FileResponse, HttpResponseRedirect
 from django.shortcuts import get_object_or_404
 from django.shortcuts import redirect
 from django.urls import reverse, reverse_lazy
@@ -23,6 +25,7 @@ from api_app.forms import StudentLoginForm, StudentSignupForm
 from api_app.models import Conversation, Message
 from api_app.services.conversation_context import build_conversation_context, update_conversation_context
 from api_app.services.identity import allowed_uca_email_domains
+from rag_module.audit import data_audit, raw_quality_pipeline
 from rag_module.contracts import QuestionRequest
 from rag_module.generation.rag_engine import RAGGenerationError, RAGIndexNotReadyError
 from rag_module.services.offline import run_evaluation, run_indexing, run_processing
@@ -30,9 +33,17 @@ from rag_module.services.health import build_live_health, build_ready_health
 from rag_module.services.online import answer_question
 from rag_module.services.reports import build_dashboard_payload, latest_report_payload
 from rag_module.shared.runtime import get_runtime_settings
+from rag_module.evaluation.evaluate_rag import load_benchmark_set, save_benchmark_set, _retrieval_metrics
 
 logger = logging.getLogger(__name__)
 ALLOWED_DRIVE_EXTENSIONS = {".pdf", ".docx", ".doc", ".html", ".htm", ".txt", ".md"}
+AUDIT_TASK_LOCKS = {
+    "data_audit": Lock(),
+    "raw_quality": Lock(),
+    "rag_eval": Lock(),
+    "rag_eval_full": Lock(),
+    "context_eval": Lock(),
+}
 SERVICE_LABELS = {
     "ucastudent": "UC@Student",
     "ucaplat": "UCAPLAT",
@@ -251,6 +262,17 @@ class AdminDashboardPageView(LoginRequiredMixin, UserPassesTestMixin, TemplateVi
     def test_func(self):
         return bool(self.request.user and self.request.user.is_staff)
 
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        user = self.request.user
+        # Provide simple boolean flags for template to avoid complex filter() calls
+        context["can_view_global"] = bool(user and user.is_authenticated and user.is_staff)
+        context["can_view_corpus"] = bool(user and user.is_authenticated and (user.is_staff or user.groups.filter(name="corpus_manager").exists()))
+        context["can_view_quality"] = bool(user and user.is_authenticated and (user.is_staff or user.groups.filter(name="auditor").exists()))
+        context["can_view_benchmark"] = bool(user and user.is_authenticated and (user.is_staff or user.groups.filter(name="evaluator").exists()))
+        context["can_view_maintenance"] = bool(user and user.is_authenticated and user.is_superuser)
+        return context
+
 
 class AdminOnlyAPIView(APIView):
     permission_classes = [IsAdminUser]
@@ -260,6 +282,166 @@ class AdminDashboardAPIView(AdminOnlyAPIView):
 
     def get(self, request):
         return Response(build_dashboard_payload(), status=status.HTTP_200_OK)
+
+
+class RunAuditAPIView(AdminOnlyAPIView):
+
+    def post(self, request, task: str):
+        normalized = str(task or "").strip().lower()
+        audit_lock = AUDIT_TASK_LOCKS.get(normalized)
+        if audit_lock is None:
+            return Response(
+                {
+                    "detail": "Tache d'audit inconnue.",
+                    "choices": sorted(AUDIT_TASK_LOCKS.keys()),
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if not audit_lock.acquire(blocking=False):
+            return Response(
+                {"detail": "Cette tache est deja en cours d'execution.", "task": normalized},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        started = monotonic()
+        try:
+            payload = _run_admin_audit_task(normalized)
+            return Response(
+                {
+                    "task": normalized,
+                    "success": True,
+                    "elapsed_s": round(monotonic() - started, 2),
+                    **payload,
+                },
+                status=status.HTTP_200_OK,
+            )
+        except Exception as exc:
+            logger.exception("Erreur pendant l'audit admin %s", normalized)
+            return Response(
+                {
+                    "task": normalized,
+                    "success": False,
+                    "detail": str(exc),
+                    "elapsed_s": round(monotonic() - started, 2),
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+        finally:
+            audit_lock.release()
+
+
+class AdminConversationsAPIView(AdminOnlyAPIView):
+
+    def get(self, request):
+        # --- Query params ---
+        status_filter = request.query_params.get("status", "active")  # active | archived | all
+        search = request.query_params.get("search", "").strip()
+        try:
+            page = max(1, int(request.query_params.get("page", 1)))
+        except (ValueError, TypeError):
+            page = 1
+        try:
+            per_page = min(50, max(5, int(request.query_params.get("per_page", 20))))
+        except (ValueError, TypeError):
+            per_page = 20
+
+        # --- Base queryset with annotations ---
+        qs = Conversation.objects.select_related("user").annotate(
+            message_count=Count("messages"),
+            assistant_count=Count("messages", filter=Q(messages__role=Message.ROLE_ASSISTANT)),
+            source_answer_count=Count(
+                "messages",
+                filter=Q(messages__role=Message.ROLE_ASSISTANT) & ~Q(messages__sources=[]),
+            ),
+            last_message_at=Max("messages__created_at"),
+        )
+
+        # --- Status filter ---
+        if status_filter == "active":
+            qs = qs.filter(is_archived=False)
+        elif status_filter == "archived":
+            qs = qs.filter(is_archived=True)
+        # else: all
+
+        # --- Search ---
+        if search:
+            qs = qs.filter(
+                Q(title__icontains=search)
+                | Q(user__first_name__icontains=search)
+                | Q(user__last_name__icontains=search)
+                | Q(user__email__icontains=search)
+                | Q(user__username__icontains=search)
+            )
+
+        # --- Ordering ---
+        qs = qs.order_by("-last_message_at", "-updated_at")
+
+        # --- Global summary (unfiltered) ---
+        all_qs = Conversation.objects.select_related("user")
+        assistant_messages = Message.objects.filter(role=Message.ROLE_ASSISTANT)
+        answers_with_sources = assistant_messages.exclude(sources=[])
+        assistant_count_total = assistant_messages.count()
+        source_count_total = answers_with_sources.count()
+
+        summary = {
+            "active_conversations": all_qs.filter(is_archived=False).count(),
+            "archived_conversations": all_qs.filter(is_archived=True).count(),
+            "total_messages": Message.objects.count(),
+            "assistant_answers": assistant_count_total,
+            "answers_with_sources": source_count_total,
+            "source_coverage": round(
+                (source_count_total / assistant_count_total) if assistant_count_total else 0, 4
+            ),
+        }
+
+        # --- Pagination ---
+        total_count = qs.count()
+        total_pages = max(1, (total_count + per_page - 1) // per_page)
+        page = min(page, total_pages)
+        offset = (page - 1) * per_page
+        page_qs = qs[offset: offset + per_page]
+
+        return Response(
+            {
+                "summary": summary,
+                "pagination": {
+                    "page": page,
+                    "per_page": per_page,
+                    "total": total_count,
+                    "total_pages": total_pages,
+                },
+                "recent": [_serialize_admin_conversation(item) for item in page_qs],
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class ConversationManageAPIView(AdminOnlyAPIView):
+    """Archive, restore, or delete a conversation by id."""
+
+    def post(self, request, conversation_id: int):
+        action = request.data.get("action", "")  # archive | restore | delete
+        try:
+            conv = Conversation.objects.select_related("user").get(pk=conversation_id)
+        except Conversation.DoesNotExist:
+            return Response({"detail": "Conversation introuvable."}, status=status.HTTP_404_NOT_FOUND)
+
+        if action == "archive":
+            conv.is_archived = True
+            conv.save(update_fields=["is_archived", "updated_at"])
+            return Response({"detail": "Conversation archivée.", "id": conversation_id}, status=status.HTTP_200_OK)
+        elif action == "restore":
+            conv.is_archived = False
+            conv.save(update_fields=["is_archived", "updated_at"])
+            return Response({"detail": "Conversation restaurée.", "id": conversation_id}, status=status.HTTP_200_OK)
+        elif action == "delete":
+            conv.delete()
+            return Response({"detail": "Conversation supprimée.", "id": conversation_id}, status=status.HTTP_200_OK)
+        else:
+            return Response(
+                {"detail": "Action invalide. Utilisez : archive, restore, delete."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
 
 def _drive_dir() -> Path:
@@ -346,9 +528,52 @@ class DriveDocumentDetailAPIView(AdminOnlyAPIView):
         return Response({"detail": "Document supprime du corpus drive."}, status=status.HTTP_200_OK)
 
 
+class DriveDocumentDownloadAPIView(AdminOnlyAPIView):
+
+    def get(self, request, filename: str):
+        target = _safe_drive_path(filename)
+        if target is None:
+            return Response({"detail": "Nom de fichier invalide."}, status=status.HTTP_400_BAD_REQUEST)
+        if not target.exists() or not target.is_file():
+            return Response({"detail": "Document introuvable."}, status=status.HTTP_404_NOT_FOUND)
+
+        try:
+            return FileResponse(
+                open(target, "rb"),
+                as_attachment=True,
+                filename=target.name,
+            )
+        except Exception as exc:
+            return Response(
+                {"detail": f"Impossible d'ouvrir le fichier : {exc}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+
 class DriveRebuildAPIView(AdminOnlyAPIView):
 
     def post(self, request):
+        clear_cache = bool(request.data.get("clear_cache", False) if isinstance(request.data, dict) else False)
+        if clear_cache:
+            try:
+                settings = get_runtime_settings()
+                processed_dir = Path(settings.rag_processed_drive_dir)
+                cache_file = Path(settings.rag_cache_dir / "file_cache_drive.json")
+                if processed_dir.exists():
+                    for item in processed_dir.iterdir():
+                        if item.is_file():
+                            try:
+                                item.unlink()
+                            except Exception:
+                                pass
+                if cache_file.exists():
+                    try:
+                        cache_file.unlink()
+                    except Exception:
+                        pass
+            except Exception as exc:
+                logger.error("Erreur lors de la réinitialisation du cache drive: %s", exc)
+
         try:
             processing_result = run_processing(corpus="drive")
             indexing_result = run_indexing(corpus="published", publish=True)
@@ -359,9 +584,10 @@ class DriveRebuildAPIView(AdminOnlyAPIView):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
+        detail_msg = "Corpus drive réinitialisé et index reconstruit avec succès." if clear_cache else "Corpus drive retraité et index publié avec succès."
         return Response(
             {
-                "detail": "Corpus drive retraite et index publie avec succes.",
+                "detail": detail_msg,
                 "processing": processing_result,
                 "index": {
                     "backend": indexing_result.backend,
@@ -396,6 +622,79 @@ class DriveEvaluateAPIView(AdminOnlyAPIView):
         )
 
 
+class BenchmarkDeleteQuestionAPIView(AdminOnlyAPIView):
+    def post(self, request):
+        benchmark = request.data.get("benchmark", "drive")
+        question = request.data.get("question")
+        if not question:
+            return Response({"detail": "La question est requise."}, status=status.HTTP_400_BAD_REQUEST)
+        
+        dataset = load_benchmark_set(benchmark)
+        original_len = len(dataset)
+        dataset = [item for item in dataset if item.get("question") != question]
+        if len(dataset) == original_len:
+            return Response({"detail": "Question introuvable."}, status=status.HTTP_404_NOT_FOUND)
+        
+        save_benchmark_set(benchmark, dataset)
+        return Response({"detail": "Question supprimée avec succès."}, status=status.HTTP_200_OK)
+
+
+class BenchmarkAddQuestionAPIView(AdminOnlyAPIView):
+    def post(self, request):
+        benchmark = request.data.get("benchmark", "drive")
+        question = request.data.get("question", "").strip()
+        expected_service = request.data.get("expected_service", "").strip()
+        keywords_str = request.data.get("keywords", "").strip()
+        
+        if not question or not expected_service:
+            return Response({"detail": "La question et le service attendu sont requis."}, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Split keywords by commas and clean them
+        keywords = [kw.strip() for kw in keywords_str.split(",") if kw.strip()]
+        
+        dataset = load_benchmark_set(benchmark)
+        # Check if question already exists
+        if any(item.get("question") == question for item in dataset):
+            return Response({"detail": "Cette question existe déjà dans ce benchmark."}, status=status.HTTP_400_BAD_REQUEST)
+            
+        dataset.append({
+            "question": question,
+            "expected_service": expected_service,
+            "keywords": keywords,
+            "expected_doc_types": [],  # Optional, default empty
+        })
+        save_benchmark_set(benchmark, dataset)
+        return Response({"detail": "Question ajoutée avec succès au benchmark."}, status=status.HTTP_200_OK)
+
+
+class BenchmarkTestQuestionAPIView(AdminOnlyAPIView):
+    def post(self, request):
+        question = request.data.get("question", "").strip()
+        expected_service = request.data.get("expected_service", "").strip()
+        keywords_str = request.data.get("keywords", "").strip()
+        
+        if not question:
+            return Response({"detail": "La question est requise."}, status=status.HTTP_400_BAD_REQUEST)
+            
+        keywords = [kw.strip() for kw in keywords_str.split(",") if kw.strip()]
+        
+        try:
+            metrics = _retrieval_metrics(question, keywords, [], top_k=5, expected_service=expected_service)
+            row = {
+                "question": question,
+                "expected_service": expected_service,
+                "top1_service": metrics.get("top1_service", "-"),
+                "service_top1_match": metrics.get("service_top1_match", 0),
+                "precision_at_k": metrics.get("precision_at_k", 0.0),
+                "latency_ms": metrics.get("latency_ms", 0.0),
+                "top1_source": metrics.get("top1_source", "-"),
+            }
+            return Response(row, status=status.HTTP_200_OK)
+        except Exception as exc:
+            logger.exception("Erreur lors du test de la question")
+            return Response({"detail": f"Erreur pendant l'évaluation de la question: {exc}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
 class LatestAdminReportAPIView(AdminOnlyAPIView):
     def get(self, request, kind: str):
         try:
@@ -421,6 +720,71 @@ class ReadyHealthAPIView(APIView):
         payload = build_ready_health()
         http_status = status.HTTP_200_OK if payload.get("ready") else status.HTTP_503_SERVICE_UNAVAILABLE
         return Response(payload, status=http_status)
+
+
+def _run_admin_audit_task(task: str) -> dict:
+    if task == "data_audit":
+        report = data_audit.build_report()
+        paths = data_audit.write_report(report)
+        return {
+            "label": "Data audit",
+            "report_paths": {key: str(value) for key, value in paths.items()},
+            "report": latest_report_payload("data_audit"),
+        }
+    if task == "raw_quality":
+        outputs = raw_quality_pipeline.run(audit_only=True)
+        return {
+            "label": "Raw quality audit",
+            "report_paths": {
+                group: {key: str(value) for key, value in paths.items()}
+                for group, paths in outputs.items()
+            },
+            "report": latest_report_payload("raw_quality_audit"),
+        }
+    if task == "rag_eval":
+        paths = run_evaluation(top_k=5, skip_generation=True, benchmark="drive")
+        return {
+            "label": "Benchmark drive",
+            "report_paths": paths,
+            "report": latest_report_payload("rag_eval"),
+        }
+    if task == "rag_eval_full":
+        paths = run_evaluation(top_k=5, skip_generation=False, benchmark="drive")
+        return {
+            "label": "Benchmark drive complet",
+            "report_paths": paths,
+            "report": latest_report_payload("rag_eval"),
+        }
+    if task == "context_eval":
+        paths = run_evaluation(top_k=5, skip_generation=True, benchmark="context")
+        return {
+            "label": "Benchmark contextuel",
+            "report_paths": paths,
+            "report": latest_report_payload("rag_eval"),
+        }
+    raise ValueError("Tache d'audit inconnue.")
+
+
+def _serialize_admin_conversation(conversation: Conversation) -> dict:
+    last_message = conversation.messages.order_by("-created_at", "-id").first()
+    return {
+        "id": conversation.id,
+        "user": (
+            conversation.user.get_full_name().strip()
+            or conversation.user.email
+            or conversation.user.username
+        ),
+        "title": (conversation.title or "Nouvelle conversation").strip(),
+        "message_count": int(getattr(conversation, "message_count", 0) or 0),
+        "assistant_count": int(getattr(conversation, "assistant_count", 0) or 0),
+        "source_answer_count": int(getattr(conversation, "source_answer_count", 0) or 0),
+        "last_message_at": (
+            getattr(conversation, "last_message_at", None).isoformat()
+            if getattr(conversation, "last_message_at", None)
+            else conversation.updated_at.isoformat()
+        ),
+        "preview": str(last_message.content if last_message else "")[:160],
+    }
 
 
 class StudentSignupPageView(FormView):
