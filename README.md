@@ -41,7 +41,7 @@ Documents UCA / Drive
 
 | Element | Resultat |
 |---|---:|
-| Tests Django cibles | 59 tests OK |
+| Tests Django cibles | 75 tests OK |
 | Healthcheck RAG | ready = true |
 | Benchmark Drive - service top-1 | 92,31 % |
 | Benchmark Drive - reponses utiles | 61,54 % |
@@ -65,7 +65,8 @@ Interpretation :
 - gestion multi-conversations ;
 - affichage des sources ;
 - affichage du niveau de confiance ;
-- dashboard administrateur ;
+- feedback like / dislike avec champ de commentaire ;
+- dashboard administrateur avec Health Check en temps réel ;
 - endpoints de healthcheck.
 
 ### Module RAG
@@ -130,16 +131,106 @@ Question utilisateur
 
 ```text
 uca_digital_assistant/
-|-- api_app/        # Vues Django, API, templates, statiques, tests
-|-- core/           # Configuration Django
-|-- rag_module/     # Ingestion, processing, indexing, retrieval, generation
-|-- docs/           # Documentation technique et historique
-|-- reunion/        # Supports rapport, reunion, soutenance et evaluation
-|-- data_storage/   # Donnees locales, index, rapports RAG (ignore git)
-|-- manage.py
-|-- requirements.txt
-|-- docker-compose.yml
-`-- README.md
+│
+├── core/                              # Configuration Django
+│   ├── settings.py                    # Paramètres (DB, LLM, RAG, auth)
+│   ├── urls.py                        # Routage principal
+│   ├── wsgi.py / asgi.py              # Points d'entrée WSGI / ASGI
+│
+├── api_app/                           # Application Django principale
+│   ├── models.py                      # Modèles : User, Conversation, Message, MessageFeedback
+│   ├── views.py                       # Vues API REST (chat, auth, admin, health, feedback)
+│   ├── urls.py                        # Routes de l'application
+│   ├── forms.py                       # Formulaires inscription / connexion
+│   ├── auth_backends.py               # Authentification personnalisée (domaine email UCA)
+│   ├── admin.py                       # Interface Django admin
+│   │
+│   ├── services/
+│   │   ├── conversation_context.py    # Gestion du contexte conversationnel multi-tours
+│   │   └── identity.py               # Résolution de l'identité utilisateur
+│   │
+│   ├── management/commands/           # Commandes Django personnalisées
+│   │   ├── rag_build_kb.py            # Construction complète de la base RAG
+│   │   ├── rag_ingest.py              # Ingestion des documents sources
+│   │   ├── rag_process.py             # Nettoyage et chunking
+│   │   ├── rag_index.py               # Indexation FAISS / BM25
+│   │   ├── rag_healthcheck.py         # Vérification de l'état du système RAG
+│   │   ├── rag_evaluate.py            # Lancement des benchmarks d'évaluation
+│   │   ├── run_offline_pipeline.py    # Pipeline offline complet
+│   │   └── cleanup_offline_artifacts.py # Nettoyage des artefacts temporaires
+│   │
+│   ├── migrations/                    # Migrations de base de données
+│   │
+│   ├── templates/api_app/
+│   │   ├── chat.html                  # Interface chat étudiant
+│   │   ├── admin_dashboard.html       # Tableau de bord administrateur
+│   │   ├── _sidebar.html             # Sidebar Admin (Health Check, Audit…)
+│   │   ├── login.html                 # Page de connexion
+│   │   └── signup.html               # Page d'inscription
+│   │
+│   └── static/api_app/
+│       ├── chat.js                    # Logique chat (envoi, historique, feedback+commentaire)
+│       ├── chat.css                   # Styles interface chat
+│       ├── admin_dashboard.js         # Logique dashboard admin (conversations, audit, health)
+│       ├── admin_dashboard.css        # Styles dashboard admin
+│       ├── uca.css                    # Design tokens et variables CSS globales
+│       └── auth.css                   # Styles pages auth
+│
+├── rag_module/                        # Module RAG (Retrieval-Augmented Generation)
+│   ├── pipeline.py                    # Orchestrateur online (question → réponse)
+│   ├── contracts.py                   # Interfaces et types partagés (dataclasses)
+│   │
+│   ├── offline/                       # Phase offline : ingestion → indexation
+│   │   ├── orchestrator.py            # Pilote le pipeline offline complet
+│   │   ├── ingestion_utils.py         # Téléchargement et extraction de fichiers
+│   │   ├── scrapy_ingestion.py        # Crawl web (Scrapy)
+│   │   ├── document_extractors.py     # Extraction HTML, PDF, DOCX, TXT, MD
+│   │   ├── processing.py              # Nettoyage et chunking sémantique
+│   │   ├── processing_cache.py        # Cache des chunks déjà traités
+│   │   ├── indexing.py                # Génération des embeddings + index FAISS + BM25
+│   │   ├── indexing_metadata.py       # Enrichissement des métadonnées des chunks
+│   │   ├── ingestion_quality.py       # Contrôle qualité (doublons, longueur, langue)
+│   │   ├── text_quality.py            # Scores de qualité textuelle
+│   │   ├── language_detection.py      # Détection de langue
+│   │   ├── source_map.py              # Cartographie des sources documentaires
+│   │   └── validation.py             # Validation des données ingérées
+│   │
+│   ├── retrieval/                     # Phase online : recherche
+│   │   ├── rag_search.py              # Recherche hybride FAISS + BM25 + reranking
+│   │   ├── bm25_search.py             # Recherche lexicale BM25
+│   │   ├── qdrant_search.py           # Recherche vectorielle Qdrant (alternatif FAISS)
+│   │   └── query_intelligence.py      # Réécriture contextuelle et analyse de la question
+│   │
+│   ├── generation/                    # Phase online : génération
+│   │   ├── rag_engine.py              # Moteur de génération (LLM + guardrails + fallback)
+│   │   └── prompt_builder.py          # Construction des prompts système et utilisateur
+│   │
+│   ├── adapters/                      # Couche d'abstraction des dépendances externes
+│   │   ├── llm_provider.py            # Adaptateur LLM (LM Studio / OpenAI compatible)
+│   │   ├── vector_store.py            # Adaptateur vectoriel (FAISS / Qdrant)
+│   │   ├── storage.py                 # Accès fichiers et répertoires de données
+│   │   └── dynamic_renderer.py        # Rendu dynamique des réponses
+│   │
+│   ├── services/                      # Services métier RAG
+│   │   ├── online.py                  # Service de réponse en ligne
+│   │   ├── offline.py                 # Service de construction de la KB
+│   │   ├── health.py                  # Vérification de santé (DB, FAISS, LLM)
+│   │   └── reports.py                 # Génération de rapports d'audit RAG
+│   │
+│   ├── audit/                         # Journalisation des actions pipeline
+│   ├── shared/                        # Utilitaires partagés entre modules
+│   └── evaluation/
+│       └── evaluate_rag.py            # Benchmarks retrieval et génération
+│
+├── data_storage/                      # Données locales (ignoré par git)
+│   ├── index/                         # Index FAISS et corpus BM25
+│   ├── processed/                     # Chunks traités
+│   └── raw/                           # Documents sources bruts
+│
+├── manage.py                          # Point d'entrée Django
+├── requirements.txt                   # Dépendances Python
+├── docker-compose.yml                 # Déploiement local Docker
+└── README.md
 ```
 
 ## Installation locale
@@ -345,13 +436,13 @@ Comment suivre l'etat de mon diplome ?
 ## Perspectives
 
 - enrichir les documents officiels ;
-- ameliorer le chunking et les metadonnees ;
-- ajouter un feedback utilisateur utile / non utile ;
+- améliorer le chunking et les métadonnées ;
+- ~~ajouter un feedback utilisateur utile / non utile~~ ✅ implémenté ;
 - rendre les sources plus exploitables ;
-- optimiser la generation LLM ;
+- optimiser la génération LLM ;
 - migrer progressivement vers PostgreSQL + Qdrant ;
-- preparer un deploiement VPS ;
-- envisager une integration SSO UCA.
+- préparer un déploiement VPS ;
+- envisager une intégration SSO UCA.
 
 ## Deploiement de demonstration
 
