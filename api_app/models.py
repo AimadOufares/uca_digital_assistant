@@ -40,3 +40,27 @@ class Message(models.Model):
 
     def __str__(self) -> str:
         return f"{self.conversation_id} - {self.role}"
+
+
+class MessageFeedback(models.Model):
+    RATING_UP = "up"
+    RATING_DOWN = "down"
+    RATING_CHOICES = (
+        (RATING_UP, "Positif 👍"),
+        (RATING_DOWN, "Négatif 👎"),
+    )
+
+    message = models.OneToOneField(
+        Message,
+        on_delete=models.CASCADE,
+        related_name="feedback",
+    )
+    rating = models.CharField(max_length=8, choices=RATING_CHOICES)
+    comment = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self) -> str:
+        return f"{self.message_id} - {self.rating}"

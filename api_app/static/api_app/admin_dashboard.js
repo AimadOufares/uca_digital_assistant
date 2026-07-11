@@ -54,10 +54,31 @@ function readyBadgeClass(payload) {
 }
 
 function setActionStatus(message, isError = false) {
+    // Show status in the Corpus section panel
     const box = byId("drive-action-status");
-    if (!box) return;
-    box.textContent = message;
-    box.classList.toggle("status-bad", Boolean(isError));
+    if (box) {
+        box.textContent = message;
+        box.classList.toggle("status-bad", Boolean(isError));
+    }
+    // Also mirror in the Maintenance section status area
+    const maintBox = byId("maint-action-status");
+    const maintText = byId("maint-action-status-text");
+    const maintPulse = maintBox ? maintBox.querySelector(".status-dot-pulse") : null;
+    
+    if (maintBox && maintText) {
+        maintBox.style.display = "block";
+        maintText.textContent = `[${new Date().toLocaleTimeString("fr-FR")}] ${message}`;
+        
+        if (maintPulse) {
+            if (isError) {
+                maintPulse.style.backgroundColor = "var(--uca-danger)";
+            } else if (message.includes("en cours") || message.includes("cours...")) {
+                maintPulse.style.backgroundColor = "var(--uca-blue)";
+            } else {
+                maintPulse.style.backgroundColor = "#137333"; // Success green
+            }
+        }
+    }
 }
 
 function renderProcessingSummary(processing) {
@@ -232,7 +253,11 @@ function renderDashboard(payload) {
     setText("kpi-sources", String(activeIndex.source_count || 0));
     setText("kpi-drive-docs", String(driveSync.document_count || 0));
     
-    setText("admin-index-note", activeIndex.build_id ? `Build ${activeIndex.build_id} - ${activeIndex.embedding_model || "-"}` : "Aucun index publie detecte.");
+    setText("admin-index-build-id", activeIndex.build_id || "-");
+    setText("admin-index-date", activeIndex.manifest_updated_at ? formatDate(activeIndex.manifest_updated_at) : "-");
+    setText("admin-index-chunks", String(activeIndex.chunk_count || 0));
+    setText("admin-index-sources", String(activeIndex.source_count || 0));
+    setText("admin-index-embedding", activeIndex.embedding_model || "-");
 
     renderDriveSync(driveSync);
 
@@ -720,7 +745,11 @@ function appendAuditLog(message, isError = false, consoleId = "audit-console") {
 
 async function runAuditTask(task, button) {
     if (!task || !button) return;
-    const consoleId = QUALITY_AUDIT_TASKS.has(task) ? "quality-audit-console" : "audit-console";
+    // Route to the closest audit console in the same article/section, fallback to quality-audit-console
+    const closestConsole = button.closest("article")?.querySelector(".audit-console");
+    const consoleId = closestConsole
+        ? closestConsole.id || "quality-audit-console"
+        : (QUALITY_AUDIT_TASKS.has(task) ? "quality-audit-console" : "audit-console");
     const originalText = button.textContent;
     button.disabled = true;
     button.textContent = "En cours...";
@@ -754,11 +783,174 @@ function bindAuditActions() {
     });
 }
 
+let convCurrentPage = 1;
+let convStatusFilter = "active";
+let convSearchQuery = "";
+
+async function manageConversation(id, action) {
+    if (action === "delete" && !confirm("Voulez-vous vraiment supprimer définitivement cette conversation ?")) {
+        return;
+    }
+    try {
+        const response = await fetch(`/api/conversations/${id}/manage/`, {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+                "X-CSRFToken": getCookie("csrftoken")
+            },
+            body: JSON.stringify({ action })
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.detail || "Opération échouée");
+        await loadConversationAudit();
+    } catch (err) {
+        alert(err.message);
+    }
+}
+
+async function openConversationDrawer(id) {
+    const drawer = byId("conv-detail-drawer");
+    const titleEl = byId("drawer-conv-title");
+    const subtitleEl = byId("drawer-conv-subtitle");
+    const messagesEl = byId("conv-drawer-messages");
+    const archiveBtn = byId("drawer-archive-btn");
+    if (!drawer || !messagesEl) return;
+
+    // Reset drawer state
+    clearNode(messagesEl);
+    if (titleEl) titleEl.textContent = "Chargement...";
+    if (subtitleEl) subtitleEl.textContent = "-";
+    if (archiveBtn) {
+        archiveBtn.style.display = "none";
+        archiveBtn.onclick = null;
+    }
+
+    drawer.classList.add("open");
+    drawer.setAttribute("aria-hidden", "false");
+
+    try {
+        const response = await fetch(`/api/conversations/${id}/manage/`);
+        if (!response.ok) throw new Error("Impossible de charger les messages.");
+        const data = await response.json();
+
+        if (titleEl) titleEl.textContent = data.title || "Conversation";
+        if (subtitleEl) subtitleEl.textContent = `Utilisateur : ${data.user} • ${data.is_archived ? "Archivée" : "Active"}`;
+
+        if (archiveBtn) {
+            archiveBtn.style.display = "inline-block";
+            archiveBtn.textContent = data.is_archived ? "Restaurer" : "Archiver";
+            archiveBtn.onclick = async () => {
+                const action = data.is_archived ? "restore" : "archive";
+                await manageConversation(id, action);
+                await openConversationDrawer(id); // Reload drawer to reflect status
+            };
+        }
+
+        if (!data.messages || data.messages.length === 0) {
+            messagesEl.innerHTML = '<div style="text-align: center; color: var(--uca-muted); margin-top: 40px; font-size: 13px;">Aucun message dans cette conversation.</div>';
+            return;
+        }
+
+        data.messages.forEach(msg => {
+            const chatMsg = document.createElement("div");
+            chatMsg.className = `chat-msg ${msg.role}`;
+
+            const bubble = document.createElement("div");
+            bubble.className = "chat-msg-bubble";
+            bubble.textContent = msg.content || "";
+
+            const meta = document.createElement("div");
+            meta.className = "chat-msg-meta";
+            const dateStr = msg.created_at ? new Date(msg.created_at).toLocaleString("fr-FR", { hour: '2-digit', minute: '2-digit' }) : "";
+            meta.textContent = `${msg.role === "user" ? "Étudiant" : "Assistant RAG"} • ${dateStr}`;
+
+            if (msg.role === "assistant" && msg.sources && msg.sources.length > 0) {
+                const sourcesList = document.createElement("div");
+                sourcesList.style.marginTop = "8px";
+                sourcesList.style.paddingTop = "6px";
+                sourcesList.style.borderTop = "1px solid var(--uca-border)";
+                sourcesList.style.fontSize = "11px";
+                sourcesList.style.color = "var(--uca-blue)";
+                
+                const sourcesTitle = document.createElement("strong");
+                sourcesTitle.textContent = "Sources utilisées :";
+                sourcesList.appendChild(sourcesTitle);
+
+                msg.sources.forEach(src => {
+                    const srcLink = document.createElement("div");
+                    srcLink.style.marginTop = "2px";
+                    srcLink.textContent = `• ${src.name || src.path || "Source"}`;
+                    sourcesList.appendChild(srcLink);
+                });
+                bubble.appendChild(sourcesList);
+            }
+
+            if (msg.role === "assistant" && msg.feedback) {
+                const fbDiv = document.createElement("div");
+                fbDiv.className = "msg-feedback-display";
+                fbDiv.style.marginTop = "8px";
+                fbDiv.style.padding = "6px 10px";
+                fbDiv.style.borderRadius = "var(--uca-radius)";
+                fbDiv.style.fontSize = "11px";
+                fbDiv.style.background = msg.feedback.rating === "up" ? "#e6f4ea" : "#fce8e6";
+                fbDiv.style.color = msg.feedback.rating === "up" ? "#137333" : "#c5221f";
+                fbDiv.style.border = `1px solid ${msg.feedback.rating === "up" ? "#ceead6" : "#fad2cf"}`;
+                
+                const fbText = document.createElement("span");
+                fbText.innerHTML = `<strong>Avis étudiant :</strong> ${msg.feedback.rating === "up" ? "👍 Utile" : "👎 Pas utile"}`;
+                fbDiv.appendChild(fbText);
+
+                if (msg.feedback.comment) {
+                    const fbComment = document.createElement("div");
+                    fbComment.style.marginTop = "4px";
+                    fbComment.style.fontStyle = "italic";
+                    fbComment.textContent = `"${msg.feedback.comment}"`;
+                    fbDiv.appendChild(fbComment);
+                }
+                bubble.appendChild(fbDiv);
+            }
+
+            chatMsg.append(bubble, meta);
+            messagesEl.appendChild(chatMsg);
+        });
+        messagesEl.scrollTop = messagesEl.scrollHeight;
+
+    } catch (err) {
+        messagesEl.innerHTML = `<div style="text-align: center; color: var(--uca-danger); margin-top: 40px; font-size: 13px;">Erreur : ${err.message}</div>`;
+    }
+}
+
+function closeConversationDrawer() {
+    const drawer = byId("conv-detail-drawer");
+    if (drawer) {
+        drawer.classList.remove("open");
+        drawer.setAttribute("aria-hidden", "true");
+    }
+}
+
 async function loadConversationAudit() {
     const body = byId("conversation-audit-table-body");
+    const tableInfo = byId("conv-table-info");
+    const paginationEl = byId("conv-pagination");
+    const prevBtn = byId("conv-prev-btn");
+    const nextBtn = byId("conv-next-btn");
+    const pageInfo = byId("conv-page-info");
+    const perpageSelect = byId("conv-perpage-select");
+    const feedbackOnlyCheckbox = byId("conv-feedback-only");
     if (!body) return;
+
+    const perPage = perpageSelect ? parseInt(perpageSelect.value) || 25 : 25;
+    const feedbackOnly = feedbackOnlyCheckbox && feedbackOnlyCheckbox.checked ? "1" : "";
+
     try {
-        const response = await fetch("/api/admin-conversations/");
+        const queryParams = new URLSearchParams({
+            status: convStatusFilter,
+            search: convSearchQuery,
+            page: convCurrentPage,
+            per_page: perPage,
+            has_feedback: feedbackOnly
+        });
+        const response = await fetch(`/api/admin-conversations/?${queryParams.toString()}`);
         if (response.status === 403) {
             body.replaceChildren(makeEmptyRow(8, "Accès refusé."));
             return;
@@ -767,6 +959,7 @@ async function loadConversationAudit() {
             throw new Error("Chargement impossible.");
         }
         const payload = await response.json();
+        
         const summary = payload.summary || {};
         setText("conv-active", String(summary.active_conversations || 0));
         setText("conv-archived", String(summary.archived_conversations || 0));
@@ -775,27 +968,86 @@ async function loadConversationAudit() {
         setText("conv-with-sources", String(summary.answers_with_sources || 0));
         setText("conv-source-coverage", percent(summary.source_coverage));
 
+        const pag = payload.pagination || {};
+        if (tableInfo) {
+            tableInfo.textContent = `${pag.total || 0} conversation(s) trouvée(s)`;
+        }
+        if (paginationEl && pag.total_pages > 1) {
+            paginationEl.style.display = "flex";
+            if (pageInfo) pageInfo.textContent = `Page ${pag.page} sur ${pag.total_pages}`;
+            if (prevBtn) prevBtn.disabled = pag.page <= 1;
+            if (nextBtn) nextBtn.disabled = pag.page >= pag.total_pages;
+        } else if (paginationEl) {
+            paginationEl.style.display = "none";
+        }
+
         clearNode(body);
         const conversations = payload.recent || [];
         if (!conversations.length) {
-            body.appendChild(makeEmptyRow(8, "Aucune conversation active."));
+            body.appendChild(makeEmptyRow(8, "Aucune conversation correspondante."));
             return;
         }
         conversations.forEach((item) => {
             const row = document.createElement("tr");
+            row.style.cursor = "pointer";
+            row.addEventListener("mouseover", () => {
+                row.style.background = "var(--uca-surface-muted)";
+            });
+            row.addEventListener("mouseout", () => {
+                row.style.background = "";
+            });
+            row.addEventListener("click", () => openConversationDrawer(item.id));
+
             const assistantCount = item.assistant_count || 0;
             const sourceCount = item.source_answer_count || 0;
-            const sourceLabel = `${sourceCount} / ${assistantCount}`;
             const sourceRate = assistantCount > 0 ? sourceCount / assistantCount : 0;
+
+            const userCell = document.createElement("td");
+            userCell.textContent = item.user || "-";
+            if (item.feedback_count > 0) {
+                const fbBadge = document.createElement("span");
+                fbBadge.textContent = "👍 Avis";
+                fbBadge.style.marginLeft = "8px";
+                fbBadge.style.fontSize = "10px";
+                fbBadge.style.fontWeight = "600";
+                fbBadge.style.padding = "2px 6px";
+                fbBadge.style.borderRadius = "10px";
+                fbBadge.style.background = "#e6f4ea";
+                fbBadge.style.color = "#137333";
+                fbBadge.style.border = "1px solid #ceead6";
+                userCell.appendChild(fbBadge);
+            }
+
+            const statusPill = makePill(
+                item.is_archived ? "Archivée" : "Active",
+                item.is_archived ? "neutral" : "ok"
+            );
+            const statusCell = document.createElement("td");
+            statusCell.appendChild(statusPill);
+
+            const actionsCell = document.createElement("td");
+            actionsCell.style.display = "flex";
+            actionsCell.style.justifyContent = "center";
+
+            const deleteBtn = document.createElement("button");
+            deleteBtn.className = "uca-btn uca-btn-danger-outline";
+            deleteBtn.textContent = "Supprimer";
+            deleteBtn.addEventListener("click", (e) => {
+                e.stopPropagation(); // Avoid triggering openConversationDrawer on row click
+                manageConversation(item.id, "delete");
+            });
+
+            actionsCell.append(deleteBtn);
+
             row.append(
-                makeCell(item.user || "-"),
+                userCell,
                 makeCell(item.title || "-"),
                 makeCell(String(item.message_count || 0)),
                 makeCell(String(assistantCount)),
-                makeCell(sourceLabel),
                 makeCell(percent(sourceRate)),
                 makeCell(formatDate(item.last_message_at)),
-                makeCell(item.preview || "-")
+                statusCell,
+                actionsCell
             );
             body.appendChild(row);
         });
@@ -914,10 +1166,78 @@ async function addBenchmarkQuestion(e) {
     }
 }
 
+function bindConversationEvents() {
+    const searchInput = byId("conv-search-input");
+    if (searchInput) {
+        let searchTimeout;
+        searchInput.addEventListener("input", () => {
+            clearTimeout(searchTimeout);
+            searchTimeout = setTimeout(() => {
+                convSearchQuery = searchInput.value;
+                convCurrentPage = 1;
+                loadConversationAudit();
+            }, 300);
+        });
+    }
+
+    const tabsContainer = byId("conv-filter-tabs");
+    if (tabsContainer) {
+        tabsContainer.querySelectorAll(".conv-tab").forEach(tab => {
+            tab.addEventListener("click", () => {
+                tabsContainer.querySelectorAll(".conv-tab").forEach(t => {
+                    t.classList.remove("active");
+                    t.setAttribute("aria-selected", "false");
+                });
+                tab.classList.add("active");
+                tab.setAttribute("aria-selected", "true");
+                convStatusFilter = tab.dataset.status || "active";
+                convCurrentPage = 1;
+                loadConversationAudit();
+            });
+        });
+    }
+
+    bindAction("conv-refresh-btn", () => {
+        loadConversationAudit();
+    });
+
+    bindAction("conv-prev-btn", () => {
+        if (convCurrentPage > 1) {
+            convCurrentPage--;
+            loadConversationAudit();
+        }
+    });
+
+    bindAction("conv-next-btn", () => {
+        convCurrentPage++;
+        loadConversationAudit();
+    });
+
+    const perpageSelect = byId("conv-perpage-select");
+    if (perpageSelect) {
+        perpageSelect.addEventListener("change", () => {
+            convCurrentPage = 1;
+            loadConversationAudit();
+        });
+    }
+
+    const feedbackOnlyCheckbox = byId("conv-feedback-only");
+    if (feedbackOnlyCheckbox) {
+        feedbackOnlyCheckbox.addEventListener("change", () => {
+            convCurrentPage = 1;
+            loadConversationAudit();
+        });
+    }
+
+    bindAction("conv-drawer-close", closeConversationDrawer);
+    bindAction("conv-drawer-backdrop", closeConversationDrawer);
+}
+
 bindAction("upload-drive-btn", uploadDriveDocument);
 bindAction("rebuild-drive-btn", () => rebuildDrive(false));
 bindAction("rebuild-zero-btn", () => rebuildDrive(true));
 bindAction("rebuild-drive-btn-bottom", () => rebuildDrive(false));
+bindAction("rebuild-zero-btn-bottom", () => rebuildDrive(true));
 bindAction("evaluate-drive-btn", evaluateDrive);
 bindAction("evaluate-drive-btn-bottom", evaluateDrive);
 bindAction("test-question-btn", testBenchmarkQuestion);
@@ -927,4 +1247,107 @@ if (addQuestionForm) {
     addQuestionForm.addEventListener("submit", addBenchmarkQuestion);
 }
 
+bindAction("clear-maint-console-btn", () => {
+    const consoleBox = byId("maint-audit-console");
+    if (consoleBox) {
+        clearNode(consoleBox);
+        const line = document.createElement("div");
+        line.className = "audit-log-line";
+        line.textContent = `[${new Date().toLocaleTimeString("fr-FR")}] Console vide.`;
+        consoleBox.appendChild(line);
+    }
+});
+
+async function loadHealthStatus() {
+    const globalBox = byId("health-global-box");
+    const globalDot = byId("health-global-dot");
+    const globalTitle = byId("health-global-title");
+    
+    const dbPill = byId("health-status-db");
+    const vectorPill = byId("health-status-vector");
+    const llmPill = byId("health-status-llm");
+    const refreshBtn = byId("health-modal-refresh");
+
+    if (refreshBtn) {
+        refreshBtn.disabled = true;
+        refreshBtn.textContent = "Vérification...";
+    }
+
+    try {
+        const response = await fetch("/api/health/ready/");
+        const payload = await response.json();
+        
+        const isReady = Boolean(payload.ready);
+        const checks = payload.checks || {};
+
+        // Update DB
+        if (dbPill) {
+            dbPill.textContent = checks.database_ready ? "Opérationnel" : "Hors-ligne";
+            dbPill.className = `status-pill ${checks.database_ready ? "status-ok" : "status-bad"}`;
+        }
+        // Update Vector Index
+        if (vectorPill) {
+            vectorPill.textContent = checks.vector_store_ready ? "Opérationnel" : "Non chargé";
+            vectorPill.className = `status-pill ${checks.vector_store_ready ? "status-ok" : "status-bad"}`;
+        }
+        // Update LLM
+        if (llmPill) {
+            llmPill.textContent = checks.llm_ready ? "Disponible" : "Indisponible";
+            llmPill.className = `status-pill ${checks.llm_ready ? "status-ok" : "status-bad"}`;
+        }
+
+        // Global Alert styling
+        if (globalBox && globalDot && globalTitle) {
+            if (isReady) {
+                globalBox.style.backgroundColor = "#e6f4ea";
+                globalBox.style.borderColor = "#ceead6";
+                globalDot.style.backgroundColor = "#137333";
+                globalTitle.textContent = "Tous les services sont opérationnels (Prêt).";
+                globalTitle.style.color = "#137333";
+            } else {
+                globalBox.style.backgroundColor = "#fce8e6";
+                globalBox.style.borderColor = "#fad2cf";
+                globalDot.style.backgroundColor = "#c5221f";
+                globalTitle.textContent = "Certains services nécessitent une attention.";
+                globalTitle.style.color = "#c5221f";
+            }
+        }
+    } catch (err) {
+        if (globalTitle) globalTitle.textContent = "Erreur de connexion au healthcheck.";
+        if (dbPill) dbPill.className = "status-pill status-bad";
+        if (vectorPill) vectorPill.className = "status-pill status-bad";
+        if (llmPill) llmPill.className = "status-pill status-bad";
+    } finally {
+        if (refreshBtn) {
+            refreshBtn.disabled = false;
+            refreshBtn.textContent = "Re-tester";
+        }
+    }
+}
+
+function openHealthModal(e) {
+    if (e) e.preventDefault();
+    const modal = byId("health-modal");
+    if (modal) {
+        modal.classList.add("open");
+        modal.setAttribute("aria-hidden", "false");
+        loadHealthStatus();
+    }
+}
+
+function closeHealthModal() {
+    const modal = byId("health-modal");
+    if (modal) {
+        modal.classList.remove("open");
+        modal.setAttribute("aria-hidden", "true");
+    }
+}
+
+bindAction("sidebar-health-link", openHealthModal);
+bindAction("health-modal-close", closeHealthModal);
+bindAction("health-modal-close-btn", closeHealthModal);
+bindAction("health-modal-backdrop", closeHealthModal);
+bindAction("health-modal-refresh", loadHealthStatus);
+
+bindConversationEvents();
 bindAuditActions();

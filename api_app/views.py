@@ -22,7 +22,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from api_app.forms import StudentLoginForm, StudentSignupForm
-from api_app.models import Conversation, Message
+from api_app.models import Conversation, Message, MessageFeedback
 from api_app.services.conversation_context import build_conversation_context, update_conversation_context
 from api_app.services.identity import allowed_uca_email_domains
 from rag_module.audit import data_audit, raw_quality_pipeline
@@ -138,7 +138,7 @@ class ChatAPIView(APIView):
             )
             clean_answer = _sanitize_answer_text(result.answer, question=message)
             clean_sources = _sanitize_sources(result.sources)
-            _save_assistant_message(conversation, result, answer=clean_answer, sources=clean_sources)
+            msg_obj = _save_assistant_message(conversation, result, answer=clean_answer, sources=clean_sources)
             update_conversation_context(conversation, message, clean_answer, result, context_payload=context_payload)
             return Response(
                 {
@@ -149,6 +149,7 @@ class ChatAPIView(APIView):
                     "confidence": result.confidence,
                     "backend": result.backend,
                     "retrieval_meta": result.retrieval_meta,
+                    "message_id": msg_obj.id,
                     "conversations": _serialize_conversation_list(request.user, selected_conversation_id=conversation.id),
                 },
                 status=status.HTTP_200_OK,
@@ -354,6 +355,7 @@ class AdminConversationsAPIView(AdminOnlyAPIView):
                 filter=Q(messages__role=Message.ROLE_ASSISTANT) & ~Q(messages__sources=[]),
             ),
             last_message_at=Max("messages__created_at"),
+            feedback_count=Count("messages__feedback"),
         )
 
         # --- Status filter ---
@@ -362,6 +364,11 @@ class AdminConversationsAPIView(AdminOnlyAPIView):
         elif status_filter == "archived":
             qs = qs.filter(is_archived=True)
         # else: all
+
+        # --- Has feedback filter ---
+        has_feedback = request.query_params.get("has_feedback", "")
+        if has_feedback == "1":
+            qs = qs.filter(messages__feedback__isnull=False).distinct()
 
         # --- Search ---
         if search:
@@ -392,6 +399,9 @@ class AdminConversationsAPIView(AdminOnlyAPIView):
             "source_coverage": round(
                 (source_count_total / assistant_count_total) if assistant_count_total else 0, 4
             ),
+            "conversations_with_feedback": Conversation.objects.filter(
+                messages__feedback__isnull=False
+            ).distinct().count(),
         }
 
         # --- Pagination ---
@@ -418,6 +428,25 @@ class AdminConversationsAPIView(AdminOnlyAPIView):
 
 class ConversationManageAPIView(AdminOnlyAPIView):
     """Archive, restore, or delete a conversation by id."""
+
+    def get(self, request, conversation_id: int):
+        try:
+            conv = Conversation.objects.select_related("user").get(pk=conversation_id)
+        except Conversation.DoesNotExist:
+            return Response({"detail": "Conversation introuvable."}, status=status.HTTP_404_NOT_FOUND)
+
+        return Response(
+            {
+                "id": conv.id,
+                "user": conv.user.get_full_name().strip() or conv.user.email or conv.user.username,
+                "title": (conv.title or "Nouvelle conversation").strip(),
+                "is_archived": conv.is_archived,
+                "created_at": conv.created_at.isoformat(),
+                "updated_at": conv.updated_at.isoformat(),
+                "messages": [_serialize_message(message) for message in conv.messages.all().select_related("feedback").order_by("created_at", "id")],
+            },
+            status=status.HTTP_200_OK,
+        )
 
     def post(self, request, conversation_id: int):
         action = request.data.get("action", "")  # archive | restore | delete
@@ -778,6 +807,8 @@ def _serialize_admin_conversation(conversation: Conversation) -> dict:
         "message_count": int(getattr(conversation, "message_count", 0) or 0),
         "assistant_count": int(getattr(conversation, "assistant_count", 0) or 0),
         "source_answer_count": int(getattr(conversation, "source_answer_count", 0) or 0),
+        "feedback_count": int(getattr(conversation, "feedback_count", 0) or 0),
+        "is_archived": conversation.is_archived,
         "last_message_at": (
             getattr(conversation, "last_message_at", None).isoformat()
             if getattr(conversation, "last_message_at", None)
@@ -848,6 +879,16 @@ def _resolve_requested_conversation(user, conversation_id) -> Conversation:
 
 
 def _serialize_message(message: Message) -> dict:
+    feedback_data = None
+    try:
+        if message.feedback:
+            feedback_data = {
+                "rating": message.feedback.rating,
+                "comment": message.feedback.comment,
+            }
+    except MessageFeedback.DoesNotExist:
+        pass
+
     return {
         "id": message.id,
         "role": message.role,
@@ -856,6 +897,7 @@ def _serialize_message(message: Message) -> dict:
         "confidence": message.confidence,
         "retrieval_meta": dict(message.retrieval_meta or {}),
         "created_at": message.created_at.isoformat(),
+        "feedback": feedback_data,
     }
 
 
@@ -1121,3 +1163,36 @@ def _source_label(source: dict) -> str:
     filename = filename.replace("_", " ").replace("-", " ").strip()
     filename = re.sub(r"\s{2,}", " ", filename).strip()
     return filename or raw_name
+
+
+class MessageFeedbackAPIView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, message_id: int):
+        rating = request.data.get("rating")
+        comment = request.data.get("comment", "").strip()
+
+        if rating not in [MessageFeedback.RATING_UP, MessageFeedback.RATING_DOWN]:
+            return Response(
+                {"detail": "La note doit être 'up' ou 'down'."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        message = get_object_or_404(
+            Message.objects.filter(conversation__user=request.user, role=Message.ROLE_ASSISTANT),
+            pk=message_id,
+        )
+
+        feedback, created = MessageFeedback.objects.update_or_create(
+            message=message,
+            defaults={"rating": rating, "comment": comment},
+        )
+
+        return Response(
+            {
+                "detail": "Feedback enregistré avec succès.",
+                "rating": feedback.rating,
+                "comment": feedback.comment,
+            },
+            status=status.HTTP_200_OK,
+        )

@@ -10,7 +10,7 @@ from django.core.files.uploadedfile import SimpleUploadedFile
 from rest_framework import status
 from rest_framework.test import APITestCase
 
-from api_app.models import Conversation
+from api_app.models import Conversation, Message, MessageFeedback
 from api_app.services.conversation_context import build_conversation_context, update_conversation_context
 from api_app.views import _sanitize_answer_text, _sanitize_sources
 from rag_module.evaluation.evaluate_rag import evaluate_context
@@ -1417,3 +1417,224 @@ class BenchmarkApiTests(APITestCase):
         self.assertEqual(payload["precision_at_k"], 0.8)
         self.assertEqual(payload["latency_ms"], 150.0)
         self.assertEqual(payload["top1_source"], "doc1.txt")
+
+
+class AdminConversationsApiTests(APITestCase):
+    def setUp(self):
+        super().setUp()
+        self.admin_user = get_user_model().objects.create_superuser(
+            username="admin-test-aud",
+            email="adminaud@uca.ac.ma",
+            password="Secret12345!",
+        )
+        self.student_user = get_user_model().objects.create_user(
+            username="etudiant-test-aud",
+            email="etudiantaud@uca.ac.ma",
+            password="Secret12345!",
+        )
+        self.conv_active = Conversation.objects.create(
+            user=self.student_user,
+            title="Active Conversation",
+            is_archived=False
+        )
+        self.conv_archived = Conversation.objects.create(
+            user=self.student_user,
+            title="Archived Conversation",
+            is_archived=True
+        )
+        # Create some messages
+        self.msg1 = Message.objects.create(
+            conversation=self.conv_active,
+            role=Message.ROLE_USER,
+            content="Hello"
+        )
+        self.msg2 = Message.objects.create(
+            conversation=self.conv_active,
+            role=Message.ROLE_ASSISTANT,
+            content="Hi",
+            sources=[{"name": "test.txt", "score": 0.9}]
+        )
+        # Add feedback to active msg2
+        self.feedback = MessageFeedback.objects.create(
+            message=self.msg2,
+            rating="up",
+            comment="Excellent explanation."
+        )
+
+    def test_endpoint_requires_admin(self):
+        url = reverse("api-admin-conversations")
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+        self.client.force_login(self.student_user)
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_endpoint_returns_serialized_conversations_with_filters(self):
+        url = reverse("api-admin-conversations")
+        self.client.force_login(self.admin_user)
+
+        # 1. Test status=all
+        response = self.client.get(url, {"status": "all"})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        payload = response.json()
+        self.assertIn("summary", payload)
+        self.assertIn("recent", payload)
+        self.assertEqual(payload["summary"]["conversations_with_feedback"], 1)
+
+        recent = payload["recent"]
+        # Both conversations should be returned
+        self.assertEqual(len(recent), 2)
+        
+        # Check all keys are present in serialized representation
+        conv_obj = next(c for c in recent if c["id"] == self.conv_active.id)
+        self.assertEqual(conv_obj["title"], "Active Conversation")
+        self.assertEqual(conv_obj["feedback_count"], 1)
+        self.assertFalse(conv_obj["is_archived"])
+        self.assertEqual(conv_obj["message_count"], 2)
+        self.assertEqual(conv_obj["assistant_count"], 1)
+        self.assertEqual(conv_obj["source_answer_count"], 1)
+
+        # 2. Test status=active
+        response = self.client.get(url, {"status": "active"})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        recent_active = response.json()["recent"]
+        self.assertEqual(len(recent_active), 1)
+        self.assertEqual(recent_active[0]["id"], self.conv_active.id)
+
+        # 3. Test status=archived
+        response = self.client.get(url, {"status": "archived"})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        recent_archived = response.json()["recent"]
+        self.assertEqual(len(recent_archived), 1)
+        self.assertEqual(recent_archived[0]["id"], self.conv_archived.id)
+
+        # 4. Test has_feedback=1 filter
+        response = self.client.get(url, {"status": "all", "has_feedback": "1"})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        recent_feedback = response.json()["recent"]
+        self.assertEqual(len(recent_feedback), 1)
+        self.assertEqual(recent_feedback[0]["id"], self.conv_active.id)
+
+
+class ConversationManageTests(APITestCase):
+    def setUp(self):
+        super().setUp()
+        self.admin_user = get_user_model().objects.create_superuser(
+            username="admin-test-conv",
+            email="adminconv@uca.ac.ma",
+            password="Secret12345!",
+        )
+        self.student_user = get_user_model().objects.create_user(
+            username="etudiant-test-conv",
+            email="etudiantconv@uca.ac.ma",
+            password="Secret12345!",
+        )
+        self.conv = Conversation.objects.create(
+            user=self.student_user,
+            title="Test Conversation Title"
+        )
+        self.message = Message.objects.create(
+            conversation=self.conv,
+            role=Message.ROLE_USER,
+            content="Hello RAG"
+        )
+
+    def test_manage_endpoints_require_admin(self):
+        self.client.force_login(self.student_user)
+        res_get = self.client.get(reverse("api-conversation-manage", kwargs={"conversation_id": self.conv.id}))
+        self.assertEqual(res_get.status_code, status.HTTP_403_FORBIDDEN)
+        res_post = self.client.post(reverse("api-conversation-manage", kwargs={"conversation_id": self.conv.id}), {"action": "archive"})
+        self.assertEqual(res_post.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_get_conversation_detail_as_admin(self):
+        self.client.force_login(self.admin_user)
+        response = self.client.get(reverse("api-conversation-manage", kwargs={"conversation_id": self.conv.id}))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        payload = response.json()
+        self.assertEqual(payload["title"], "Test Conversation Title")
+        self.assertEqual(len(payload["messages"]), 1)
+        self.assertEqual(payload["messages"][0]["content"], "Hello RAG")
+
+    def test_archive_conversation_as_admin(self):
+        self.client.force_login(self.admin_user)
+        response = self.client.post(
+            reverse("api-conversation-manage", kwargs={"conversation_id": self.conv.id}),
+            {"action": "archive"},
+            format="json"
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.conv.refresh_from_db()
+        self.assertTrue(self.conv.is_archived)
+
+    def test_restore_conversation_as_admin(self):
+        self.conv.is_archived = True
+        self.conv.save()
+        self.client.force_login(self.admin_user)
+        response = self.client.post(
+            reverse("api-conversation-manage", kwargs={"conversation_id": self.conv.id}),
+            {"action": "restore"},
+            format="json"
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.conv.refresh_from_db()
+        self.assertFalse(self.conv.is_archived)
+
+    def test_delete_conversation_as_admin(self):
+        self.client.force_login(self.admin_user)
+        response = self.client.post(
+            reverse("api-conversation-manage", kwargs={"conversation_id": self.conv.id}),
+            {"action": "delete"},
+            format="json"
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertFalse(Conversation.objects.filter(pk=self.conv.id).exists())
+
+
+class MessageFeedbackTests(APITestCase):
+    def setUp(self):
+        super().setUp()
+        self.student_user = get_user_model().objects.create_user(
+            username="etudiant-feedback",
+            email="etudfb@uca.ac.ma",
+            password="Secret12345!",
+        )
+        self.conv = Conversation.objects.create(
+            user=self.student_user,
+            title="Conversation Feedback"
+        )
+        self.msg_user = Message.objects.create(
+            conversation=self.conv,
+            role=Message.ROLE_USER,
+            content="Quelle est l'adresse de l'UCA ?"
+        )
+        self.msg_bot = Message.objects.create(
+            conversation=self.conv,
+            role=Message.ROLE_ASSISTANT,
+            content="L'adresse est..."
+        )
+
+    def test_submit_feedback_unauthenticated(self):
+        url = reverse("api-message-feedback", kwargs={"message_id": self.msg_bot.id})
+        response = self.client.post(url, {"rating": "up"}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_submit_feedback_success(self):
+        self.client.force_login(self.student_user)
+        url = reverse("api-message-feedback", kwargs={"message_id": self.msg_bot.id})
+        
+        response = self.client.post(url, {"rating": "up", "comment": "Super réponse !"}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(MessageFeedback.objects.filter(message=self.msg_bot, rating="up", comment="Super réponse !").exists())
+
+        response = self.client.post(url, {"rating": "down", "comment": "Finalement pas ouf"}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.msg_bot.feedback.refresh_from_db()
+        self.assertEqual(self.msg_bot.feedback.rating, "down")
+        self.assertEqual(self.msg_bot.feedback.comment, "Finalement pas ouf")
+
+    def test_submit_feedback_invalid_rating(self):
+        self.client.force_login(self.student_user)
+        url = reverse("api-message-feedback", kwargs={"message_id": self.msg_bot.id})
+        response = self.client.post(url, {"rating": "invalid"}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)

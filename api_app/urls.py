@@ -24,6 +24,7 @@ from .views import (
     BenchmarkAddQuestionAPIView,
     BenchmarkTestQuestionAPIView,
     ConversationManageAPIView,
+    MessageFeedbackAPIView,
 )
 
 urlpatterns = [
@@ -50,4 +51,5 @@ urlpatterns = [
     path("benchmark/add-question/", BenchmarkAddQuestionAPIView.as_view(), name="api-benchmark-add-question"),
     path("benchmark/test-question/", BenchmarkTestQuestionAPIView.as_view(), name="api-benchmark-test-question"),
     path("conversations/<int:conversation_id>/manage/", ConversationManageAPIView.as_view(), name="api-conversation-manage"),
+    path("chat/messages/<int:message_id>/feedback/", MessageFeedbackAPIView.as_view(), name="api-message-feedback"),
 ]

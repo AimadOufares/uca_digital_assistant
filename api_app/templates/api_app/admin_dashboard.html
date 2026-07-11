@@ -396,28 +396,41 @@
                         <h3>Conversations</h3>
                         <p id="conv-table-info">Chargement...</p>
                     </div>
-                    <div class="actions" style="margin-left: auto; gap: 8px; flex-wrap: wrap;">
+                    <div class="actions" style="margin-left: auto; gap: 12px; flex-wrap: wrap; align-items: center;">
                         <input type="text" id="conv-search-input" class="file-input" placeholder="Rechercher utilisateur ou titre…" style="width: 220px; padding: 6px 10px; font-size: 13px;">
                         <div class="conv-filter-tabs" id="conv-filter-tabs" role="tablist">
                             <button class="conv-tab active" data-status="active" role="tab" aria-selected="true">Actives</button>
                             <button class="conv-tab" data-status="archived" role="tab" aria-selected="false">Archivées</button>
                             <button class="conv-tab" data-status="all" role="tab" aria-selected="false">Toutes</button>
                         </div>
+                        <label style="font-size: 13px; color: var(--uca-text); display: flex; align-items: center; gap: 6px; cursor: pointer; user-select: none;">
+                            <input type="checkbox" id="conv-feedback-only" style="cursor: pointer; margin: 0;">
+                            Avec feedback
+                        </label>
+                        <label class="conv-perpage-label" for="conv-perpage-select">
+                            Lignes :
+                            <select id="conv-perpage-select" class="conv-perpage-select">
+                                <option value="10">10</option>
+                                <option value="25" selected>25</option>
+                                <option value="50">50</option>
+                                <option value="100">100</option>
+                            </select>
+                        </label>
                         <button class="uca-btn uca-btn-secondary" type="button" id="conv-refresh-btn" title="Actualiser">↺ Actualiser</button>
                     </div>
                 </div>
                 <div class="table-wrap">
-                    <table>
+                    <table id="conv-audit-table" class="conv-clickable-table">
                         <thead>
                             <tr>
                                 <th>Utilisateur</th>
                                 <th>Titre</th>
-                                <th>Messages</th>
-                                <th>Réponses RAG</th>
-                                <th>Taux sources</th>
+                                <th style="text-align:center;">Messages</th>
+                                <th style="text-align:center;">Réponses RAG</th>
+                                <th style="text-align:center;">Taux sources</th>
                                 <th>Dernier message</th>
                                 <th>Statut</th>
-                                <th>Actions</th>
+                                <th title="Cliquez sur une ligne pour inspecter la conversation">Supprimer</th>
                             </tr>
                         </thead>
                         <tbody id="conversation-audit-table-body">
@@ -438,36 +451,157 @@
                 <div>
                     <p class="section-kicker">Maintenance</p>
                     <h2 id="actions-title">Actions administrateur</h2>
+                    <p class="section-desc">Opérations de maintenance, reindexation et audit qualité déclenchables depuis l'interface.</p>
                 </div>
             </div>
             <div class="action-grid action-grid-4">
-                <article class="panel stack">
-                    <h3>Rebuild</h3>
-                    <p>Rejoue processing + indexation publiee pour le corpus drive.</p>
-                    <button class="uca-btn uca-btn-secondary" type="button" id="rebuild-drive-btn-bottom">Relancer rebuild drive</button>
+                <article class="panel stack" style="border-top: 4px solid var(--uca-blue);">
+                    <div style="display: flex; align-items: center; gap: 8px;">
+                        <span style="font-size: 1.25rem;">♻</span>
+                        <h3 style="margin: 0;">Rebuild incrémental</h3>
+                    </div>
+                    <p>Traite seulement les documents nouveaux ou modifiés, puis publie le nouvel index RAG. Opération longue.</p>
+                    <div style="display:flex; gap:8px; flex-wrap:wrap; margin-top:auto; padding-top: 10px;">
+                        <button class="uca-btn uca-btn-secondary" type="button" id="rebuild-drive-btn-bottom">Lancer rebuild</button>
+                        <button class="uca-btn uca-btn-secondary-outline" type="button" id="rebuild-zero-btn-bottom" title="Vide le cache et relance depuis zéro">Rebuild à zéro</button>
+                    </div>
                 </article>
-                <article class="panel stack">
-                    <h3>Benchmark drive</h3>
-                    <p>Regenere le dernier rapport d'evaluation metier.</p>
-                    <button class="uca-btn uca-btn-secondary" type="button" id="evaluate-drive-btn-bottom">Relancer benchmark drive</button>
+                <article class="panel stack" style="border-top: 4px solid #137333;">
+                    <div style="display: flex; align-items: center; gap: 8px;">
+                        <span style="font-size: 1.25rem;">📊</span>
+                        <h3 style="margin: 0;">Audit données</h3>
+                    </div>
+                    <p>Analyse la couverture documentaire, la qualité brute et la distribution des services dans le corpus indexé.</p>
+                    <div style="display:flex; gap:8px; flex-wrap:wrap; margin-top:auto; padding-top: 10px;">
+                        <button class="uca-btn uca-btn-secondary" type="button" id="run-data-audit-btn-maint" data-audit-task="data_audit">Data audit</button>
+                        <button class="uca-btn uca-btn-secondary-outline" type="button" id="run-raw-quality-btn-maint" data-audit-task="raw_quality">Raw quality</button>
+                    </div>
+                    <div style="margin-top:10px; display: flex; flex-direction: column; gap: 4px;">
+                        <div style="display: flex; justify-content: space-between; align-items: center; font-size: 11px; color: var(--uca-muted);">
+                            <span>Console d'audit :</span>
+                            <span id="clear-maint-console-btn" style="cursor: pointer; text-decoration: underline; color: var(--uca-blue);">Effacer</span>
+                        </div>
+                        <div id="maint-audit-console" class="audit-console" style="max-height: 120px;" aria-live="polite">Aucun audit lancé.</div>
+                    </div>
                 </article>
-                <article class="panel stack">
-                    <h3>Pipeline incremental</h3>
-                    <p>Le rebuild drive traite seulement les documents nouveaux ou modifies avant de republier l'index.</p>
+                <article class="panel stack" style="border-top: 4px solid #f29900;">
+                    <div style="display: flex; align-items: center; gap: 8px;">
+                        <span style="font-size: 1.25rem;">🎯</span>
+                        <h3 style="margin: 0;">Benchmark drive</h3>
+                    </div>
+                    <p>Mesure si les sources retrouvées correspondent aux services attendus. Génère un rapport de précision retrieval.</p>
+                    <div style="display:flex; gap:8px; flex-wrap:wrap; margin-top:auto; padding-top: 10px;">
+                        <button class="uca-btn uca-btn-secondary" type="button" id="evaluate-drive-btn-bottom">Lancer benchmark</button>
+                        <a class="uca-btn uca-btn-secondary-outline" href="/api/reports/rag_eval/latest/" target="_blank" rel="noopener">Voir rapport</a>
+                    </div>
                 </article>
-                <article class="panel stack">
-                    <h3>Evaluation</h3>
-                    <p>Le benchmark drive mesure si les sources retrouvees correspondent aux services attendus.</p>
+                <article class="panel stack" style="border-top: 4px solid #1a73e8;">
+                    <div style="display: flex; align-items: center; gap: 8px;">
+                        <span style="font-size: 1.25rem;">⚙</span>
+                        <h3 style="margin: 0;">Index actif</h3>
+                    </div>
+                    <div class="metrics-list" id="admin-index-detail" style="margin-top:4px;">
+                        <div class="metric-row" style="padding: 3px 0;"><span>Build ID</span><strong id="admin-index-build-id">-</strong></div>
+                        <div class="metric-row" style="padding: 3px 0;"><span>Publié le</span><strong id="admin-index-date">-</strong></div>
+                        <div class="metric-row" style="padding: 3px 0;"><span>Chunks</span><strong id="admin-index-chunks">-</strong></div>
+                        <div class="metric-row" style="padding: 3px 0;"><span>Sources</span><strong id="admin-index-sources">-</strong></div>
+                        <div class="metric-row" style="padding: 3px 0;"><span>Embedding</span><strong id="admin-index-embedding" style="font-size: 10px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">-</strong></div>
+                    </div>
+                    <a class="uca-btn uca-btn-secondary-outline" href="/api/reports/data_audit/latest/" target="_blank" rel="noopener" style="margin-top:auto; text-align: center;">Voir audit complet</a>
                 </article>
-                <article class="panel stack">
-                    <h3>Index actif</h3>
-                    <p id="admin-index-note">Chargement du build actif...</p>
-                </article>
+            </div>
+            
+            <div id="maint-action-status" class="notice" style="margin-top: 16px; display:none; border: 1px solid var(--uca-border); border-radius: var(--uca-radius); background: var(--uca-surface-muted); padding: 12px 16px;" aria-live="polite">
+                <div style="display: flex; align-items: center; gap: 10px;">
+                    <span class="status-dot-pulse" style="width: 8px; height: 8px; border-radius: 50%; background-color: #1a73e8; display: inline-block; animation: pulse-blue 1.5s infinite ease-in-out;"></span>
+                    <strong style="font-size: 13px; color: var(--uca-blue-dark);">Statut de la dernière action :</strong>
+                    <span id="maint-action-status-text" style="font-size: 13px; color: var(--uca-text);"></span>
+                </div>
             </div>
         </section>
     </main>
     </div>
 
-    <script src="{% static 'api_app/admin_dashboard.js' %}?v=20260708-conv-audit-v2" defer></script>
+    <!-- Conversation Detail Panel (Drawer style) -->
+    <div id="conv-detail-drawer" class="conv-drawer" aria-hidden="true">
+        <div class="conv-drawer-backdrop" id="conv-drawer-backdrop"></div>
+        <div class="conv-drawer-content">
+            <div class="conv-drawer-header">
+                <div>
+                    <h3 id="drawer-conv-title">Conversation</h3>
+                    <p id="drawer-conv-subtitle">Utilisateur : -</p>
+                </div>
+                <div style="display: flex; gap: 8px; align-items: center; margin-left: auto; margin-right: 12px;">
+                    <button type="button" class="uca-btn uca-btn-secondary-outline" id="drawer-archive-btn" style="padding: 4px 10px; font-size: 12px; display: none;"></button>
+                </div>
+                <button type="button" class="conv-drawer-close" id="conv-drawer-close" aria-label="Fermer">&times;</button>
+            </div>
+            <div class="conv-drawer-body" id="conv-drawer-messages">
+                <!-- Messages will be loaded here -->
+            </div>
+        </div>
+    </div>
+
+    <!-- Health Check Status Dialog Modal -->
+    <div id="health-modal" class="conv-drawer" aria-hidden="true">
+        <div class="conv-drawer-backdrop" id="health-modal-backdrop"></div>
+        <div class="conv-drawer-content" style="max-width: 420px;">
+            <div class="conv-drawer-header">
+                <div>
+                    <h3 style="margin: 0; display: flex; align-items: center; gap: 8px;">
+                        <span>🩺</span> Diagnostics Santé
+                    </h3>
+                    <p style="margin: 4px 0 0 0; font-size: 12px; color: var(--uca-muted);">Statut d'exécution et connectivité</p>
+                </div>
+                <button type="button" class="conv-drawer-close" id="health-modal-close" aria-label="Fermer">&times;</button>
+            </div>
+            <div class="conv-drawer-body" style="padding: 20px; display: flex; flex-direction: column; gap: 16px;">
+                <!-- Global Health Alert Box -->
+                <div id="health-global-box" class="notice" style="border: 1px solid var(--uca-border); border-radius: var(--uca-radius); padding: 12px; display: flex; align-items: center; gap: 10px; margin-bottom: 0;">
+                    <span id="health-global-dot" style="width: 10px; height: 10px; border-radius: 50%; background-color: var(--uca-muted); display: inline-block;"></span>
+                    <strong id="health-global-title" style="font-size: 13px; color: var(--uca-blue-dark);">Chargement...</strong>
+                </div>
+
+                <!-- Diagnostics List -->
+                <div class="metrics-list" style="display: flex; flex-direction: column; gap: 12px;">
+                    <!-- Database -->
+                    <div style="display: flex; justify-content: space-between; align-items: center; padding: 10px 12px; border: 1px solid var(--uca-border); border-radius: var(--uca-radius); background: var(--uca-surface-muted);">
+                        <div style="display: flex; flex-direction: column;">
+                            <span style="font-size: 13px; font-weight: 600; color: var(--uca-blue-dark);">Base de données</span>
+                            <span style="font-size: 11px; color: var(--uca-muted);">Liaisons PostgreSQL/SQLite</span>
+                        </div>
+                        <span id="health-status-db" class="status-pill status-neutral" style="font-size: 11px; padding: 2px 8px; border-radius: 12px;">Inconnu</span>
+                    </div>
+
+                    <!-- Vector Store -->
+                    <div style="display: flex; justify-content: space-between; align-items: center; padding: 10px 12px; border: 1px solid var(--uca-border); border-radius: var(--uca-radius); background: var(--uca-surface-muted);">
+                        <div style="display: flex; flex-direction: column;">
+                            <span style="font-size: 13px; font-weight: 600; color: var(--uca-blue-dark);">Index Vectoriel</span>
+                            <span style="font-size: 11px; color: var(--uca-muted);">Index FAISS chargé en RAM</span>
+                        </div>
+                        <span id="health-status-vector" class="status-pill status-neutral" style="font-size: 11px; padding: 2px 8px; border-radius: 12px;">Inconnu</span>
+                    </div>
+
+                    <!-- LLM Connectivity -->
+                    <div style="display: flex; justify-content: space-between; align-items: center; padding: 10px 12px; border: 1px solid var(--uca-border); border-radius: var(--uca-radius); background: var(--uca-surface-muted);">
+                        <div style="display: flex; flex-direction: column;">
+                            <span style="font-size: 13px; font-weight: 600; color: var(--uca-blue-dark);">Fournisseur LLM</span>
+                            <span style="font-size: 11px; color: var(--uca-muted);">API Chat Model ready</span>
+                        </div>
+                        <span id="health-status-llm" class="status-pill status-neutral" style="font-size: 11px; padding: 2px 8px; border-radius: 12px;">Inconnu</span>
+                    </div>
+                </div>
+
+                <!-- Actions -->
+                <div style="display: flex; gap: 10px; margin-top: auto; padding-top: 16px; border-top: 1px solid var(--uca-border);">
+                    <button class="uca-btn uca-btn-secondary" type="button" id="health-modal-refresh" style="flex: 1; padding: 8px; font-size: 13px;">Re-tester</button>
+                    <button class="uca-btn uca-btn-secondary-outline" type="button" id="health-modal-close-btn" style="flex: 1; padding: 8px; font-size: 13px;">Fermer</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+
+    <script src="{% static 'api_app/admin_dashboard.js' %}?v=20260711-maintenance-actions" defer></script>
 </body>
 </html>

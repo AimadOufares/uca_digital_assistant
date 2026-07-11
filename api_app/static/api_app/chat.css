@@ -713,6 +713,9 @@ html, body {
     gap: 16px;
     align-items: flex-end;
 }
+.typing-indicator[hidden] {
+    display: none !important;
+}
 .dots-wrapper {
     padding: 16px 20px;
     border-radius: 20px;
@@ -939,4 +942,110 @@ html, body {
     .input-footer {
         align-items: flex-start;
     }
+}
+
+/* ── Feedback Widget ──────────────────────────────────────── */
+.message-feedback-widget {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 10px;
+}
+
+.feedback-btn {
+    background: transparent;
+    border: 1.5px solid transparent;
+    border-radius: 8px;
+    padding: 4px 8px;
+    font-size: 16px;
+    cursor: pointer;
+    opacity: 0.45;
+    transition: opacity 0.2s, transform 0.2s, border-color 0.2s;
+    line-height: 1;
+}
+.feedback-btn:hover {
+    opacity: 0.85;
+    transform: scale(1.15);
+}
+.feedback-btn.is-active {
+    opacity: 1;
+    transform: scale(1.2);
+    border-color: var(--uca-blue);
+    background: rgba(26, 90, 160, 0.08);
+}
+.feedback-btn.is-dimmed {
+    opacity: 0.2;
+}
+
+.feedback-thanks {
+    font-size: 11px;
+    color: var(--uca-muted);
+    opacity: 0;
+    max-height: 0;
+    overflow: hidden;
+    transition: opacity 0.3s, max-height 0.3s;
+}
+.feedback-thanks.is-visible {
+    opacity: 1;
+    max-height: 30px;
+}
+
+/* ── Feedback Comment Row ─────────────────────────────────── */
+.feedback-comment-row {
+    display: grid;
+    grid-template-rows: 0fr;
+    opacity: 0;
+    transition: grid-template-rows 0.3s ease, opacity 0.3s ease;
+    margin-top: 0;
+}
+.feedback-comment-row > * {
+    overflow: hidden;
+}
+.feedback-comment-row.is-visible {
+    grid-template-rows: 1fr;
+    opacity: 1;
+    margin-top: 8px;
+}
+
+.feedback-comment-input {
+    width: 100%;
+    resize: vertical;
+    border: 1.5px solid var(--uca-glass-border);
+    border-radius: 10px;
+    padding: 8px 12px;
+    font-size: 13px;
+    font-family: inherit;
+    color: var(--uca-text);
+    background: var(--uca-glass-bg, #f8f9fb);
+    outline: none;
+    transition: border-color 0.2s;
+    box-sizing: border-box;
+}
+.feedback-comment-input:focus {
+    border-color: var(--uca-blue);
+}
+.feedback-comment-input:read-only {
+    background: transparent;
+    border-color: transparent;
+    color: var(--uca-muted);
+    cursor: default;
+    resize: none;
+}
+
+.feedback-comment-send {
+    margin-top: 6px;
+    padding: 6px 16px;
+    border: none;
+    border-radius: 8px;
+    background: var(--uca-blue);
+    color: #fff;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.2s, transform 0.15s;
+    display: block;
+}
+.feedback-comment-send:hover {
+    background: var(--uca-blue-dark, #1347a0);
+    transform: translateY(-1px);
 }

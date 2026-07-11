@@ -274,6 +274,131 @@ function appendMessage(role, text, options = {}) {
             content.appendChild(createTextNode("div", "message-meta", `Confiance: ${options.confidence}`));
         }
         appendSourceList(content, options.sources || []);
+
+        if (options.id) {
+            // --- Rating row ---
+            const feedbackWidget = document.createElement("div");
+            feedbackWidget.className = "message-feedback-widget";
+
+            const upBtn = document.createElement("button");
+            upBtn.type = "button";
+            upBtn.className = "feedback-btn btn-up";
+            upBtn.innerHTML = "👍";
+            upBtn.title = "Réponse utile";
+
+            const downBtn = document.createElement("button");
+            downBtn.type = "button";
+            downBtn.className = "feedback-btn btn-down";
+            downBtn.innerHTML = "👎";
+            downBtn.title = "Réponse non utile";
+
+            const thanksSpan = document.createElement("span");
+            thanksSpan.className = "feedback-thanks";
+            thanksSpan.textContent = "Merci pour votre retour !";
+
+            feedbackWidget.append(upBtn, downBtn, thanksSpan);
+
+            // --- Comment row (hidden by default) ---
+            const commentRow = document.createElement("div");
+            commentRow.className = "feedback-comment-row";
+
+            const commentInput = document.createElement("textarea");
+            commentInput.className = "feedback-comment-input";
+            commentInput.placeholder = "Ajoutez un commentaire (optionnel)…";
+            commentInput.rows = 2;
+            commentInput.maxLength = 500;
+
+            const sendCommentBtn = document.createElement("button");
+            sendCommentBtn.type = "button";
+            sendCommentBtn.className = "feedback-comment-send";
+            sendCommentBtn.textContent = "Envoyer";
+
+            commentRow.append(commentInput, sendCommentBtn);
+
+            // --- Restore existing feedback on history load ---
+            let currentRating = null;
+            if (options.feedback) {
+                currentRating = options.feedback.rating;
+                if (currentRating === "up") {
+                    upBtn.classList.add("is-active");
+                } else if (currentRating === "down") {
+                    downBtn.classList.add("is-active");
+                }
+                if (options.feedback.comment) {
+                    commentInput.value = options.feedback.comment;
+                    commentInput.readOnly = true;
+                    sendCommentBtn.style.display = "none";
+                    commentRow.classList.add("is-visible");
+                }
+            }
+
+            // --- Submit rating + show comment box ---
+            const submitRating = async (rating) => {
+                try {
+                    const csrfToken = getCsrfToken();
+                    const res = await fetch(`/api/chat/messages/${options.id}/feedback/`, {
+                        method: "POST",
+                        headers: {
+                            "Content-Type": "application/json",
+                            "X-CSRFToken": csrfToken,
+                        },
+                        body: JSON.stringify({ rating }),
+                    });
+                    if (res.ok) {
+                        currentRating = rating;
+                        upBtn.classList.toggle("is-active", rating === "up");
+                        upBtn.classList.toggle("is-dimmed", rating !== "up");
+                        downBtn.classList.toggle("is-active", rating === "down");
+                        downBtn.classList.toggle("is-dimmed", rating !== "down");
+                        // Show comment field
+                        commentInput.readOnly = false;
+                        sendCommentBtn.style.display = "";
+                        commentRow.classList.add("is-visible");
+                        commentInput.focus();
+                    }
+                } catch (err) {
+                    console.error("Feedback submission failed", err);
+                }
+            };
+
+            // --- Submit comment ---
+            const submitComment = async () => {
+                const comment = commentInput.value.trim();
+                if (!currentRating) return;
+                try {
+                    const csrfToken = getCsrfToken();
+                    const res = await fetch(`/api/chat/messages/${options.id}/feedback/`, {
+                        method: "POST",
+                        headers: {
+                            "Content-Type": "application/json",
+                            "X-CSRFToken": csrfToken,
+                        },
+                        body: JSON.stringify({ rating: currentRating, comment }),
+                    });
+                    if (res.ok) {
+                        commentInput.readOnly = true;
+                        sendCommentBtn.style.display = "none";
+                        thanksSpan.classList.add("is-visible");
+                        setTimeout(() => thanksSpan.classList.remove("is-visible"), 3000);
+                    }
+                } catch (err) {
+                    console.error("Comment submission failed", err);
+                }
+            };
+
+            upBtn.addEventListener("click", () => submitRating("up"));
+            downBtn.addEventListener("click", () => submitRating("down"));
+            sendCommentBtn.addEventListener("click", submitComment);
+            commentInput.addEventListener("keydown", (e) => {
+                if (e.key === "Enter" && !e.shiftKey) {
+                    e.preventDefault();
+                    submitComment();
+                }
+            });
+
+            content.appendChild(feedbackWidget);
+            content.appendChild(commentRow);
+        }
     }
 
     wrapper.appendChild(content);
@@ -324,10 +449,10 @@ function renderWelcomeState() {
     scrollToBottom();
 }
 
-function setLoadingState(isLoading) {
+function setLoadingState(isLoading, showTypingIndicator = false) {
     sendButton.disabled = isLoading;
     messageInput.disabled = isLoading;
-    typingIndicator.hidden = !isLoading;
+    typingIndicator.hidden = !showTypingIndicator;
     if (newConversationButton) {
         newConversationButton.disabled = isLoading;
     }
@@ -347,7 +472,7 @@ async function submitMessage(message) {
     messageInput.value = "";
     autoResizeInput();
     updateMessageCounter();
-    setLoadingState(true);
+    setLoadingState(true, true);
 
     try {
         const csrfToken = getCsrfToken();
@@ -383,6 +508,7 @@ async function submitMessage(message) {
         setConversationTitle(payload.conversation_title || "Nouvelle conversation");
         renderConversationList(payload.conversations || []);
         appendMessage("assistant", answer, {
+            id: payload.message_id,
             confidence: payload.confidence || "",
             sources: payload.sources || [],
         });
@@ -429,8 +555,10 @@ async function loadConversationHistory(conversationId = null) {
         } else {
             messages.forEach((message) => {
                 appendMessage(message.role, message.content || "", {
+                    id: message.id,
                     confidence: message.confidence || "",
                     sources: message.sources || [],
+                    feedback: message.feedback || null,
                 });
             });
         }
